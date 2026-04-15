@@ -611,8 +611,8 @@ static void install_secp256k1_sq_patch(void) {
 
     };
 
-    patch_ucode(0x7c00, patch, ARRAY_SZ(patch));
-    hook_match_and_patch(0, 0x0cd8, 0x7c00);
+    patch_ucode(0x7d16, patch, ARRAY_SZ(patch));
+    hook_match_and_patch(0, 0x0618, 0x7d16);
     printf("secp256k1_sq patch installed: %d triads at U7c00\n",
            (int)ARRAY_SZ(patch));
 }
@@ -846,14 +846,14 @@ static int verify_all(void) {
 
 static inline uint64_t rdtsc_start(void) {
     uint32_t lo, hi;
-    asm volatile("cpuid\n\trdtsc" : "=a"(lo), "=d"(hi) :: "rbx", "rcx");
+    asm volatile("cpuid\n\trdtsc" : "=a"(lo), "=d"(hi) :: "rbx", "rcx", "memory");
     return ((uint64_t)hi << 32) | lo;
 }
 
 static inline uint64_t rdtsc_end(void) {
     uint32_t lo, hi;
-    asm volatile("rdtscp" : "=a"(lo), "=d"(hi) :: "rcx");
-    asm volatile("cpuid" ::: "rax", "rbx", "rcx", "rdx");
+    asm volatile("rdtscp" : "=a"(lo), "=d"(hi) :: "rcx", "memory");
+    asm volatile("cpuid" ::: "rax", "rbx", "rcx", "rdx", "memory");
     return ((uint64_t)hi << 32) | lo;
 }
 

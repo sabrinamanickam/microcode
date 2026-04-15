@@ -1,27 +1,28 @@
 /*
- * asm_op_poly1305.c — fe_sq for poly1305 (2^130-5) via microcode
+ * asm_op_poly1305_mul.c — fe_mul for poly1305 (2^130-5) via microcode
  *
  * Field: GF(2^130 - 5),  3 limbs,  eval = z[0] + z[1]*2^44 + z[2]*2^87
  * Limb widths: 44, 43, 43 bits
  * Reduction constant: R = 5
  *
  * Products per limb:
- *   c0 = a0*a0     + (2*a1)*(10*a2)    2 MACs, carry@44
- *   c1 = (2*a0)*a1 + a2*(5*a2)         2 MACs, carry@43
- *   c2 = (2*a0)*a2 + a1*(2*a1)         2 MACs, carry@43
+ *   c0 = a0*b0     + a1*(10*b2) + a2*(10*b1)   3 MACs, carry@44
+ *   c1 = a0*b1     + a1*b0      + a2*(5*b2)    3 MACs, carry@43
+ *   c2 = a0*b2     + a1*(2*b1)  + a2*b0        3 MACs, carry@43
  *   Reduce: out[0] += carry * 5, re-propagate [0→1→2]
  *
  * Register convention (caller → microcode):
  *   RDI = a0      RSI = a1      R12 = a2
- *   R15 = 2*a0    R13 = 2*a1    R14 = 5*a2    R11 = 10*a2
- *   RAX = 0       R8 = 0
+ *   R15 = b0      R13 = b1      R11 = b2
+ *   R10 = 10*b2   R9 = 10*b1    R14 = 5*b2   RBX = 2*b1
+ *   RAX = 0       R8 = 0        RDX = b0 (copy for first MUL)
  *
- * Output: RDI = h0   R9 = h1   R10 = h2
+ * Output: R10 = h0   R9 = h1   RDI = h2
  *
- * Estimated: ~32 triads
+ * Estimated: ~39 triads
  *
- * Build:  make PROG=asm_op_poly1305
- * Run:    sudo taskset -c 0 ./asm_op_poly1305_static
+ * Build:  make PROG=asm_op_poly1305_mul
+ * Run:    sudo taskset -c 0 ./asm_op_poly1305_mul_static
  */
 
 #define _GNU_SOURCE
@@ -39,126 +40,129 @@
 
 /* ── microcode patch ──────────────────────────────────────────── */
 
-static void install_poly1305_sq_patch(void) {
+static void install_fe_mul_patch(void) {
     ucode_t patch[] = {
 
-    /* ═══ LIMB c0 = a0*a0 + (2*a1)*(10*a2)  [W=44, S=20] ═══ */
+    /* ═══ LIMB c0 = a0*b0 + a1*(10*b2) + a2*(10*b1)  [W=44, S=20] ═══ */
 
-    /*  MAC_HEAD: MUL(RDI, RDI) → a0 * a0
-     *  sA=RDI(a0), sB=RDI(a0) → RDI overwritten with lo, becomes out[0] later */
-    MAC_HEAD(RDI, RDI),
-    /*  MAC_NEXT: save hi[0]→TMP4, MUL(R13, R11) → 2*a1 * 10*a2 = 20*a1*a2
-     *  R13(2*a1) read-only, R11(10*a2) overwritten with lo */
-    MAC_NEXT(TMP4, R13, R11, TMP2, TMP0),
-    /*  extract carry@44, output limb → RDI */
-    MAC_TAIL_2(TMP0, RDI, 44, 20),
+    /* RDX already = b0 (set by caller).  MAC_HEAD: a0 * b0 */
+    MAC_HEAD(RDI, RDX),
+    /* a1 * 10*b2  (R10 = 10*b2, last use → consumed) */
+    MAC_NEXT(TMP4, RSI, R10, TMP2, TMP0),
+    /* a2 * 10*b1  (R9 = 10*b1, last use → consumed) */
+    MAC_NEXT(TMP5, R12, R9, TMP0, TMP2),
+    /* extract carry@44, output → R10  (reuse freed register) */
+    MAC_TAIL_3(TMP2, R10, 44, 20),
 
     /* ═══ c0 → c1 transition [S=20] ═══
-     * c1 first product: (2*a0)*a1.  Can't MUL into RSI (need a1 for limb 2).
-     * Copy a1 to RBX, then MUL(RCX, R15, RBX): R15 preserved, RBX = lo.
-     */
-    LIMB_LINK(20, R15, RBX, ZEROEXT_DSZ64_DR(RBX, RSI), NOP),
+     * c1 first product: a0*b1.  R13=b1, last use → direct srcB.
+     * Prep: copy b0 → RDX for c1 product 2 (a1*b0). */
+    LIMB_LINK(20, RDI, R13, ZEROEXT_DSZ64_DR(RDX, R15), NOP),
 
-    /* ═══ LIMB c1 = (2*a0)*a1 + a2*(5*a2)  [W=43, S=21] ═══ */
+    /* ═══ LIMB c1 = a0*b1 + a1*b0 + a2*(5*b2)  [W=43, S=21] ═══ */
 
-    /* RBX = lo(2*a0 * a1) from the LINK's MUL */
-    MAC_RESUME(RBX),
-    /* MAC_NEXT: save hi[0]→TMP4, MUL(R12, R14) → a2 * 5*a2
-     * R14(5*a2) overwritten with lo */
-    MAC_NEXT(TMP4, R12, R14, TMP2, TMP0),
-    /* extract carry@43, output → R9 */
-    MAC_TAIL_2(TMP0, R9, 43, 21),
+    /* R13 = lo(a0 * b1) from the LINK's MUL */
+    MAC_RESUME(R13),
+    /* a1 * b0  (RDX = b0, copied in LINK prep) */
+    MAC_NEXT(TMP4, RSI, RDX, TMP2, TMP0),
+    /* a2 * 5*b2  (R14 = 5*b2, last use → consumed) */
+    MAC_NEXT(TMP5, R12, R14, TMP0, TMP2),
+    /* extract carry@43, output → R9  (reuse freed register) */
+    MAC_TAIL_3(TMP2, R9, 43, 21),
 
     /* ═══ c1 → c2 transition [S=21] ═══
-     * Next limb needs: (2*a0)*a2 first.
-     * MUL(RCX, R15, R12): R15(2*a0) preserved, R12(a2) → lo.
-     * R12 not needed after limb 2, so clobbering is fine.
-     * Also prep R13 = 2*a1 for second product: ADD(R13, RSI, RSI). */
-    LIMB_LINK(21, R15, R12, ADD_DSZ64_DRR(R13, RSI, RSI), NOP),
+     * c2 first product: a0*b2.  R11=b2, last use → direct srcB. */
+    LIMB_LINK(21, RDI, R11, NOP, NOP),
 
-    /* ═══ LIMB c2 = (2*a0)*a2 + a1*(2*a1)  [W=43, S=21] ═══ */
+    /* ═══ LIMB c2 = a0*b2 + a1*(2*b1) + a2*b0  [W=43, S=21] ═══ */
 
-    /* R12 = lo(2*a0 * a2) from the LINK's MUL */
-    MAC_RESUME(R12),
-    /* MAC_NEXT: save hi[0]→TMP4, MUL(RSI, R13) → a1 * 2*a1
-     * R13(2*a1) overwritten with lo */
-    MAC_NEXT(TMP4, RSI, R13, TMP2, TMP0),
-    /* extract carry@43, output → R10 */
-    MAC_TAIL_2(TMP0, R10, 43, 21),
+    /* R11 = lo(a0 * b2) from the LINK's MUL */
+    MAC_RESUME(R11),
+    /* a1 * 2*b1  (RBX = 2*b1, last use → consumed) */
+    MAC_NEXT(TMP4, RSI, RBX, TMP2, TMP0),
+    /* a2 * b0  (R15 = b0, last use → consumed) */
+    MAC_NEXT(TMP5, R12, R15, TMP0, TMP2),
+    /* extract carry@43, output → RDI  (a0 no longer needed) */
+    MAC_TAIL_3(TMP2, RDI, 43, 21),
 
     /* ═══ FINAL REDUCTION: carry * 5 → limb0, re-propagate ═══ */
 
-    /* combine lo+hi carry from last limb [S=21] */
     REDUCE_COMBINE(21),
-    /* TMP0 = carry.  Multiply by 5. */
     REDUCE_MUL(5),
-    /* out[0] += carry * 5 */
-    REDUCE_ADD(RDI),
-    /* re-propagate: out[0] → out[1] */
-    REPROP(RDI, 44, 20, R9),
-    REPROP_MASK(RDI, 20, NOP_SEQWORD),
-    /* re-propagate: out[1] → out[2] */
-    REPROP(R9, 43, 21, R10),
+    REDUCE_ADD(R10),
+    REPROP(R10, 44, 20, R9),
+    REPROP_MASK(R10, 20, NOP_SEQWORD),
+    REPROP(R9, 43, 21, RDI),
     REPROP_MASK(R9, 21, END_SEQWORD)
 
     };
 
     patch_ucode(0x7c00, patch, ARRAY_SZ(patch));
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
-    printf("poly1305_sq patch installed: %d triads at U7c00\n",
+    printf("poly1305_mul patch installed: %d triads at U7c00\n",
            (int)ARRAY_SZ(patch));
 }
 
-/* ── fe_sq via microcode ─────────────────────────────────────── */
+/* ── fe_mul via microcode ─────────────────────────────────────── */
 
-static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
-    register uint64_t *_in  asm("rcx") = (uint64_t *)a;
+static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    register uint64_t *_a   asm("rcx") = (uint64_t *)a;
+    register uint64_t *_b   asm("rbx") = (uint64_t *)b;
     register uint64_t *_out asm("r15") = out;
 
     asm volatile(
         "push r15\n\t"
 
-        /* load 3 limbs */
+        /* load a[0..2] from rcx */
         "mov rdi, [rcx]\n\t"
         "mov rsi, [rcx + 8]\n\t"
         "mov r12, [rcx + 16]\n\t"
 
+        /* load b[0..2] from rbx */
+        "mov r15, [rbx]\n\t"       /* b0 */
+        "mov r13, [rbx + 8]\n\t"   /* b1 */
+        "mov r11, [rbx + 16]\n\t"  /* b2 */
+
         /* precompute */
-        "lea r15, [rdi + rdi]\n\t"       /* 2*a0 */
-        "lea r13, [rsi + rsi]\n\t"       /* 2*a1 */
-        "imul r14, r12, 5\n\t"           /* 5*a2 */
-        "lea r11, [r14 + r14]\n\t"       /* 10*a2 */
+        "imul r14, r11, 5\n\t"     /* 5*b2 */
+        "lea r10, [r14 + r14]\n\t" /* 10*b2 */
+        "imul r9, r13, 10\n\t"     /* 10*b1 */
+        "lea rbx, [r13 + r13]\n\t" /* 2*b1  (clobbers b pointer, must be last) */
 
         /* clear accumulators */
         "xor eax, eax\n\t"
         "xor r8d, r8d\n\t"
 
+        /* copy b0 → RDX for first MUL (a0*b0) */
+        "mov rdx, r15\n\t"
+
         /* fire microcode */
         "vmwrite rcx, rdx\n\t"
 
-        /* store results */
+        /* store results: R10=h0, R9=h1, RDI=h2 */
         "pop rcx\n\t"
-        "mov [rcx],      rdi\n\t"
+        "mov [rcx],      r10\n\t"
         "mov [rcx + 8],  r9\n\t"
-        "mov [rcx + 16], r10\n\t"
+        "mov [rcx + 16], rdi\n\t"
 
-        : "+r"(_in), "+r"(_out)
+        : "+r"(_a), "+r"(_b), "+r"(_out)
         :
-        : "rax", "rbx", "rdx", "rsi", "rdi",
+        : "rax", "rdx", "rsi", "rdi",
           "r8", "r9", "r10", "r11", "r12", "r13", "r14",
           "memory", "cc"
     );
 }
 
-/* ── fe_sq native C ──────────────────────────────────────────── */
+/* ── fe_mul native C ──────────────────────────────────────────── */
 
-static void fe_sq_native(const uint64_t *a, uint64_t *out) {
-    uint64_t a0 = a[0], a1 = a[1], a2 = a[2];
-    uint64_t r2 = a2 * 5;
+static void fe_mul_native(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    uint64_t a0=a[0], a1=a[1], a2=a[2];
+    uint64_t b0=b[0], b1=b[1], b2=b[2];
+    uint64_t r2 = b2 * 5;
 
-    __uint128_t c0 = (__uint128_t)a0*a0 + (__uint128_t)a1*(r2*4);
-    __uint128_t c1 = (__uint128_t)(2*a0)*a1 + (__uint128_t)a2*r2;
-    __uint128_t c2 = (__uint128_t)(2*a0)*a2 + (__uint128_t)a1*(2*a1);
+    __uint128_t c0 = (__uint128_t)a0*b0 + (__uint128_t)a1*(r2*2) + (__uint128_t)a2*(b1*10);
+    __uint128_t c1 = (__uint128_t)a0*b1 + (__uint128_t)a1*b0     + (__uint128_t)a2*r2;
+    __uint128_t c2 = (__uint128_t)a0*b2 + (__uint128_t)a1*(2*b1) + (__uint128_t)a2*b0;
 
     uint64_t carry;
     carry = (uint64_t)(c0 >> 44); out[0] = (uint64_t)c0 & MASK44;
@@ -173,33 +177,31 @@ static void fe_sq_native(const uint64_t *a, uint64_t *out) {
     out[2] += carry;
 }
 
-/* ── independent reference (big-integer square mod p) ────────── */
+/* ── independent reference (big-integer multiply mod p) ────────── */
 
-static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
-    /*
-     * Truly independent: convert limbs → flat 192-bit integer,
-     * schoolbook square → 384-bit result, reduce mod 2^130-5,
-     * convert back to limbs.
-     *
-     * NOTE: the naive polynomial schoolbook (t[i+j] += a[i]*a[j])
-     * does NOT work here because poly1305 has non-uniform limb widths
-     * (44/43/43).  a1*a1 lands at bit 88 but limb 2 starts at bit 87.
-     */
+static void fe_mul_reference(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    /* 1. Limbs → flat 3×64: val = v0 + v1*2^44 + v2*2^87 */
+    uint64_t va[3], vb[3];
+    __uint128_t acc;
 
-    /* 1. Limbs → flat 3×64 integer: val = a0 + a1*2^44 + a2*2^87 */
-    uint64_t v[3];
-    __uint128_t acc = (__uint128_t)a[0] + ((__uint128_t)a[1] << 44);
-    v[0] = (uint64_t)acc;
-    acc = (acc >> 64) + ((__uint128_t)a[2] << 23);   /* 87 - 64 = 23 */
-    v[1] = (uint64_t)acc;
-    v[2] = (uint64_t)(acc >> 64);
+    acc = (__uint128_t)a[0] + ((__uint128_t)a[1] << 44);
+    va[0] = (uint64_t)acc;
+    acc = (acc >> 64) + ((__uint128_t)a[2] << 23);
+    va[1] = (uint64_t)acc;
+    va[2] = (uint64_t)(acc >> 64);
 
-    /* 2. Schoolbook square: v[0..2] → r[0..5] (384 bits) */
+    acc = (__uint128_t)b[0] + ((__uint128_t)b[1] << 44);
+    vb[0] = (uint64_t)acc;
+    acc = (acc >> 64) + ((__uint128_t)b[2] << 23);
+    vb[1] = (uint64_t)acc;
+    vb[2] = (uint64_t)(acc >> 64);
+
+    /* 2. Schoolbook multiply: va × vb → r[0..5] */
     __uint128_t rr[6] = {0};
     for (int i = 0; i < 3; i++) {
         __uint128_t carry = 0;
         for (int j = 0; j < 3; j++) {
-            __uint128_t prod = (__uint128_t)v[i] * v[j]
+            __uint128_t prod = (__uint128_t)va[i] * vb[j]
                              + (uint64_t)rr[i+j] + carry;
             rr[i+j] = (uint64_t)prod;
             carry = prod >> 64;
@@ -209,7 +211,7 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
     uint64_t r[6];
     for (int k = 0; k < 6; k++) r[k] = (uint64_t)rr[k];
 
-    /* 3. Reduce mod p = 2^130-5 (two passes) */
+    /* 3. Reduce mod p = 2^130-5 */
     for (int pass = 0; pass < 2; pass++) {
         uint64_t lo2 = r[2] & 0x3ULL;
         uint64_t h[4];
@@ -228,14 +230,13 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
         r[4] = r[5] = 0;
     }
 
-    /* 4. Flat → limbs (44 / 43 / 43) */
+    /* 4. Flat → limbs (44/43/43) */
     acc = (__uint128_t)r[0] | ((__uint128_t)r[1] << 64);
     out[0] = (uint64_t)acc & MASK44;  acc >>= 44;
     out[1] = (uint64_t)acc & MASK43;  acc >>= 43;
-    acc += (__uint128_t)r[2] << (128 - 87);   /* r[2] at bit 128, limb 2 at bit 87 */
+    acc += (__uint128_t)r[2] << (128 - 87);
     out[2] = (uint64_t)acc & MASK43;
 
-    /* Final carry wrap */
     uint64_t carry = (uint64_t)(acc >> 43);
     out[0] += carry * 5;
     carry = out[0] >> 44; out[0] &= MASK44;
@@ -246,8 +247,6 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
 
 /* ── verification ────────────────────────────────────────────── */
 
-/* Normalize limbs so outputs from different carry depths are comparable.
- * After this, equivalent field elements have identical limb values. */
 static void fe_carry(uint64_t h[3]) {
     uint64_t c;
     c = h[0] >> 44; h[0] &= MASK44;
@@ -269,39 +268,29 @@ static uint64_t splitmix64(uint64_t *s) {
 
 typedef struct {
     const char *label;
-    uint64_t    input[3];
+    uint64_t    a[3];
+    uint64_t    b[3];
     uint64_t    expected[3];
     int         has_expected;
 } test_vec_t;
 
-/*
- * Hand-verified expected outputs:
- *   0² = 0
- *   1² = 1
- *   9² = 81
- *   (2^44)² = 2^88 = 2^87 * 2 → {0, 0, 2}
- *   (2^87)² = 2^174 ≡ 2^174 mod (2^130-5)
- *     2^174 = 2^130 * 2^44 ≡ 5 * 2^44
- *     In limbs: {0, 5, 0}  (since limb1 = 5 * 2^44 / 2^44 = 5)
- */
 static const test_vec_t test_vectors[] = {
-    { "zero",   {0, 0, 0},  {0, 0, 0}, 1 },
-    { "one",    {1, 0, 0},  {1, 0, 0}, 1 },
-    { "nine",   {9, 0, 0},  {81, 0, 0}, 1 },
-    { "2^44",   {0, 1, 0},  {0, 0, 2}, 1 },
-    { "2^87",   {0, 0, 1},  {0, 5, 0}, 1 },
-    { "1+2^44", {1, 1, 0},  {1, 2, 2}, 1 },
-    { "max44",  {MASK44, 0, 0}, {0}, 0 },
-    { "all_max",{MASK44, MASK43, MASK43}, {0}, 0 },
+    { "0*0",     {0,0,0}, {0,0,0}, {0,0,0}, 1 },
+    { "1*1",     {1,0,0}, {1,0,0}, {1,0,0}, 1 },
+    { "0*1",     {0,0,0}, {1,0,0}, {0,0,0}, 1 },
+    { "2*3",     {2,0,0}, {3,0,0}, {6,0,0}, 1 },
+    { "9*9",     {9,0,0}, {9,0,0}, {81,0,0}, 1 },
+    { "2^44*2^44",  {0,1,0}, {0,1,0}, {0,0,2}, 1 },
+    { "2^87*2^44",  {0,0,1}, {0,1,0}, {10,0,0}, 1 },
+    { "max*max", {MASK44,MASK43,MASK43}, {MASK44,MASK43,MASK43}, {0}, 0 },
 };
 #define N_VECS (sizeof test_vectors / sizeof test_vectors[0])
 
 static int verify_one(const test_vec_t *t) {
     uint64_t ref[3], nat[3], ucd[3];
-    fe_sq_reference(t->input, ref);
-    fe_sq_native(t->input, nat);
-    fe_sq_ucode(t->input, ucd);
-    /* normalize so different carry depths produce identical limbs */
+    fe_mul_reference(t->a, t->b, ref);
+    fe_mul_native(t->a, t->b, nat);
+    fe_mul_ucode(t->a, t->b, ucd);
     fe_carry(ref); fe_carry(nat); fe_carry(ucd);
 
     int ok = 1;
@@ -331,15 +320,17 @@ static int verify_one(const test_vec_t *t) {
     return ok;
 }
 
-static int verify_random_quiet(const uint64_t in[3]) {
+static int verify_random_quiet(const uint64_t a[3], const uint64_t b[3]) {
     uint64_t ref[3], nat[3], ucd[3];
-    fe_sq_reference(in, ref);
-    fe_sq_native(in, nat);
-    fe_sq_ucode(in, ucd);
+    fe_mul_reference(a, b, ref);
+    fe_mul_native(a, b, nat);
+    fe_mul_ucode(a, b, ucd);
     fe_carry(ref); fe_carry(nat); fe_carry(ucd);
     if (memcmp(ref, nat, 24) != 0 || memcmp(ref, ucd, 24) != 0) {
-        printf("  FAIL random: in={%016" PRIx64 ",%016" PRIx64 ",%016" PRIx64 "}\n",
-               in[0], in[1], in[2]);
+        printf("  FAIL random: a={%016" PRIx64 ",%016" PRIx64 ",%016" PRIx64 "}\n",
+               a[0], a[1], a[2]);
+        printf("           b={%016" PRIx64 ",%016" PRIx64 ",%016" PRIx64 "}\n",
+               b[0], b[1], b[2]);
         return 0;
     }
     return 1;
@@ -360,24 +351,28 @@ static int verify_all(void) {
     uint64_t rng = 0xCAFEBABE13371337ULL;
     int rpass = 0;
     for (int i = 0; i < RANDOM_TESTS; i++) {
-        uint64_t in[3];
-        in[0] = splitmix64(&rng) & MASK44;
-        in[1] = splitmix64(&rng) & MASK43;
-        in[2] = splitmix64(&rng) & MASK43;
-        if (verify_random_quiet(in)) rpass++;
+        uint64_t a[3], b[3];
+        a[0] = splitmix64(&rng) & MASK44;
+        a[1] = splitmix64(&rng) & MASK43;
+        a[2] = splitmix64(&rng) & MASK43;
+        b[0] = splitmix64(&rng) & MASK44;
+        b[1] = splitmix64(&rng) & MASK43;
+        b[2] = splitmix64(&rng) & MASK43;
+        if (verify_random_quiet(a, b)) rpass++;
     }
     printf("  %d / %d PASS\n", rpass, RANDOM_TESTS);
     if (rpass < RANDOM_TESTS) fail += (RANDOM_TESTS - rpass);
     pass += rpass;
 
-    printf("\n--- Iterated chain (%d sq) ---\n", CHAIN_ITERS);
+    printf("\n--- Iterated chain (%d mul-self) ---\n", CHAIN_ITERS);
     uint64_t bp[3] = { 0x3FFULL, 0x1ULL, 0x7ULL };
     uint64_t ri[3], ni[3], ui[3];
     memcpy(ri, bp, 24); memcpy(ni, bp, 24); memcpy(ui, bp, 24);
     for (int i = 0; i < CHAIN_ITERS; i++) {
-        fe_sq_reference(ri, ri);
-        fe_sq_native(ni, ni);
-        fe_sq_ucode(ui, ui);
+        uint64_t tmp[3];
+        memcpy(tmp, ri, 24); fe_mul_reference(tmp, tmp, ri);
+        memcpy(tmp, ni, 24); fe_mul_native(tmp, tmp, ni);
+        memcpy(tmp, ui, 24); fe_mul_ucode(tmp, tmp, ui);
     }
     fe_carry(ri); fe_carry(ni); fe_carry(ui);
     int ref_nat = memcmp(ri, ni, 24) == 0;
@@ -385,14 +380,7 @@ static int verify_all(void) {
     printf("  ref==native: %s   ref==ucode: %s   -> %s\n",
            ref_nat ? "yes" : "NO", ref_ucd ? "yes" : "NO",
            (ref_nat && ref_ucd) ? "PASS" : "FAIL");
-    if (ref_nat && ref_ucd) {
-        pass++;
-    } else {
-        fail++;
-        printf("  reference:"); for (int i=0;i<3;i++) printf(" %016" PRIx64, ri[i]); printf("\n");
-        printf("  native:   "); for (int i=0;i<3;i++) printf(" %016" PRIx64, ni[i]); printf("\n");
-        printf("  ucode:    "); for (int i=0;i<3;i++) printf(" %016" PRIx64, ui[i]); printf("\n");
-    }
+    if (ref_nat && ref_ucd) pass++; else fail++;
 
     printf("\n=== Verification: %d passed, %d failed ===\n\n", pass, fail);
     return fail;
@@ -419,14 +407,13 @@ static inline uint64_t rdtsc_end(void) {
 int main(void) {
     uint64_t t0, t1, min, sum;
 
-    printf("=== fe_sq poly1305: microcode vs native -O3 ===\n\n");
+    printf("=== fe_mul poly1305: microcode vs native -O3 ===\n\n");
 
     assign_to_core(0);
     init_match_and_patch();
     do_fix_IN_patch();
-    install_poly1305_sq_patch();
+    install_fe_mul_patch();
 
-    /* ── verification ──────────────────────────────────────────── */
     int failures = verify_all();
     if (failures) {
         printf("Verification FAILED (%d errors), skipping benchmark.\n", failures);
@@ -435,21 +422,23 @@ int main(void) {
         return 1;
     }
 
-    /* ── benchmark ────────────────────────────────────────────── */
-    uint64_t state[3] = { 0xABCDEF012345ULL & MASK44,
-                          0x123456789ABULL & MASK43,
-                          0x7654321FEDCULL & MASK43 };
+    uint64_t sa[3] = { 0xABCDEF012345ULL & MASK44,
+                        0x123456789ABULL & MASK43,
+                        0x7654321FEDCULL & MASK43 };
+    uint64_t sb[3] = { 0x112233445566ULL & MASK44,
+                        0x6655443322ULL   & MASK43,
+                        0x1F2F3F4F5F6ULL  & MASK43 };
 
     printf("--- %d ops/batch, %d batches ---\n\n", BATCH, REPS);
 
-    uint64_t tmp[3];
+    uint64_t ta[3], tb[3];
 
-    /* native C -O3 */
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {
-        memcpy(tmp, state, sizeof(tmp));
+        memcpy(ta, sa, sizeof(ta));
+        memcpy(tb, sb, sizeof(tb));
         t0 = rdtsc_start();
-        for (int i = 0; i < BATCH; i++) fe_sq_native(tmp, tmp);
+        for (int i = 0; i < BATCH; i++) fe_mul_native(ta, tb, ta);
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0;
         sum += dt; if (dt < min) min = dt;
@@ -457,12 +446,12 @@ int main(void) {
     printf("Native -O3:  min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
-    /* microcode */
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {
-        memcpy(tmp, state, sizeof(tmp));
+        memcpy(ta, sa, sizeof(ta));
+        memcpy(tb, sb, sizeof(tb));
         t0 = rdtsc_start();
-        for (int i = 0; i < BATCH; i++) fe_sq_ucode(tmp, tmp);
+        for (int i = 0; i < BATCH; i++) fe_mul_ucode(ta, tb, ta);
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0;
         sum += dt; if (dt < min) min = dt;
@@ -470,7 +459,6 @@ int main(void) {
     printf("Microcode:   min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
-    /* clean up */
     init_match_and_patch();
     do_fix_IN_patch();
     printf("\nDone.\n");
