@@ -503,7 +503,7 @@ static void install_secp256k1_mul_patch(void) {
                 NOP, NOP_SEQWORD },
     /* FT1 */ { SHL_DSZ64_DRI(TMP9, TMP2, 12),
                 ADD_DSZ64_DRR(R8, R8, TMP4),
-                ADD_DSZ64_DRR(TMP0, TMP5, TMP6),
+                ADD_DSZ64_DRR(TMP03, TMP5, TMP6),
                 NOP_SEQWORD },
     /* FT2 */ { SHR_DSZ64_DRI(RDX, TMP9, 12),     /* RDX = x24 */
                 ADD_DSZ64_DRR(R8, R8, TMP0),
