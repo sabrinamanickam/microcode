@@ -611,8 +611,8 @@ static void install_secp256k1_sq_patch(void) {
 
     };
 
-    patch_ucode(0x7d16, patch, ARRAY_SZ(patch));
-    hook_match_and_patch(0, 0x0618, 0x7d16);
+    patch_ucode(0x7c00, patch, ARRAY_SZ(patch));
+    hook_match_and_patch(0, 0x0cd8, 0x7c00);
     printf("secp256k1_sq patch installed: %d triads at U7c00\n",
            (int)ARRAY_SZ(patch));
 }

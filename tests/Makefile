@@ -1,7 +1,7 @@
 # ---- config ----
 CC      := gcc
 NASM    := nasm
-CFLAGS  := -g -O3 -fPIE -ggdb -Wall -masm=intel -march=x86-64-v2 -mtune=generic -I include/
+CFLAGS  := -g -O3 -fPIE -ggdb -Wall -masm=intel -march=x86-64-v2 -mtune=generic -I ../../include -I include/
 LDFLAGS := -static
 LIBS    := ../../build/libmicro.a
 
