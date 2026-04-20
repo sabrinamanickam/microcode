@@ -370,9 +370,9 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
     /* Phase A': add product to acc (14 triads, proven working pattern) */ \
     { ADD_DSZ64_DRR(TMP0, R15, TMP0), SETCC_CONDB_DR(TMP3, TMP0), \
       NOP, NOP_SEQWORD }, \
-    { ZEROEXT_DSZ64_DR(R15, TMP0), NOP, NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, R9, TMP2), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
+    /* Pack: ZEROEXT reads old TMP0 (WAR OK), ADD writes new TMP0 */ \
+    { ZEROEXT_DSZ64_DR(R15, TMP0), ADD_DSZ64_DRR(TMP0, R9, TMP2), \
+      SETCC_CONDB_DR(TMP1, TMP0), NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
       NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R9, TMP0), \
@@ -433,8 +433,9 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
       NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
       NOP, NOP_SEQWORD }, \
-    { ZEROEXT_DSZ64_DR(R13, TMP0), NOP, NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP1, TMP8), NOP, NOP, NOP_SEQWORD }, \
+    /* Pack: ZEROEXT reads old TMP0, ADD overwrites TMP0 (WAR OK) */ \
+    { ZEROEXT_DSZ64_DR(R13, TMP0), ADD_DSZ64_DRR(TMP0, TMP1, TMP8), \
+      NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(RAX, TMP0, TMP14), NOP, NOP, NOP_SEQWORD }
 
 static void install_p256_sq_patch(void) {
