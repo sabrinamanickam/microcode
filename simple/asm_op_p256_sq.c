@@ -345,95 +345,101 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
 /* ── microcode (2-iter-per-vmwrite, ADC-optimized) ──────────── */
 
 #define MONT_ITER \
-    { ZEROEXT_DSZ64_DR(RDX, RDI), NOP, NOP, NOP_SEQWORD }, \
+    /* Precompute p[1] in slot 1 (free slot, TMP9 unused until Phase B) */ \
+    { ZEROEXT_DSZ64_DR(RDX, RDI), SHR_DSZ64_DRI(TMP9, R8, 32), \
+      NOP, NOP_SEQWORD }, \
     { MUL_DSZ64_DRR(RCX, TMP10, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ZEROEXT_DSZ64_DR(TMP0, RDX), ZEROEXT_DSZ64_DR(TMP1, RCX), \
       ZEROEXT_DSZ64_DR(RDX, RDI), NOP_SEQWORD }, \
-    { MUL_DSZ64_DRR(RCX, TMP11, RDX), NOP, NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP2, TMP1, RDX), SETCC_CONDB_DR(TMP3, TMP2), \
+    /* MUL b1*ai + Phase A' word0 in free slots (TMP0,R15 ready, MUL doesn't touch them) */ \
+    { MUL_DSZ64_DRR(RCX, TMP11, RDX), ADD_DSZ64_DRR(TMP0, R15, TMP0), \
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD }, \
+    { ADD_DSZ64_DRR(TMP2, TMP1, RDX), SETCC_CONDB_DR(TMP8, TMP2), \
       ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD }, \
     { ZEROEXT_DSZ64_DR(RDX, RDI), NOP, NOP, NOP_SEQWORD }, \
     { MUL_DSZ64_DRR(RCX, TMP12, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP4, TMP1, RDX), SETCC_CONDB_DR(TMP5, TMP4), \
       NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP4, TMP4, TMP3), SETCC_CONDB_DR(TMP6, TMP4), \
+    /* Phase A chain carry now in TMP8 (not TMP3, which holds Phase A' w0 carry) */ \
+    { ADD_DSZ64_DRR(TMP4, TMP4, TMP8), SETCC_CONDB_DR(TMP6, TMP4), \
       ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP3, TMP5, TMP6), ZEROEXT_DSZ64_DR(RDX, RDI), \
+    { ADD_DSZ64_DRR(TMP8, TMP5, TMP6), ZEROEXT_DSZ64_DR(RDX, RDI), \
       NOP, NOP_SEQWORD }, \
     { MUL_DSZ64_DRR(RCX, TMP13, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP5, TMP1, RDX), SETCC_CONDB_DR(TMP6, TMP5), \
       NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP5, TMP5, TMP3), SETCC_CONDB_DR(TMP7, TMP5), \
+    { ADD_DSZ64_DRR(TMP5, TMP5, TMP8), SETCC_CONDB_DR(TMP7, TMP5), \
       NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP3, TMP6, TMP7), NOP, NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP6, RCX, TMP3), NOP, NOP, NOP_SEQWORD }, \
-    /* Phase A': add product to acc (14 triads, proven working pattern) */ \
-    { ADD_DSZ64_DRR(TMP0, R15, TMP0), SETCC_CONDB_DR(TMP3, TMP0), \
+    /* Merge: slot-0→slot-1 RAW on TMP8 */ \
+    { ADD_DSZ64_DRR(TMP8, TMP6, TMP7), ADD_DSZ64_DRR(TMP6, RCX, TMP8), \
       NOP, NOP_SEQWORD }, \
-    /* Pack: ZEROEXT reads old TMP0 (WAR OK), ADD writes new TMP0 */ \
+    /* Phase A': proven SETCC pattern with triple-pack (9 triads) */ \
+    /* w0 already in TMP0, TMP3=carry. Copy w0 + start w1 */ \
     { ZEROEXT_DSZ64_DR(R15, TMP0), ADD_DSZ64_DRR(TMP0, R9, TMP2), \
       SETCC_CONDB_DR(TMP1, TMP0), NOP_SEQWORD }, \
+    /* w1 +cin */ \
     { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
       NOP, NOP_SEQWORD }, \
+    /* combine w1 + copy w1 + start w2 in slot 2 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R9, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, R10, TMP4), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP0, R10, TMP4), NOP_SEQWORD }, \
+    /* TRIPLE: SETCC(w2 from slot-2) + w2 +cin + SETCC */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w2 + copy w2 + start w3 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R10, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, R13, TMP5), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP0, R13, TMP5), NOP_SEQWORD }, \
+    /* TRIPLE: w3 */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w3 + copy w3 + start w4 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R13, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, RAX, TMP6), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP0, RAX, TMP6), NOP_SEQWORD }, \
+    /* TRIPLE: w4 */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w4 + copy w4 */ \
     { ADD_DSZ64_DRR(TMP14, TMP1, TMP8), ZEROEXT_DSZ64_DR(RAX, TMP0), \
       NOP, NOP_SEQWORD }, \
     { ZEROEXT_DSZ64_DR(RDX, R15), NOP, NOP, NOP_SEQWORD }, \
     { MUL_DSZ64_DRR(RCX, R8, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ZEROEXT_DSZ64_DR(TMP7, RCX), ZEROEXT_DSZ64_DR(TMP8, RDX), \
       ZEROEXT_DSZ64_DR(RDX, R15), NOP_SEQWORD }, \
-    { SHR_DSZ64_DRI(TMP9, R8, 32), NOP, NOP, NOP_SEQWORD }, \
+    /* p[1] already in TMP9 (precomputed in Phase A first triad) */ \
     { MUL_DSZ64_DRR(RCX, TMP9, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ZEROEXT_DSZ64_DR(TMP9, RCX), ZEROEXT_DSZ64_DR(TMP3, RDX), \
       ZEROEXT_DSZ64_DR(RDX, R15), NOP_SEQWORD }, \
     { MUL_DSZ64_DRR(RCX, RBX, RDX), NOP, NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP7, TMP7, TMP3), SETCC_CONDB_DR(TMP3, TMP7), \
       NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP9, TMP9, TMP3), NOP, NOP, NOP_SEQWORD }, \
-    /* Phase C: add m×p to acc + shift (15 triads, proven ADD+SETCC pattern) */ \
-    /* red: TMP8=red[0], TMP7=red[1], TMP9=red[2], RDX=red[3], RCX=red[4] */ \
-    { ADD_DSZ64_DRR(TMP0, R15, TMP8), SETCC_CONDB_DR(TMP3, TMP0), \
-      NOP, NOP_SEQWORD }, \
+    /* Merge Phase B last + Phase C first (independent operands) */ \
+    { ADD_DSZ64_DRR(TMP9, TMP9, TMP3), ADD_DSZ64_DRR(TMP0, R15, TMP8), \
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD }, \
+    /* w1 start */ \
     { ADD_DSZ64_DRR(TMP0, R9, TMP7), SETCC_CONDB_DR(TMP1, TMP0), \
       NOP, NOP_SEQWORD }, \
+    /* w1 +cin */ \
     { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
       NOP, NOP_SEQWORD }, \
+    /* combine w1 + copy w1 + start w2 in slot 2 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R15, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, R10, TMP9), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP0, R10, TMP9), NOP_SEQWORD }, \
+    /* TRIPLE: w2 */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w2 + copy w2 + start w3 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R9, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, R13, RDX), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP0, R13, RDX), NOP_SEQWORD }, \
+    /* TRIPLE: w3 */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w3 + copy w3 + start w4 */ \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R10, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, RAX, RCX), SETCC_CONDB_DR(TMP1, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP0, TMP0, TMP3), SETCC_CONDB_DR(TMP8, TMP0), \
-      NOP, NOP_SEQWORD }, \
-    /* Pack: ZEROEXT reads old TMP0, ADD overwrites TMP0 (WAR OK) */ \
+      ADD_DSZ64_DRR(TMP0, RAX, RCX), NOP_SEQWORD }, \
+    /* TRIPLE: w4 */ \
+    { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
+      SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
+    /* combine w4 + copy w4 + acc[4] combine */ \
     { ZEROEXT_DSZ64_DR(R13, TMP0), ADD_DSZ64_DRR(TMP0, TMP1, TMP8), \
       NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(RAX, TMP0, TMP14), NOP, NOP, NOP_SEQWORD }
@@ -598,8 +604,8 @@ static inline uint64_t rdtsc_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define BATCH 1000
-#define REPS  100
+#define BATCH 10000
+#define REPS  200
 
 int main(void) {
     printf("=== P-256 Montgomery squaring: microcode vs native -O3 ===\n\n");
