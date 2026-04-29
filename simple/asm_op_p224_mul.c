@@ -29,6 +29,13 @@ static const uint64_t P224_P[4] = {
     UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x00000000FFFFFFFF)
 };
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/p224_mul.c"
+
+static void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_p224_mul(out, a, b);
+}
+
 /* ── fe_mul native C ─────────────────────────────────────────── */
 
 static inline void mont_iteration(uint64_t acc[5], uint64_t a_i,
@@ -209,10 +216,9 @@ static void fe_mul_reference(const uint64_t *a, const uint64_t *b, uint64_t *out
     /* ── PHASE B: m*mu, m*p[1], m*p[2], m*p[3], chain (11 triads) ── */ \
     /* mu MUL: m = acc[0] * R8 (mu = -1 = R8) */ \
     { MUL_DSZ64_DRR(RCX, R8, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* save m = red[0] */ \
-    { ZEROEXT_DSZ64_DR(TMP6, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* m * p[1] = m * RBX */ \
-    { MUL_DSZ64_DRR(RCX, RBX, RDX), NOP, NOP, NOP_SEQWORD }, \
+    /* save m + m*p[1] merged (both read RDX, MUL in slot 1) */ \
+    { ZEROEXT_DSZ64_DR(TMP6, RDX), MUL_DSZ64_DRR(RCX, RBX, RDX), \
+      NOP, NOP_SEQWORD }, \
     /* save lo=red[1], hi, reload m */ \
     { ZEROEXT_DSZ64_DR(TMP7, RDX), ZEROEXT_DSZ64_DR(TMP3, RCX), \
       ZEROEXT_DSZ64_DR(RDX, TMP6), NOP_SEQWORD }, \
@@ -506,7 +512,18 @@ int main(void) {
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+    printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(ta, sa, 32); memcpy(tb, sb, 32);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_mul_fiat(ta, tb, ta);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {

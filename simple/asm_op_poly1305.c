@@ -18,7 +18,7 @@
  *
  * Output: RDI = h0   R9 = h1   R10 = h2
  *
- * Estimated: ~32 triads
+ * Hand-packed: 18 triads (was 33 with templates, 94% slot utilization)
  *
  * Build:  make PROG=asm_op_poly1305
  * Run:    sudo taskset -c 0 ./asm_op_poly1305_static
@@ -37,69 +37,105 @@
 #define MASK44 0xFFFFFFFFFFFULL   /* (1 << 44) - 1 */
 #define MASK43 0x7FFFFFFFFFFULL   /* (1 << 43) - 1 */
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/poly1305_square.c"
+
+static void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_poly1305_carry_square(out, a);
+}
+
 /* ── microcode patch ──────────────────────────────────────────── */
 
 static void install_poly1305_sq_patch(void) {
     ucode_t patch[] = {
 
-    /* ═══ LIMB c0 = a0*a0 + (2*a1)*(10*a2)  [W=44, S=20] ═══ */
-
-    /*  MAC_HEAD: MUL(RDI, RDI) → a0 * a0
-     *  sA=RDI(a0), sB=RDI(a0) → RDI overwritten with lo, becomes out[0] later */
-    MAC_HEAD(RDI, RDI),
-    /*  MAC_NEXT: save hi[0]→TMP4, MUL(R13, R11) → 2*a1 * 10*a2 = 20*a1*a2
-     *  R13(2*a1) read-only, R11(10*a2) overwritten with lo */
-    MAC_NEXT(TMP4, R13, R11, TMP2, TMP0),
-    /*  extract carry@44, output limb → RDI */
-    MAC_TAIL_2(TMP0, RDI, 44, 20),
-
-    /* ═══ c0 → c1 transition [S=20] ═══
-     * c1 first product: (2*a0)*a1.  Can't MUL into RSI (need a1 for limb 2).
-     * Copy a1 to RBX, then MUL(RCX, R15, RBX): R15 preserved, RBX = lo.
+    /*
+     * Hand-packed: 18 triads (was 33 with templates).
+     * Key techniques: MUL srcB/hi RAW saves, double-ADD chains,
+     * SHL+SHR mask via 1→2 RAW, cascading carry combine+MUL+ADD.
+     *
+     * RBX = a1 (precomputed copy in inline asm, preserves RSI for c2)
      */
-    LIMB_LINK(20, R15, RBX, ZEROEXT_DSZ64_DR(RBX, RSI), NOP),
 
-    /* ═══ LIMB c1 = (2*a0)*a1 + a2*(5*a2)  [W=43, S=21] ═══ */
+    /* ═══ LIMB c0 = a0*a0 + (2*a1)*(10*a2)  [W=44] ═══ */
 
-    /* RBX = lo(2*a0 * a1) from the LINK's MUL */
-    MAC_RESUME(RBX),
-    /* MAC_NEXT: save hi[0]→TMP4, MUL(R12, R14) → a2 * 5*a2
-     * R14(5*a2) overwritten with lo */
-    MAC_NEXT(TMP4, R12, R14, TMP2, TMP0),
-    /* extract carry@43, output → R9 */
-    MAC_TAIL_2(TMP0, R9, 43, 21),
+    /* T1: MUL a0² + save lo/hi via srcB/hi RAW */
+    { MUL_DSZ64_DRR(RCX, RDI, RDI), ZEROEXT_DSZ64_DR(TMP0, RDI),
+      ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD },
 
-    /* ═══ c1 → c2 transition [S=21] ═══
-     * Next limb needs: (2*a0)*a2 first.
-     * MUL(RCX, R15, R12): R15(2*a0) preserved, R12(a2) → lo.
-     * R12 not needed after limb 2, so clobbering is fine.
-     * Also prep R13 = 2*a1 for second product: ADD(R13, RSI, RSI). */
-    LIMB_LINK(21, R15, R12, ADD_DSZ64_DRR(R13, RSI, RSI), NOP),
+    /* T2: MUL 20*a1*a2 + accumulate lo via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, R13, R11), ADD_DSZ64_DRR(TMP0, TMP0, R11),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
 
-    /* ═══ LIMB c2 = (2*a0)*a2 + a1*(2*a1)  [W=43, S=21] ═══ */
+    /* T3: double-ADD hi (0→1 RAW) + lo-carry extraction */
+    { ADD_DSZ64_DRR(TMP1, TMP1, RCX), ADD_DSZ64_DRR(TMP1, TMP1, TMP3),
+      SHR_DSZ64_DRI(TMP8, TMP0, 44), NOP_SEQWORD },
 
-    /* R12 = lo(2*a0 * a2) from the LINK's MUL */
-    MAC_RESUME(R12),
-    /* MAC_NEXT: save hi[0]→TMP4, MUL(RSI, R13) → a1 * 2*a1
-     * R13(2*a1) overwritten with lo */
-    MAC_NEXT(TMP4, RSI, R13, TMP2, TMP0),
-    /* extract carry@43, output → R10 */
-    MAC_TAIL_2(TMP0, R10, 43, 21),
+    /* T4: hi shift + mask prep + output mask via 1→2 RAW */
+    { SHL_DSZ64_DRI(TMP1, TMP1, 20), SHL_DSZ64_DRI(TMP9, TMP0, 20),
+      SHR_DSZ64_DRI(RDI, TMP9, 20), NOP_SEQWORD },
 
-    /* ═══ FINAL REDUCTION: carry * 5 → limb0, re-propagate ═══ */
+    /* ═══ c0→c1: carry combine + MUL (2*a0)*a1 + accumulate ═══ */
 
-    /* combine lo+hi carry from last limb [S=21] */
-    REDUCE_COMBINE(21),
-    /* TMP0 = carry.  Multiply by 5. */
-    REDUCE_MUL(5),
-    /* out[0] += carry * 5 */
-    REDUCE_ADD(RDI),
-    /* re-propagate: out[0] → out[1] */
-    REPROP(RDI, 44, 20, R9),
-    REPROP_MASK(RDI, 20, NOP_SEQWORD),
-    /* re-propagate: out[1] → out[2] */
-    REPROP(R9, 43, 21, R10),
-    REPROP_MASK(R9, 21, END_SEQWORD)
+    /* T5: OR carry + MUL c1 prod0 + acc via cascading 0→1→2 RAW */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1), MUL_DSZ64_DRR(RCX, R15, RBX),
+      ADD_DSZ64_DRR(TMP2, TMP0, RBX), NOP_SEQWORD },
+
+    /* T6: capture lo carry + save hi(prod0) with carry */
+    { SETCC_CONDB_DR(TMP3, TMP2), ADD_DSZ64_DRR(TMP4, RCX, TMP3),
+      NOP, NOP_SEQWORD },
+
+    /* T7: MUL a2*(5*a2) + accumulate via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, R12, R14), ADD_DSZ64_DRR(TMP0, TMP2, R14),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
+
+    /* T8: double-ADD hi (0→1 RAW) + lo-carry extraction */
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX), ADD_DSZ64_DRR(TMP4, TMP4, TMP3),
+      SHR_DSZ64_DRI(TMP8, TMP0, 43), NOP_SEQWORD },
+
+    /* T9: hi shift + mask prep + output mask via 1→2 RAW */
+    { SHL_DSZ64_DRI(TMP4, TMP4, 21), SHL_DSZ64_DRI(TMP9, TMP0, 21),
+      SHR_DSZ64_DRI(R9, TMP9, 21), NOP_SEQWORD },
+
+    /* ═══ c1→c2: carry combine + MUL (2*a0)*a2 + accumulate ═══ */
+
+    /* T10: OR carry + MUL c2 prod0 + acc via cascading 0→1→2 RAW */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP4), MUL_DSZ64_DRR(RCX, R15, R12),
+      ADD_DSZ64_DRR(TMP2, TMP0, R12), NOP_SEQWORD },
+
+    /* T11: capture lo carry + save hi(prod0) with carry */
+    { SETCC_CONDB_DR(TMP3, TMP2), ADD_DSZ64_DRR(TMP4, RCX, TMP3),
+      NOP, NOP_SEQWORD },
+
+    /* T12: MUL a1*(2*a1) + accumulate via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, RSI, R13), ADD_DSZ64_DRR(TMP0, TMP2, R13),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
+
+    /* T13: double-ADD hi (0→1 RAW) + lo-carry extraction */
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX), ADD_DSZ64_DRR(TMP4, TMP4, TMP3),
+      SHR_DSZ64_DRI(TMP8, TMP0, 43), NOP_SEQWORD },
+
+    /* T14: hi shift + mask prep + output mask via 1→2 RAW */
+    { SHL_DSZ64_DRI(TMP4, TMP4, 21), SHL_DSZ64_DRI(TMP9, TMP0, 21),
+      SHR_DSZ64_DRI(R10, TMP9, 21), NOP_SEQWORD },
+
+    /* ═══ REDUCTION: carry*5 → out[0], re-propagate ═══ */
+
+    /* T15: carry combine + MUL×5 + add to out[0] — cascade 0→1→2 RAW */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP4), MUL_DSZ64_DIR(TMP1, 5, TMP0),
+      ADD_DSZ64_DRR(RDI, RDI, TMP0), NOP_SEQWORD },
+
+    /* T16: carry@44 + mask prep + propagate to out[1] via 0→2 RAW */
+    { SHR_DSZ64_DRI(TMP0, RDI, 44), SHL_DSZ64_DRI(TMP9, RDI, 20),
+      ADD_DSZ64_DRR(R9, R9, TMP0), NOP_SEQWORD },
+
+    /* T17: mask out[0] + carry@43 + mask prep out[1] */
+    { SHR_DSZ64_DRI(RDI, TMP9, 20), SHR_DSZ64_DRI(TMP0, R9, 43),
+      SHL_DSZ64_DRI(TMP9, R9, 21), NOP_SEQWORD },
+
+    /* T18: mask out[1] + propagate to out[2] */
+    { SHR_DSZ64_DRI(R9, TMP9, 21), ADD_DSZ64_DRR(R10, R10, TMP0),
+      NOP, END_SEQWORD }
 
     };
 
@@ -126,12 +162,9 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
         /* precompute */
         "lea r15, [rdi + rdi]\n\t"       /* 2*a0 */
         "lea r13, [rsi + rsi]\n\t"       /* 2*a1 */
+        "mov rbx, rsi\n\t"              /* copy a1 (RSI preserved for c2) */
         "imul r14, r12, 5\n\t"           /* 5*a2 */
         "lea r11, [r14 + r14]\n\t"       /* 10*a2 */
-
-        /* clear accumulators */
-        "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
 
         /* fire microcode */
         "vmwrite rcx, rdx\n\t"
@@ -454,7 +487,20 @@ int main(void) {
         uint64_t dt = t1 - t0;
         sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+    printf("Naive -O3:   min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+           min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp, state, sizeof(tmp));
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_sq_fiat(tmp, tmp);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0;
+        sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
     /* microcode */

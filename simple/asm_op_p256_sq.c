@@ -23,6 +23,13 @@ static const uint64_t P256_P[4] = {
     UINT64_C(0x0000000000000000), UINT64_C(0xFFFFFFFF00000001)
 };
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/p256_square.c"
+
+static void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_p256_square(out, a);
+}
+
 /* ── fe_sq native C ──────────────────────────────────────────── */
 
 static inline void mont_iteration(uint64_t acc[5], uint64_t a_i,
@@ -635,7 +642,18 @@ int main(void) {
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+    printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp, state, 32);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_sq_fiat(tmp, tmp);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {

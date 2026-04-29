@@ -19,7 +19,7 @@
  *
  * Output: R10 = h0   R9 = h1   RDI = h2
  *
- * Estimated: ~39 triads
+ * Hand-packed: 23 triads (was 39 with templates, 99% slot utilization)
  *
  * Build:  make PROG=asm_op_poly1305_mul
  * Run:    sudo taskset -c 0 ./asm_op_poly1305_mul_static
@@ -38,62 +38,127 @@
 #define MASK44 0xFFFFFFFFFFFULL   /* (1 << 44) - 1 */
 #define MASK43 0x7FFFFFFFFFFULL   /* (1 << 43) - 1 */
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/poly1305_mul.c"
+
+static void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_poly1305_carry_mul(out, a, b);
+}
+
 /* ── microcode patch ──────────────────────────────────────────── */
 
 static void install_fe_mul_patch(void) {
     ucode_t patch[] = {
 
-    /* ═══ LIMB c0 = a0*b0 + a1*(10*b2) + a2*(10*b1)  [W=44, S=20] ═══ */
+    /*
+     * Hand-packed: 23 triads (was 39 with templates).
+     * 9 MULs (3 per limb), all NOP slots filled except END triad.
+     *
+     * Key techniques: MUL srcB/hi RAW saves, 1→2 srcB RAW for
+     * 3rd-product accumulation, double/triple-ADD hi chains,
+     * SHL+SHR mask via 1→2 RAW, cascading carry combine+MUL+ADD,
+     * merged limb transitions (carry OR + MUL + ACC in 1 triad).
+     */
 
-    /* RDX already = b0 (set by caller).  MAC_HEAD: a0 * b0 */
-    MAC_HEAD(RDI, RDX),
-    /* a1 * 10*b2  (R10 = 10*b2, last use → consumed) */
-    MAC_NEXT(TMP4, RSI, R10, TMP2, TMP0),
-    /* a2 * 10*b1  (R9 = 10*b1, last use → consumed) */
-    MAC_NEXT(TMP5, R12, R9, TMP0, TMP2),
-    /* extract carry@44, output → R10  (reuse freed register) */
-    MAC_TAIL_3(TMP2, R10, 44, 20),
+    /* ═══ LIMB c0 = a0*b0 + a1*(10*b2) + a2*(10*b1)  [W=44] ═══ */
 
-    /* ═══ c0 → c1 transition [S=20] ═══
-     * c1 first product: a0*b1.  R13=b1, last use → direct srcB.
-     * Prep: copy b0 → RDX for c1 product 2 (a1*b0). */
-    LIMB_LINK(20, RDI, R13, ZEROEXT_DSZ64_DR(RDX, R15), NOP),
+    /* T1: MUL a0*b0 + save lo/hi via srcB/hi RAW */
+    { MUL_DSZ64_DRR(RCX, RDI, RDX), ZEROEXT_DSZ64_DR(TMP0, RDX),
+      ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD },
 
-    /* ═══ LIMB c1 = a0*b1 + a1*b0 + a2*(5*b2)  [W=43, S=21] ═══ */
+    /* T2: MUL a1*(10*b2) + acc lo via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, RSI, R10), ADD_DSZ64_DRR(TMP0, TMP0, R10),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
 
-    /* R13 = lo(a0 * b1) from the LINK's MUL */
-    MAC_RESUME(R13),
-    /* a1 * b0  (RDX = b0, copied in LINK prep) */
-    MAC_NEXT(TMP4, RSI, RDX, TMP2, TMP0),
-    /* a2 * 5*b2  (R14 = 5*b2, last use → consumed) */
-    MAC_NEXT(TMP5, R12, R14, TMP0, TMP2),
-    /* extract carry@43, output → R9  (reuse freed register) */
-    MAC_TAIL_3(TMP2, R9, 43, 21),
+    /* T3: hi(P1)+carry + MUL a2*(10*b1) + acc lo(P2) via 1→2 srcB RAW */
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP3), MUL_DSZ64_DRR(RCX, R12, R9),
+      ADD_DSZ64_DRR(TMP2, TMP0, R9), NOP_SEQWORD },
 
-    /* ═══ c1 → c2 transition [S=21] ═══
-     * c2 first product: a0*b2.  R11=b2, last use → direct srcB. */
-    LIMB_LINK(21, RDI, R11, NOP, NOP),
+    /* T4: carry2 + double-ADD hi: hi(P0)+hi(P1+c1)+hi(P2) */
+    { SETCC_CONDB_DR(TMP3, TMP2), ADD_DSZ64_DRR(TMP1, TMP1, TMP4),
+      ADD_DSZ64_DRR(TMP1, TMP1, RCX), NOP_SEQWORD },
 
-    /* ═══ LIMB c2 = a0*b2 + a1*(2*b1) + a2*b0  [W=43, S=21] ═══ */
+    /* T5: +carry2 to hi + lo-carry + hi shift via 0→2 RAW */
+    { ADD_DSZ64_DRR(TMP1, TMP1, TMP3), SHR_DSZ64_DRI(TMP8, TMP2, 44),
+      SHL_DSZ64_DRI(TMP1, TMP1, 20), NOP_SEQWORD },
 
-    /* R11 = lo(a0 * b2) from the LINK's MUL */
-    MAC_RESUME(R11),
-    /* a1 * 2*b1  (RBX = 2*b1, last use → consumed) */
-    MAC_NEXT(TMP4, RSI, RBX, TMP2, TMP0),
-    /* a2 * b0  (R15 = b0, last use → consumed) */
-    MAC_NEXT(TMP5, R12, R15, TMP0, TMP2),
-    /* extract carry@43, output → RDI  (a0 no longer needed) */
-    MAC_TAIL_3(TMP2, RDI, 43, 21),
+    /* T6: mask prep + output R10 via 0→1 RAW + carry combine */
+    { SHL_DSZ64_DRI(TMP9, TMP2, 20), SHR_DSZ64_DRI(R10, TMP9, 20),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
 
-    /* ═══ FINAL REDUCTION: carry * 5 → limb0, re-propagate ═══ */
+    /* ═══ LIMB c1 = a0*b1 + a1*b0 + a2*(5*b2)  [W=43] ═══ */
 
-    REDUCE_COMBINE(21),
-    REDUCE_MUL(5),
-    REDUCE_ADD(R10),
-    REPROP(R10, 44, 20, R9),
-    REPROP_MASK(R10, 20, NOP_SEQWORD),
-    REPROP(R9, 43, 21, RDI),
-    REPROP_MASK(R9, 21, END_SEQWORD)
+    /* T7: MUL a0*b1 + save hi via 0→1 RAW + acc carry+lo via 0→2 srcB RAW */
+    { MUL_DSZ64_DRR(RCX, RDI, R13), ZEROEXT_DSZ64_DR(TMP4, RCX),
+      ADD_DSZ64_DRR(TMP2, TMP0, R13), NOP_SEQWORD },
+
+    /* T8: carry + hi(P0)+carry + copy b0→RDX for P1 */
+    { SETCC_CONDB_DR(TMP3, TMP2), ADD_DSZ64_DRR(TMP4, TMP4, TMP3),
+      ZEROEXT_DSZ64_DR(RDX, R15), NOP_SEQWORD },
+
+    /* T9: MUL a1*b0 + acc lo via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, RSI, RDX), ADD_DSZ64_DRR(TMP0, TMP2, RDX),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
+
+    /* T10: +hi(P1) + MUL a2*(5*b2) + acc lo(P2) via 1→2 srcB RAW */
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX), MUL_DSZ64_DRR(RCX, R12, R14),
+      ADD_DSZ64_DRR(TMP2, TMP0, R14), NOP_SEQWORD },
+
+    /* T11: carry3 + add carry2 + hi(P2) via double-ADD */
+    { SETCC_CONDB_DR(TMP5, TMP2), ADD_DSZ64_DRR(TMP4, TMP4, TMP3),
+      ADD_DSZ64_DRR(TMP4, TMP4, RCX), NOP_SEQWORD },
+
+    /* T12: +carry3 + lo-carry + hi shift via 0→2 RAW */
+    { ADD_DSZ64_DRR(TMP4, TMP4, TMP5), SHR_DSZ64_DRI(TMP8, TMP2, 43),
+      SHL_DSZ64_DRI(TMP4, TMP4, 21), NOP_SEQWORD },
+
+    /* T13: mask prep + output R9 via 0→1 RAW + carry combine */
+    { SHL_DSZ64_DRI(TMP9, TMP2, 21), SHR_DSZ64_DRI(R9, TMP9, 21),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP4), NOP_SEQWORD },
+
+    /* ═══ LIMB c2 = a0*b2 + a1*(2*b1) + a2*b0  [W=43] ═══ */
+
+    /* T14: MUL a0*b2 + acc carry+lo via srcB RAW + carry */
+    { MUL_DSZ64_DRR(RCX, RDI, R11), ADD_DSZ64_DRR(TMP2, TMP0, R11),
+      SETCC_CONDB_DR(TMP3, TMP2), NOP_SEQWORD },
+
+    /* T15: hi(P0)+carry + MUL a1*(2*b1) + acc lo(P1) via 1→2 srcB RAW */
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP3), MUL_DSZ64_DRR(RCX, RSI, RBX),
+      ADD_DSZ64_DRR(TMP0, TMP2, RBX), NOP_SEQWORD },
+
+    /* T16: +hi(P1) + MUL a2*b0 + carry from lo(P0+P1) */
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX), MUL_DSZ64_DRR(RCX, R12, R15),
+      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD },
+
+    /* T17: acc lo(P2) + carry3 + add carry2 */
+    { ADD_DSZ64_DRR(TMP2, TMP0, R15), SETCC_CONDB_DR(TMP5, TMP2),
+      ADD_DSZ64_DRR(TMP4, TMP4, TMP3), NOP_SEQWORD },
+
+    /* T18: double-ADD hi (P2 hi + carry3) + lo-carry */
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX), ADD_DSZ64_DRR(TMP4, TMP4, TMP5),
+      SHR_DSZ64_DRI(TMP8, TMP2, 43), NOP_SEQWORD },
+
+    /* T19: hi shift + mask prep + output RDI via 1→2 RAW */
+    { SHL_DSZ64_DRI(TMP4, TMP4, 21), SHL_DSZ64_DRI(TMP9, TMP2, 21),
+      SHR_DSZ64_DRI(RDI, TMP9, 21), NOP_SEQWORD },
+
+    /* ═══ REDUCTION: carry*5 → out[0], re-propagate ═══ */
+
+    /* T20: carry combine + MUL×5 + add to out[0] — cascade 0→1→2 RAW */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP4), MUL_DSZ64_DIR(TMP1, 5, TMP0),
+      ADD_DSZ64_DRR(R10, R10, TMP0), NOP_SEQWORD },
+
+    /* T21: carry@44 + mask prep + propagate to out[1] via 0→2 RAW */
+    { SHR_DSZ64_DRI(TMP0, R10, 44), SHL_DSZ64_DRI(TMP9, R10, 20),
+      ADD_DSZ64_DRR(R9, R9, TMP0), NOP_SEQWORD },
+
+    /* T22: mask out[0] + carry@43 + mask prep out[1] */
+    { SHR_DSZ64_DRI(R10, TMP9, 20), SHR_DSZ64_DRI(TMP0, R9, 43),
+      SHL_DSZ64_DRI(TMP9, R9, 21), NOP_SEQWORD },
+
+    /* T23: mask out[1] + propagate to out[2] */
+    { SHR_DSZ64_DRI(R9, TMP9, 21), ADD_DSZ64_DRR(RDI, RDI, TMP0),
+      NOP, END_SEQWORD }
 
     };
 
@@ -128,10 +193,6 @@ static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
         "lea r10, [r14 + r14]\n\t" /* 10*b2 */
         "imul r9, r13, 10\n\t"     /* 10*b1 */
         "lea rbx, [r13 + r13]\n\t" /* 2*b1  (clobbers b pointer, must be last) */
-
-        /* clear accumulators */
-        "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
 
         /* copy b0 → RDX for first MUL (a0*b0) */
         "mov rdx, r15\n\t"
@@ -443,9 +504,24 @@ int main(void) {
         uint64_t dt = t1 - t0;
         sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+    printf("Naive -O3:   min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(ta, sa, sizeof(ta));
+        memcpy(tb, sb, sizeof(tb));
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_mul_fiat(ta, tb, ta);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0;
+        sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+           min/BATCH, sum/REPS/BATCH);
+
+    /* microcode */
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {
         memcpy(ta, sa, sizeof(ta));

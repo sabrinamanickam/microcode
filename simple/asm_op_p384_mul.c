@@ -33,6 +33,13 @@ static const uint64_t P384_P[6] = {
 
 #define P384_MU UINT64_C(0x100000001)
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/p384_mul.c"
+
+static void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_p384_mul(out, a, b);
+}
+
 /* ── fe_mul native C ─────────────────────────────────────────── */
 
 static inline void mont_iteration(uint64_t acc[7], uint64_t a_i,
@@ -731,7 +738,18 @@ int main(void) {
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+    printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(ta, sa, 48); memcpy(tb, sb, 48);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_mul_fiat(ta, tb, ta);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {

@@ -47,6 +47,13 @@ static const uint64_t CURVE25519_P[4] = {
     UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x7FFFFFFFFFFFFFFF)
 };
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/curve25519_solinas_mul.c"
+
+static void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_curve25519_solinas_mul(out, a, b);
+}
+
 /* ── native C reference (schoolbook + Solinas) ──────────────────── */
 
 static void fe_mul_native(const uint64_t *a, const uint64_t *b, uint64_t *out) {
@@ -603,7 +610,20 @@ int main(void) {
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n",
+    printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n",
+           min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp_a, state_a, 32);
+        memcpy(tmp_b, state_b, 32);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_mul_fiat(tmp_a, tmp_b, tmp_a);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;

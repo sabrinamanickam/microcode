@@ -1,7 +1,7 @@
 /*
  * asm_op_p224_sq.c — Montgomery squaring for P-224 via microcode
  *
- * 2-iter-per-vmwrite patch (42 triads/iter, 88 total).
+ * 2-iter-per-vmwrite patch (34 triads/iter, 71 total).
  * P-224: p = 2^224 - 2^96 + 1
  *   p[0] = 0x0000000000000001
  *   p[1] = 0xFFFFFFFF00000000
@@ -26,6 +26,13 @@ static const uint64_t P224_P[4] = {
     UINT64_C(0x0000000000000001), UINT64_C(0xFFFFFFFF00000000),
     UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x00000000FFFFFFFF)
 };
+
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/p224_square.c"
+
+static void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_p224_square(out, a);
+}
 
 /* ── fe_sq native C ──────────────────────────────────────────── */
 
@@ -131,148 +138,131 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
     cond_subtract(acc, out);
 }
 
-/* ── microcode (2-iter-per-vmwrite, 42 triads/iter, 88 total) ── */
+/* ── microcode (2-iter-per-vmwrite, 34 triads/iter, 71 total) ── */
 
 /*
  * Arch regs (persist across calls):
  *   R15=acc[0]  R9=acc[1]  R10=acc[2]  R13=acc[3]  RAX=acc[4]
- *   RSI=b[0]    R12=b[1]   R11=b[2]    R14=b[3]
+ *   RSI=b[0]    R12=b[1]   R11=b[2]    R14=b[3]  (used directly as MUL srcA)
  *   R8=0xFFFFFFFFFFFFFFFF  (mu AND p[2] — same value!)
  *   RBX=0xFFFFFFFF00000000 (p[1])
  *   RDI=a_i (set by caller before each vmwrite)
  *
- * TMP regs (set at start of each iteration):
- *   TMP10-13 = b[0..3] (reloaded from RSI,R12,R11,R14)
- *   TMP9 = p[3] = 0xFFFFFFFF (precomputed in Phase A T1 as SHR(R8,32))
+ * TMP regs:
+ *   TMP9 = p[3] = 0xFFFFFFFF (SHR in PREP, persists — MUL preserves srcA)
  *   TMP15 = a[i+1] (from RDX, saved by PREP)
  *
- * p[0] = 1 → m * p[0] = m, no MUL needed.
- * TMP9 preserved across Phase B because MUL(RCX, TMP9, RDX) doesn't clobber srcA.
+ * Optimizations vs 76-triad version:
+ *   - Arch regs as MUL srcA: eliminates PREP b→TMP copies (saves 1 PREP triad)
+ *   - T1 (RDX=RDI, SHR) merged into PREP/switch (saves 1 triad/iter)
+ *   - Phase B: PhC w0 in B1, mp1/mp2/mp3_lo saved via MUL srcB RAW,
+ *     B8+B9 merged (saves 1 triad/iter in Phase B)
+ *   - C8: acc[4] = carry + TMP14 merged via slot 1→2 RAW
+ *   Total: 76 → 71 triads
  */
 
 #define MONT_ITER \
-    /* ── PHASE A: schoolbook a_i(RDI) x b(TMP10-13) (13 triads) ── */ \
-    /* Precompute p[3] = SHR(R8, 32) = 0xFFFFFFFF in TMP9 (free slot) */ \
-    { ZEROEXT_DSZ64_DR(RDX, RDI), SHR_DSZ64_DRI(TMP9, R8, 32), \
-      NOP, NOP_SEQWORD }, \
-    { MUL_DSZ64_DRR(RCX, TMP10, RDX), NOP, NOP, NOP_SEQWORD }, \
-    { ZEROEXT_DSZ64_DR(TMP0, RDX), ZEROEXT_DSZ64_DR(TMP1, RCX), \
-      ZEROEXT_DSZ64_DR(RDX, RDI), NOP_SEQWORD }, \
-    /* MUL b1*ai + Phase A' w0 merge */ \
-    { MUL_DSZ64_DRR(RCX, TMP11, RDX), ADD_DSZ64_DRR(TMP0, R15, TMP0), \
-      SETCC_CONDB_DR(TMP3, TMP0), NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP2, TMP1, RDX), SETCC_CONDB_DR(TMP8, TMP2), \
+    /* ── PHASE A: schoolbook (10 triads) ── */ \
+    /* [Merge 1] MUL b0 + save both outputs via srcB/hi RAW */ \
+    { MUL_DSZ64_DRR(RCX, RSI, RDX), ZEROEXT_DSZ64_DR(TMP0, RDX), \
       ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD }, \
-    /* writeback w0->R15 + early-start Phase A' w1 */ \
-    { ZEROEXT_DSZ64_DR(RDX, RDI), ZEROEXT_DSZ64_DR(R15, TMP0), \
-      ADD_DSZ64_DRR(TMP0, R9, TMP2), NOP_SEQWORD }, \
-    { MUL_DSZ64_DRR(RCX, TMP12, RDX), NOP, NOP, NOP_SEQWORD }, \
+    /* reload + MUL b1 (slot 0→1) + Phase A' w0 merge */ \
+    { ZEROEXT_DSZ64_DR(RDX, RDI), MUL_DSZ64_DRR(RCX, R12, RDX), \
+      ADD_DSZ64_DRR(TMP0, R15, TMP0), NOP_SEQWORD }, \
+    /* w0 carry + w1 base + w1 carry */ \
+    { SETCC_CONDB_DR(TMP3, TMP0), ADD_DSZ64_DRR(TMP2, TMP1, RDX), \
+      SETCC_CONDB_DR(TMP8, TMP2), NOP_SEQWORD }, \
+    /* save hi(b1) + reload + writeback w0 */ \
+    { ZEROEXT_DSZ64_DR(TMP1, RCX), ZEROEXT_DSZ64_DR(RDX, RDI), \
+      ZEROEXT_DSZ64_DR(R15, TMP0), NOP_SEQWORD }, \
+    /* early w1 start + MUL b2 */ \
+    { ADD_DSZ64_DRR(TMP0, R9, TMP2), MUL_DSZ64_DRR(RCX, R11, RDX), \
+      NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP4, TMP1, RDX), SETCC_CONDB_DR(TMP5, TMP4), \
       ZEROEXT_DSZ64_DR(TMP1, RCX), NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP4, TMP4, TMP8), SETCC_CONDB_DR(TMP6, TMP4), \
       ZEROEXT_DSZ64_DR(RDX, RDI), NOP_SEQWORD }, \
-    /* MUL b3*ai + combine w2 carries in slot 1 */ \
-    { MUL_DSZ64_DRR(RCX, TMP13, RDX), ADD_DSZ64_DRR(TMP8, TMP5, TMP6), \
+    { MUL_DSZ64_DRR(RCX, R14, RDX), ADD_DSZ64_DRR(TMP8, TMP5, TMP6), \
       NOP, NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP5, TMP1, RDX), SETCC_CONDB_DR(TMP6, TMP5), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP5, TMP5, TMP8), SETCC_CONDB_DR(TMP7, TMP5), \
-      NOP, NOP_SEQWORD }, \
-    { ADD_DSZ64_DRR(TMP8, TMP6, TMP7), ADD_DSZ64_DRR(TMP6, RCX, TMP8), \
-      NOP, NOP_SEQWORD }, \
+      ADD_DSZ64_DRR(TMP5, TMP5, TMP8), NOP_SEQWORD }, \
+    { SETCC_CONDB_DR(TMP7, TMP5), ADD_DSZ64_DRR(TMP8, TMP6, TMP7), \
+      ADD_DSZ64_DRR(TMP6, RCX, TMP8), NOP_SEQWORD }, \
     \
-    /* ── PHASE A': add product to acc (8 triads) ── */ \
-    /* w1 triple-pack */ \
+    /* ── PHASE A': accumulate (8 triads) ── */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R9, TMP0), \
       ADD_DSZ64_DRR(TMP0, R10, TMP4), NOP_SEQWORD }, \
-    /* w2 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R10, TMP0), \
       ADD_DSZ64_DRR(TMP0, R13, TMP5), NOP_SEQWORD }, \
-    /* w3 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
     { ADD_DSZ64_DRR(TMP3, TMP1, TMP8), ZEROEXT_DSZ64_DR(R13, TMP0), \
       ADD_DSZ64_DRR(TMP0, RAX, TMP6), NOP_SEQWORD }, \
-    /* w4 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP3), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* w4 combine + Phase B setup (ZEROEXT RDX<-R15) in slot 2 */ \
     { ADD_DSZ64_DRR(TMP14, TMP1, TMP8), ZEROEXT_DSZ64_DR(RAX, TMP0), \
       ZEROEXT_DSZ64_DR(RDX, R15), NOP_SEQWORD }, \
     \
-    /* ── PHASE B: m*mu, m*p[1], m*p[2], m*p[3], chain (11 triads) ── */ \
-    /* mu MUL: m = acc[0] * R8 (mu = -1 = R8) */ \
-    { MUL_DSZ64_DRR(RCX, R8, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* save m = red[0] */ \
-    { ZEROEXT_DSZ64_DR(TMP6, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* m * p[1] = m * RBX */ \
-    { MUL_DSZ64_DRR(RCX, RBX, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* save lo=red[1], hi, reload m */ \
-    { ZEROEXT_DSZ64_DR(TMP7, RDX), ZEROEXT_DSZ64_DR(TMP3, RCX), \
-      ZEROEXT_DSZ64_DR(RDX, TMP6), NOP_SEQWORD }, \
-    /* m * p[2] = m * R8 + w0 discard (TMP8 = w0 carry via WAR) */ \
-    { MUL_DSZ64_DRR(RCX, R8, RDX), ADD_DSZ64_DRR(TMP0, R15, TMP6), \
+    /* ── PHASE B: reduction (8 triads) ── */ \
+    /* mu*acc[0]=m + Phase C w0 start (acc[0]+m via srcB RAW) */ \
+    { MUL_DSZ64_DRR(RCX, R8, RDX), ADD_DSZ64_DRR(TMP0, R15, RDX), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* save m*p2 lo/hi, reload m */ \
-    { ZEROEXT_DSZ64_DR(TMP4, RDX), ZEROEXT_DSZ64_DR(TMP5, RCX), \
-      ZEROEXT_DSZ64_DR(RDX, TMP6), NOP_SEQWORD }, \
-    /* m * p[3] = m * TMP9 */ \
-    { MUL_DSZ64_DRR(RCX, TMP9, RDX), NOP, NOP, NOP_SEQWORD }, \
-    /* save m*p3 lo/hi + start red[2] chain */ \
-    { ZEROEXT_DSZ64_DR(TMP6, RDX), ZEROEXT_DSZ64_DR(TMP2, RCX), \
-      ADD_DSZ64_DRR(TMP3, TMP3, TMP4), NOP_SEQWORD }, \
-    /* red[2] carry + red[3] base */ \
-    { SETCC_CONDB_DR(TMP1, TMP3), ADD_DSZ64_DRR(TMP5, TMP5, TMP6), \
-      SETCC_CONDB_DR(TMP0, TMP5), NOP_SEQWORD }, \
-    /* red[3] += carry2 */ \
-    { ADD_DSZ64_DRR(TMP5, TMP5, TMP1), SETCC_CONDB_DR(TMP1, TMP5), \
+    /* save m + MUL p1 + save mp1_lo via slot 1→2 srcB RAW */ \
+    { ZEROEXT_DSZ64_DR(TMP6, RDX), MUL_DSZ64_DRR(RCX, RBX, RDX), \
+      ZEROEXT_DSZ64_DR(TMP7, RDX), NOP_SEQWORD }, \
+    /* save mp1_hi + reload m */ \
+    { ZEROEXT_DSZ64_DR(TMP3, RCX), ZEROEXT_DSZ64_DR(RDX, TMP6), \
       NOP, NOP_SEQWORD }, \
-    /* carry3 + red[4] + start Phase C w1 in slot 2 */ \
-    { ADD_DSZ64_DRR(TMP1, TMP0, TMP1), ADD_DSZ64_DRR(TMP2, TMP2, TMP1), \
-      ADD_DSZ64_DRR(TMP0, R9, TMP7), NOP_SEQWORD }, \
+    /* MUL p2 + save mp2_lo/hi via srcB/hi RAW */ \
+    { MUL_DSZ64_DRR(RCX, R8, RDX), ZEROEXT_DSZ64_DR(TMP4, RDX), \
+      ZEROEXT_DSZ64_DR(TMP5, RCX), NOP_SEQWORD }, \
+    /* reload m + MUL p3 + save mp3_lo via slot 1→2 srcB RAW */ \
+    { ZEROEXT_DSZ64_DR(RDX, TMP6), MUL_DSZ64_DRR(RCX, TMP9, RDX), \
+      ZEROEXT_DSZ64_DR(TMP6, RDX), NOP_SEQWORD }, \
+    /* save mp3_hi + red[2] = mp1_hi + mp2_lo */ \
+    { ZEROEXT_DSZ64_DR(TMP2, RCX), ADD_DSZ64_DRR(TMP3, TMP3, TMP4), \
+      SETCC_CONDB_DR(TMP1, TMP3), NOP_SEQWORD }, \
+    /* red[3]: carry-first (mp2_hi+carry can't overflow since p2=all-ones) */ \
+    { ADD_DSZ64_DRR(TMP5, TMP5, TMP1), ADD_DSZ64_DRR(TMP5, TMP5, TMP6), \
+      SETCC_CONDB_DR(TMP1, TMP5), NOP_SEQWORD }, \
+    /* red[4] + Phase C w1 start (merged) */ \
+    { ADD_DSZ64_DRR(TMP2, TMP2, TMP1), ADD_DSZ64_DRR(TMP0, R9, TMP7), \
+      NOP, NOP_SEQWORD }, \
     \
-    /* ── PHASE C: add red to acc, shift (9 triads) ── */ \
-    /* w1 triple-pack (w0 carry in TMP8 from Phase B) */ \
+    /* ── PHASE C: add red + shift (8 triads, acc[4] merged into C8) ── */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP8), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* w1 combine + writeback R15 + w2 start */ \
     { ADD_DSZ64_DRR(TMP6, TMP1, TMP8), ZEROEXT_DSZ64_DR(R15, TMP0), \
       ADD_DSZ64_DRR(TMP0, R10, TMP3), NOP_SEQWORD }, \
-    /* w2 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP6), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* w2 combine + writeback R9 + w3 start */ \
     { ADD_DSZ64_DRR(TMP6, TMP1, TMP8), ZEROEXT_DSZ64_DR(R9, TMP0), \
       ADD_DSZ64_DRR(TMP0, R13, TMP5), NOP_SEQWORD }, \
-    /* w3 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP6), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* w3 combine + writeback R10 + w4 start */ \
     { ADD_DSZ64_DRR(TMP6, TMP1, TMP8), ZEROEXT_DSZ64_DR(R10, TMP0), \
       ADD_DSZ64_DRR(TMP0, RAX, TMP2), NOP_SEQWORD }, \
-    /* w4 triple-pack */ \
     { SETCC_CONDB_DR(TMP1, TMP0), ADD_DSZ64_DRR(TMP0, TMP0, TMP6), \
       SETCC_CONDB_DR(TMP8, TMP0), NOP_SEQWORD }, \
-    /* w4 combine */ \
+    /* C8: writeback acc[3] + compute carry + acc[4] via slot 1→2 RAW */ \
     { ZEROEXT_DSZ64_DR(R13, TMP0), ADD_DSZ64_DRR(TMP0, TMP1, TMP8), \
-      NOP, NOP_SEQWORD }, \
-    /* acc[4] = carry_w4 + Phase A' carry (no red4_carry, red[4] < 2^32) */ \
-    { ADD_DSZ64_DRR(RAX, TMP0, TMP14), NOP, NOP, NOP_SEQWORD }
+      ADD_DSZ64_DRR(RAX, TMP0, TMP14), NOP_SEQWORD }
 
 static void install_p224_sq_patch(void) {
     ucode_t patch[] = {
-    /* PREP: reload b->TMPs, save a[i+1] from RDX->TMP15 */
-    { ZEROEXT_DSZ64_DR(TMP10, RSI), ZEROEXT_DSZ64_DR(TMP11, R12),
-      ZEROEXT_DSZ64_DR(TMP12, R11), NOP_SEQWORD },
-    { ZEROEXT_DSZ64_DR(TMP13, R14), ZEROEXT_DSZ64_DR(TMP15, RDX),
+    /* PREP: save a[i+1], load a_i→RDX, compute p[3]→TMP9 */
+    { ZEROEXT_DSZ64_DR(TMP15, RDX), ZEROEXT_DSZ64_DR(RDX, RDI),
+      SHR_DSZ64_DRI(TMP9, R8, 32), NOP_SEQWORD },
+    MONT_ITER,       /* iteration i   (a_i already in RDI+RDX) */
+    /* Switch: load a[i+1]→RDI, then RDI→RDX via slot 0→1 RAW */
+    { ZEROEXT_DSZ64_DR(RDI, TMP15), ZEROEXT_DSZ64_DR(RDX, RDI),
       NOP, NOP_SEQWORD },
-    MONT_ITER,       /* iteration i   (a_i in RDI) */
-    { ZEROEXT_DSZ64_DR(RDI, TMP15), NOP, NOP, NOP_SEQWORD },  /* switch */
-    MONT_ITER,       /* iteration i+1 (a_{i+1} now in RDI) */
+    MONT_ITER,       /* iteration i+1 */
+    /* END */
     { NOP, NOP, NOP, END_SEQWORD }
     };
 
@@ -474,7 +464,18 @@ int main(void) {
         t1 = rdtsc_end();
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+    printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp, state, 32);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_sq_fiat(tmp, tmp);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n", min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < REPS; r++) {

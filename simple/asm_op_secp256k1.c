@@ -56,6 +56,13 @@
 #define MASK52 0xFFFFFFFFFFFFFULL
 #define MASK48 0xFFFFFFFFFFFFULL
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/secp256k1_dettman_square.c"
+
+static void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_secp256k1_dettman_square(out, a);
+}
+
 /* ── fe_sq native C (matches Fiat secp256k1_dettman_square) ──── */
 
 static void fe_sq_native(const uint64_t *a, uint64_t *out) {
@@ -898,7 +905,20 @@ int main(void) {
         uint64_t dt = t1 - t0;
         sum += dt; if (dt < min) min = dt;
     }
-    printf("Native -O3:  min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+    printf("Naive -O3:   min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
+           min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp, state, sizeof(tmp));
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_sq_fiat(tmp, tmp);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0;
+        sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4" PRIu64 "  avg/op %4" PRIu64 " cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
     /* microcode */

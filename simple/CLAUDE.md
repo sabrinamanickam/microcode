@@ -12,9 +12,13 @@ Build: `make PROG=asm_op_<name>` produces `<name>_static`. Run: `sudo taskset -c
 
 - 128-triad patch RAM limit (each triad = 4 address units)
 - MUL must be in slot 0 of a triad
-- Intra-triad RAW: slot 0->1 confirmed (value+flags), slot 1->2 confirmed (flags via SETCC)
-- Slot 0->2 value RAW: **CONFIRMED** (test_slot02_raw.c, 2026-04-28)
+- Intra-triad RAW: **ALL slots confirmed** for values AND flags:
+  - Slot 0->1 value+flags: confirmed (production code)
+  - Slot 0->2 value: **CONFIRMED** (test_slot02_raw.c, 2026-04-28)
+  - Slot 1->2 value: **CONFIRMED** (test_slot_raw_extended.c, 2026-04-28)
+  - MUL srcB (RDX) slot 0->1: **CONFIRMED** (test_slot_raw_extended.c, 2026-04-28)
 - Slot 0+2 WAW: **CONFIRMED, slot 2 wins** (test_slot02_raw.c, 2026-04-28)
+- **Full sequential semantics within triads**: every slot can read values from any earlier slot
 - SETCC_CONDB_DR only works on TMP registers, NOT arch registers
 - TMP registers don't persist across vmwrite calls — keep state in arch regs
 - MUL_DSZ64_DRR(hi, srcA, srcB): srcA preserved, srcB gets lo, hi gets hi
