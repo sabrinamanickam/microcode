@@ -505,7 +505,47 @@ static void install_p224_solinas_sq_patch(void) {
       SHR_DSZ64_DRI(RAX, TMP9, 8),
       SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
     { OR_DSZ64_DRR(R14, TMP8, TMP1),
-      NOP, NOP, END_SEQWORD }
+      NOP, NOP, NOP_SEQWORD },
+
+    /* ═══ Conversion: 8×56-bit → 7×64-bit (in-microcode) ═══
+     * w56[0..7] in R15,R13,R9,R10,RBX,RBP,RAX,R14 → w[0..6] repacked in the
+     * first seven of those regs. TMP0 carries 56-bit slack between limbs;
+     * TMP1 is the SHL scratch. Each triad consumes one source w56 limb. */
+
+    /* C0: w[0] = w56[0] | (w56[1]<<56) ; carry := w56[1] >> 8 */
+    { SHR_DSZ64_DRI(TMP0, R13, 8),
+      SHL_DSZ64_DRI(TMP1, R13, 56),
+      OR_DSZ64_DRR(R15, R15, TMP1), NOP_SEQWORD },
+
+    /* C1: w[1] = (w56[1]>>8) | (w56[2]<<48) ; carry := w56[2] >> 16 */
+    { SHL_DSZ64_DRI(TMP1, R9, 48),
+      OR_DSZ64_DRR(R13, TMP0, TMP1),
+      SHR_DSZ64_DRI(TMP0, R9, 16), NOP_SEQWORD },
+
+    /* C2: w[2] = (w56[2]>>16) | (w56[3]<<40) ; carry := w56[3] >> 24 */
+    { SHL_DSZ64_DRI(TMP1, R10, 40),
+      OR_DSZ64_DRR(R9, TMP0, TMP1),
+      SHR_DSZ64_DRI(TMP0, R10, 24), NOP_SEQWORD },
+
+    /* C3: w[3] = (w56[3]>>24) | (w56[4]<<32) ; carry := w56[4] >> 32 */
+    { SHL_DSZ64_DRI(TMP1, RBX, 32),
+      OR_DSZ64_DRR(R10, TMP0, TMP1),
+      SHR_DSZ64_DRI(TMP0, RBX, 32), NOP_SEQWORD },
+
+    /* C4: w[4] = (w56[4]>>32) | (w56[5]<<24) ; carry := w56[5] >> 40 */
+    { SHL_DSZ64_DRI(TMP1, RBP, 24),
+      OR_DSZ64_DRR(RBX, TMP0, TMP1),
+      SHR_DSZ64_DRI(TMP0, RBP, 40), NOP_SEQWORD },
+
+    /* C5: w[5] = (w56[5]>>40) | (w56[6]<<16) ; carry := w56[6] >> 48 */
+    { SHL_DSZ64_DRI(TMP1, RAX, 16),
+      OR_DSZ64_DRR(RBP, TMP0, TMP1),
+      SHR_DSZ64_DRI(TMP0, RAX, 48), NOP_SEQWORD },
+
+    /* C6: w[6] = (w56[6]>>48) | (w56[7]<<8)  [last] */
+    { SHL_DSZ64_DRI(TMP1, R14, 8),
+      OR_DSZ64_DRR(RAX, TMP0, TMP1),
+      NOP, END_SEQWORD }
 
     };
 
@@ -518,25 +558,27 @@ static void install_p224_solinas_sq_patch(void) {
 
 static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
     /*
-     * Convert 4×64-bit → 4×56-bit, squaring in microcode, convert back.
-     * 56-bit limbs avoid all overflow issues (2×a < 2^57, hi < 2^48).
+     * Microcode does 4×56-bit schoolbook squaring AND the 56→64 repack
+     * in a single vmwrite. The C wrapper just packs the input limbs and
+     * calls solinas_reduce on the 7×64-bit product.
      */
 
-    /* Step 1: convert to 56-bit limbs */
+    /* Step 1: convert to 56-bit limbs (the 56-bit form keeps 2*a within 64 bits
+     * during the schoolbook precomputation). */
     uint64_t a56[4];
     a56[0] = a[0] & 0xFFFFFFFFFFFFFFULL;
     a56[1] = (a[0] >> 56) | ((a[1] << 8) & 0xFFFFFFFFFFFFFFULL);
     a56[2] = (a[1] >> 48) | ((a[2] << 16) & 0xFFFFFFFFFFFFFFULL);
     a56[3] = (a[2] >> 40) | (a[3] << 24);  /* ≤56 bits since a[3] < 2^32 */
 
-    /* Step 2: vmwrite — 4-limb 56-bit squaring (same proven patch as P-448).
-     * Optimization: PREP reads inputs directly from RDI/RSI/R12/R11 (no extra
-     * copies needed), and the output pointer lives in R8 (preserved by the
-     * patch — R8 is never written), so we don't need to stash it on stack. */
-    uint64_t w56[8];
+    /* Step 2: vmwrite — schoolbook + 56→64 repack. Output is 7×64-bit
+     * directly (no further conversion needed in C).
+     *  - PREP reads inputs from RDI/RSI/R12/R11 directly.
+     *  - Output pointer lives in R8 (preserved across the patch). */
+    uint64_t w[7];
     {
         register uint64_t *_a56 asm("rcx") = a56;
-        register uint64_t *_w56 asm("r8")  = w56;
+        register uint64_t *_w   asm("r8")  = w;
 
         asm volatile(
             "push rbp\n\t"
@@ -548,9 +590,8 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
 
             "vmwrite rcx, rdx\n\t"
 
-            /* Patch outputs: R15=w56[0], R13=w56[1], R9=w56[2], R10=w56[3],
-             *                RBX=w56[4], RBP=w56[5], RAX=w56[6], R14=w56[7].
-             * R8 (output ptr) is preserved by the patch. */
+            /* After patch: R15=w[0], R13=w[1], R9=w[2], R10=w[3],
+             *              RBX=w[4], RBP=w[5], RAX=w[6]. (R14 unused.) */
             "mov [r8],      r15\n\t"
             "mov [r8 + 8],  r13\n\t"
             "mov [r8 + 16], r9\n\t"
@@ -558,11 +599,10 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
             "mov [r8 + 32], rbx\n\t"
             "mov [r8 + 40], rbp\n\t"
             "mov [r8 + 48], rax\n\t"
-            "mov [r8 + 56], r14\n\t"
 
             "pop rbp\n\t"
 
-            : "+r"(_a56), "+r"(_w56)
+            : "+r"(_a56), "+r"(_w)
             :
             : "rax", "rbx", "rdx", "rsi", "rdi", "rbp",
               "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -570,30 +610,7 @@ static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
         );
     }
 
-    /* Step 3: convert 56-bit product limbs → 64-bit for Solinas reduction
-     * Product = w56[0] + w56[1]·2^56 + ... + w56[7]·2^392
-     * Repack to W64[0..6] (7 × 64-bit words, 448 bits).
-     * Must use __uint128_t to avoid shift overflow! */
-    uint64_t w[7];
-    { __uint128_t acc;
-      acc = w56[0];
-      acc |= (__uint128_t)w56[1] << 56;
-      w[0] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[2] << 48;
-      w[1] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[3] << 40;
-      w[2] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[4] << 32;
-      w[3] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[5] << 24;
-      w[4] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[6] << 16;
-      w[5] = (uint64_t)acc; acc >>= 64;
-      acc |= (__uint128_t)w56[7] << 8;
-      w[6] = (uint64_t)acc;
-    }
-
-    /* Step 4: Solinas reduction (existing, proven code) */
+    /* Step 3: Solinas reduction (existing, proven C code). */
     solinas_reduce(w, out);
 }
 

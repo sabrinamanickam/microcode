@@ -4,9 +4,17 @@
 
 | Regime | Curves | Current Status | Target |
 |--------|--------|---------------|--------|
-| Single vmwrite, Solinas | curve25519, secp256k1_dett, P-521, poly1305 | **Winning** | Widen lead |
+| Single vmwrite, Solinas | curve25519, secp256k1_dett, P-521, poly1305, **P-224** | **Winning** | Widen lead |
 | Multi vmwrite, Karatsuba | P-448 | **Break-even** | Beat CryptOpt |
-| Montgomery iterative | P-224, P-256, P-384, secp256k1_mont | **Losing** | Beat CryptOpt |
+| Montgomery iterative | P-256, P-384, secp256k1_mont | **Losing** | Beat CryptOpt |
+
+### P-224 sq (2026-04-30): 113 cyc microcode vs 164 cyc fiat-crypto = 1.45×
+Recipe: convert to 4×56-bit unsaturated Solinas, schoolbook squaring (10 MULs)
+in single vmwrite (34 triads, ~37 cyc), 56→64 + Solinas fold in C wrapper.
+Naive hand-written Solinas in C is 70 cyc (faster, but irrelevant — fiat is the
+real GCC baseline). Inline asm tightened: PREP reads RDI/RSI/R12/R11 directly
+so the 4 dup movs to R15/R13/R9/R10 are gone; output pointer rides in R8
+(preserved by the patch) instead of stack-stashing R15.
 
 ## Theory 1: Redundant/Lazy Carry — Skip SETCC Entirely
 **Status: DISPROVEN — does not work for ≥2 products per limb**
@@ -85,7 +93,7 @@ ALTERNATIVE: Use a DIFFERENT accumulation strategy:
 - This is Theory 3 (MUL-only patches)
 
 ## Theory 2: Convert Montgomery Curves to Unsaturated Solinas
-**Status: TO TRY (P-256 after Theory 1)**
+**Status: PROVEN on P-224 (1.45× over fiat). Apply next to P-256, P-384.**
 
 Montgomery curves lose because of iterative SETCC carry chains.
 Converting to unsaturated/Solinas representation eliminates the iterative structure.
