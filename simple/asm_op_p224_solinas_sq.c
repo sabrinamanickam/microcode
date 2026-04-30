@@ -39,6 +39,13 @@
 #include "../../include/ucode_macro.h"
 #include "../../include/misc.h"
 
+/* ── fiat-crypto reference (the REAL GCC baseline CryptOpt compares against) ── */
+#include "../curvesC/p224_square.c"
+
+static void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_p224_square(out, a);
+}
+
 static const uint64_t P224_P[4] = {
     UINT64_C(0x0000000000000001), UINT64_C(0xFFFFFFFF00000000),
     UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x00000000FFFFFFFF)
@@ -235,74 +242,62 @@ static void fe_sq_native(const uint64_t *a, uint64_t *out) {
     uint64_t w[7];
 
     /*
-     * Schoolbook squaring with explicit carry chain to avoid
-     * __uint128_t overflow. Uses the Comba (column-wise) approach:
-     * accumulate each column with a running carry.
+     * Schoolbook squaring with overflow-safe accumulation.
+     * Every addition tracks __uint128_t overflow via comparison.
      */
-    __uint128_t acc = 0;
+    __uint128_t acc = 0, tmp;
+    uint64_t extra;
 
-    /* Column 0: a0*a0 */
-    acc += (__uint128_t)a0 * a0;
-    w[0] = (uint64_t)acc;
-    acc >>= 64;
+#define SAFE_ADD(prod) do { tmp=acc; acc+=(prod); if(acc<tmp) extra++; } while(0)
 
-    /* Column 1: a0*a1 + a1*a0 = 2*a0*a1 */
-    acc += (__uint128_t)a0 * a1;
-    acc += (__uint128_t)a1 * a0;
+    /* Column 0: a0² (1 product, no overflow possible) */
+    acc = (__uint128_t)a0 * a0;
+    w[0] = (uint64_t)acc; acc >>= 64;
+
+    /* Column 1: 2*a0*a1 (2 products) */
+    extra = 0;
+    SAFE_ADD((__uint128_t)a0 * a1);
+    SAFE_ADD((__uint128_t)a1 * a0);
     w[1] = (uint64_t)acc;
-    acc >>= 64;
+    acc = (acc >> 64) | ((__uint128_t)extra << 64);
 
-    /* Column 2: a0*a2 + a1*a1 + a2*a0 */
-    acc += (__uint128_t)a0 * a2;
-    acc += (__uint128_t)a1 * a1;
-    acc += (__uint128_t)a2 * a0;
+    /* Column 2: 2*a0*a2 + a1² (3 products) */
+    extra = 0;
+    SAFE_ADD((__uint128_t)a0 * a2);
+    SAFE_ADD((__uint128_t)a1 * a1);
+    SAFE_ADD((__uint128_t)a2 * a0);
     w[2] = (uint64_t)acc;
-    acc >>= 64;
+    acc = (acc >> 64) | ((__uint128_t)extra << 64);
 
-    /* Column 3: a0*a3 + a1*a2 + a2*a1 + a3*a0 */
-    /* This has 4 products. Max sum ~ 4*2^128. After >>64 from col2,
-     * acc < 2^66 (max carry from 3 products). Adding 4 products:
-     * acc < 2^66 + 4*2^128 = ~2^130. But __uint128_t can only hold 2^128-1!
-     * Solution: add products one at a time and propagate extra carries. */
-    { uint64_t extra = 0;
-      acc += (__uint128_t)a0 * a3;
-      acc += (__uint128_t)a1 * a2;
-      /* At this point acc might be close to 2^128. Adding more could overflow. */
-      /* Safe because: carry from col2 < 2^66, two products < 2*2^128,
-       * so acc < 2^66 + 2^129 < 2^130. Need to handle overflow. */
-      /* Extract overflow: if acc wrapped around, extra increments. */
-      __uint128_t tmp = acc;
-      acc += (__uint128_t)a2 * a1;
-      if (acc < tmp) extra++;
-      tmp = acc;
-      acc += (__uint128_t)a3 * a0;
-      if (acc < tmp) extra++;
-      w[3] = (uint64_t)acc;
-      acc = (acc >> 64) | ((__uint128_t)extra << 64); }
+    /* Column 3: 2*a0*a3 + 2*a1*a2 (4 products) */
+    extra = 0;
+    SAFE_ADD((__uint128_t)a0 * a3);
+    SAFE_ADD((__uint128_t)a1 * a2);
+    SAFE_ADD((__uint128_t)a2 * a1);
+    SAFE_ADD((__uint128_t)a3 * a0);
+    w[3] = (uint64_t)acc;
+    acc = (acc >> 64) | ((__uint128_t)extra << 64);
 
-    /* Column 4: a1*a3 + a2*a2 + a3*a1 */
-    { uint64_t extra = 0;
-      __uint128_t tmp;
-      acc += (__uint128_t)a1 * a3;
-      tmp = acc;
-      acc += (__uint128_t)a2 * a2;
-      if (acc < tmp) extra++;
-      tmp = acc;
-      acc += (__uint128_t)a3 * a1;
-      if (acc < tmp) extra++;
-      w[4] = (uint64_t)acc;
-      acc = (acc >> 64) | ((__uint128_t)extra << 64); }
+    /* Column 4: 2*a1*a3 + a2² (3 products) */
+    extra = 0;
+    SAFE_ADD((__uint128_t)a1 * a3);
+    SAFE_ADD((__uint128_t)a2 * a2);
+    SAFE_ADD((__uint128_t)a3 * a1);
+    w[4] = (uint64_t)acc;
+    acc = (acc >> 64) | ((__uint128_t)extra << 64);
 
-    /* Column 5: a2*a3 + a3*a2 = 2*a2*a3 */
-    acc += (__uint128_t)a2 * a3;
-    acc += (__uint128_t)a3 * a2;
+    /* Column 5: 2*a2*a3 (2 products) */
+    extra = 0;
+    SAFE_ADD((__uint128_t)a2 * a3);
+    SAFE_ADD((__uint128_t)a3 * a2);
     w[5] = (uint64_t)acc;
-    acc >>= 64;
+    acc = (acc >> 64) | ((__uint128_t)extra << 64);
 
-    /* Column 6: a3*a3 */
+    /* Column 6: a3² (1 product) */
     acc += (__uint128_t)a3 * a3;
     w[6] = (uint64_t)acc;
 
+#undef SAFE_ADD
     solinas_reduce(w, out);
 }
 
@@ -318,47 +313,38 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
     uint64_t w[7];
     __uint128_t acc = 0;
 
-    /* Column 0 */
-    acc += (__uint128_t)a0 * a0;
-    w[0] = (uint64_t)acc; acc >>= 64;
+    /* Overflow-safe Comba: every addition tracks __uint128_t overflow */
+    { __uint128_t tmp; uint64_t extra;
+#define SAFE_ADD(prod) do{tmp=acc;acc+=(prod);if(acc<tmp)extra++;}while(0)
 
-    /* Column 1 */
-    acc += (__uint128_t)a0 * a1;
-    acc += (__uint128_t)a1 * a0;
-    w[1] = (uint64_t)acc; acc >>= 64;
+    acc = (__uint128_t)a0*a0;
+    w[0]=(uint64_t)acc; acc>>=64;
 
-    /* Column 2 */
-    acc += (__uint128_t)a0 * a2;
-    acc += (__uint128_t)a1 * a1;
-    acc += (__uint128_t)a2 * a0;
-    w[2] = (uint64_t)acc; acc >>= 64;
+    extra=0;
+    SAFE_ADD((__uint128_t)a0*a1); SAFE_ADD((__uint128_t)a1*a0);
+    w[1]=(uint64_t)acc; acc=(acc>>64)|((__uint128_t)extra<<64);
 
-    /* Column 3 (4 products, may overflow) */
-    { uint64_t extra = 0; __uint128_t tmp;
-      acc += (__uint128_t)a0 * a3;
-      acc += (__uint128_t)a1 * a2;
-      tmp = acc; acc += (__uint128_t)a2 * a1; if (acc < tmp) extra++;
-      tmp = acc; acc += (__uint128_t)a3 * a0; if (acc < tmp) extra++;
-      w[3] = (uint64_t)acc;
-      acc = (acc >> 64) | ((__uint128_t)extra << 64); }
+    extra=0;
+    SAFE_ADD((__uint128_t)a0*a2); SAFE_ADD((__uint128_t)a1*a1); SAFE_ADD((__uint128_t)a2*a0);
+    w[2]=(uint64_t)acc; acc=(acc>>64)|((__uint128_t)extra<<64);
 
-    /* Column 4 (3 products, may overflow) */
-    { uint64_t extra = 0; __uint128_t tmp;
-      acc += (__uint128_t)a1 * a3;
-      tmp = acc; acc += (__uint128_t)a2 * a2; if (acc < tmp) extra++;
-      tmp = acc; acc += (__uint128_t)a3 * a1; if (acc < tmp) extra++;
-      w[4] = (uint64_t)acc;
-      acc = (acc >> 64) | ((__uint128_t)extra << 64); }
+    extra=0;
+    SAFE_ADD((__uint128_t)a0*a3); SAFE_ADD((__uint128_t)a1*a2);
+    SAFE_ADD((__uint128_t)a2*a1); SAFE_ADD((__uint128_t)a3*a0);
+    w[3]=(uint64_t)acc; acc=(acc>>64)|((__uint128_t)extra<<64);
 
-    /* Column 5 */
-    acc += (__uint128_t)a2 * a3;
-    acc += (__uint128_t)a3 * a2;
-    w[5] = (uint64_t)acc; acc >>= 64;
+    extra=0;
+    SAFE_ADD((__uint128_t)a1*a3); SAFE_ADD((__uint128_t)a2*a2); SAFE_ADD((__uint128_t)a3*a1);
+    w[4]=(uint64_t)acc; acc=(acc>>64)|((__uint128_t)extra<<64);
 
-    /* Column 6 */
-    acc += (__uint128_t)a3 * a3;
-    w[6] = (uint64_t)acc;
+    extra=0;
+    SAFE_ADD((__uint128_t)a2*a3); SAFE_ADD((__uint128_t)a3*a2);
+    w[5]=(uint64_t)acc; acc=(acc>>64)|((__uint128_t)extra<<64);
 
+    acc += (__uint128_t)a3*a3;
+    w[6]=(uint64_t)acc;
+#undef SAFE_ADD
+    }
     solinas_reduce(w, out);
 }
 
@@ -386,144 +372,140 @@ static void fe_sq_reference(const uint64_t *a, uint64_t *out) {
 static void install_p224_solinas_sq_patch(void) {
     ucode_t patch[] = {
 
-    /* ═══ PREP: copy a[0..3] → TMP0..TMP3, 2*a[0..3] → TMP4..TMP7 ═══ */
+    /*
+     * 4-limb 56-bit squaring: same proven pattern as P-448.
+     * 10 MULs, 7 output limbs (56-bit masked via SHL+SHR).
+     * No 2× overflow (56-bit inputs: 2×a < 2^57 < 2^64).
+     * No R8 overflow (hi < 2^48: sum of 2 hi's + carries < 2^50).
+     *
+     * srcA: RDI=a0, RSI=a1, R12=a2, R11=a3 (preserved by MUL)
+     * srcB: TMP10=a0, TMP11=a1, TMP12=a2, TMP13=a3 (from PREP)
+     * Accumulation: TMP0=lo acc, TMP4=hi temp, TMP8=lo carry,
+     *               TMP1=hi carry, TMP9=mask prep, TMP15=SETCC
+     * Output: R15=c0, R13=c1, R9=c2, R10=c3, RBX=c4, RBP=c5,
+     *         RAX=c6 (all 56-bit masked), R14=overflow carry
+     */
 
-    /* P0 */ { ZEROEXT_DSZ64_DR(TMP0, RDI),
-               ZEROEXT_DSZ64_DR(TMP1, RSI),
-               ZEROEXT_DSZ64_DR(TMP2, R11),
+    /* ═══ PREP ═══
+     * Read input values directly from RDI/RSI/R12/R11 (preserved as MUL srcA),
+     * eliminating the need for caller to copy them into R15/R13/R9/R10. */
+    /* P0 */ { ZEROEXT_DSZ64_DR(TMP10, RDI),
+               ZEROEXT_DSZ64_DR(TMP11, RSI),
+               ZEROEXT_DSZ64_DR(TMP12, R12),
                NOP_SEQWORD },
-    /* P1 */ { ZEROEXT_DSZ64_DR(TMP3, R14),
-               ADD_DSZ64_DRR(TMP4, RDI, RDI),      /* 2*a0 */
-               ADD_DSZ64_DRR(TMP5, RSI, RSI),       /* 2*a1 */
-               NOP_SEQWORD },
-    /* P2 */ { ADD_DSZ64_DRR(TMP6, R11, R11),       /* 2*a2 */
-               ADD_DSZ64_DRR(TMP7, R14, R14),       /* 2*a3 */
-               ZEROEXT_DSZ64_DR(RDX, TMP0),          /* prep a0 for SQ0 MUL */
+    /* P1 */ { ZEROEXT_DSZ64_DR(TMP13, R11),
+               NOTAND_DSZ64_DRR(TMP0, TMP0, TMP0),
+               ZEROEXT_DSZ64_DR(RDX, RDI),
                NOP_SEQWORD },
 
-    /* ═══ w0 = a0^2 ═══ */
-    /* SQ0-0: MUL a0*a0 → hi:RCX, lo:RDX */
-    /* SQ0-0 */ { MUL_DSZ64_DRR(RCX, TMP0, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ0-1: w0=lo→RDI, R8=hi, prep RDX=2*a1 */
-    /* SQ0-1 */ { ZEROEXT_DSZ64_DR(RDI, RDX),         /* w0 → RDI */
-                  ZEROEXT_DSZ64_DR(R8, RCX),           /* R8 = hi(a0^2) */
-                  ZEROEXT_DSZ64_DR(RDX, TMP5),         /* RDX = 2*a1 */
-                  NOP_SEQWORD },
+    /* ═══ c0 = a0² (1 MUL) ═══ */
+    { MUL_DSZ64_DRR(RCX, RDI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56),
+      SHL_DSZ64_DRI(TMP9, TMP0, 8), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(R15, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
 
-    /* ═══ w1 = 2*a0*a1 ═══ */
-    /* SQ1-0: MUL a0 * 2a1 */
-    /* SQ1-0 */ { MUL_DSZ64_DRR(RCX, TMP0, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ1-1: acc = R8(carry) + lo */
-    /* SQ1-1 */ { ADD_DSZ64_DRR(TMP13, R8, RDX),      /* TMP13 = hi(w0) + lo(2a0a1) */
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  ZEROEXT_DSZ64_DR(RDX, TMP6),         /* RDX = 2*a2 for w2 */
-                  NOP_SEQWORD },
-    /* SQ1-2: w1→RSI, R8 = hi + carry */
-    /* SQ1-2 */ { ZEROEXT_DSZ64_DR(RSI, TMP13),       /* w1 → RSI */
-                  ADD_DSZ64_DRR(R8, RCX, TMP15),       /* R8 = hi + carry_bit */
-                  NOP, NOP_SEQWORD },
+    /* ═══ c1 = 2·a0·a1 (1 MUL) ═══ */
+    { ADD_DSZ64_DRR(RDX, TMP11, TMP11),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP9, TMP0, 8),
+      SHR_DSZ64_DRI(R13, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      ADD_DSZ64_DRR(RDX, TMP12, TMP12),
+      NOP, NOP_SEQWORD },
 
-    /* ═══ w2 = 2*a0*a2 + a1^2 (2 MULs) ═══ */
-    /* SQ2-0: MAC1 = a0 * 2a2 */
-    /* SQ2-0 */ { MUL_DSZ64_DRR(RCX, TMP0, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ2-1: TMP13 = R8(carry) + lo */
-    /* SQ2-1 */ { ADD_DSZ64_DRR(TMP13, R8, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  ZEROEXT_DSZ64_DR(RDX, TMP1),         /* RDX = a1 for a1^2 */
-                  NOP_SEQWORD },
-    /* SQ2-2: R8 = hi1 + carry1; MAC2 = a1 * a1 */
-    /* SQ2-2 */ { ADD_DSZ64_DRR(R8, RCX, TMP15),
-                  MUL_DSZ64_DRR(RCX, TMP1, RDX),
-                  NOP, NOP_SEQWORD },
-    /* SQ2-3: TMP13 += lo2 */
-    /* SQ2-3 */ { ADD_DSZ64_DRR(TMP13, TMP13, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  NOP, NOP_SEQWORD },
-    /* SQ2-4: w2→R11, R8 += hi2 + carry2 */
-    /* SQ2-4 */ { ZEROEXT_DSZ64_DR(R11, TMP13),       /* w2 → R11 */
-                  ADD_DSZ64_DRR(R8, R8, RCX),
-                  ZEROEXT_DSZ64_DR(RDX, TMP7),         /* RDX = 2*a3 for w3 */
-                  NOP_SEQWORD },
-    /* SQ2-5: R8 += carry2 */
-    /* SQ2-5 */ { ADD_DSZ64_DRR(R8, R8, TMP15),
-                  NOP, NOP, NOP_SEQWORD },
+    /* ═══ c2 = 2·a0·a2 + a1² (2 MULs) ═══ */
+    { MUL_DSZ64_DRR(RCX, RDI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      ZEROEXT_DSZ64_DR(RDX, TMP11),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX),
+      ADD_DSZ64_DRR(TMP4, TMP4, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP9, TMP0, 8),
+      SHR_DSZ64_DRI(R9, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      ADD_DSZ64_DRR(RDX, TMP13, TMP13),
+      NOP, NOP_SEQWORD },
 
-    /* ═══ w3 = 2*a0*a3 + 2*a1*a2 (2 MULs) ═══ */
-    /* SQ3-0: MAC1 = a0 * 2a3 */
-    /* SQ3-0 */ { MUL_DSZ64_DRR(RCX, TMP0, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ3-1 */ { ADD_DSZ64_DRR(TMP13, R8, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  ZEROEXT_DSZ64_DR(RDX, TMP6),         /* RDX = 2*a2 */
-                  NOP_SEQWORD },
-    /* SQ3-2: R8 = hi1 + carry1; MAC2 = a1 * 2a2 */
-    /* SQ3-2 */ { ADD_DSZ64_DRR(R8, RCX, TMP15),
-                  MUL_DSZ64_DRR(RCX, TMP1, RDX),
-                  NOP, NOP_SEQWORD },
-    /* SQ3-3 */ { ADD_DSZ64_DRR(TMP13, TMP13, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  NOP, NOP_SEQWORD },
-    /* SQ3-4: w3→R14, R8 += hi2 */
-    /* SQ3-4 */ { ZEROEXT_DSZ64_DR(R14, TMP13),       /* w3 → R14 */
-                  ADD_DSZ64_DRR(R8, R8, RCX),
-                  ZEROEXT_DSZ64_DR(RDX, TMP7),         /* RDX = 2*a3 for w4 */
-                  NOP_SEQWORD },
-    /* SQ3-5: R8 += carry2 */
-    /* SQ3-5 */ { ADD_DSZ64_DRR(R8, R8, TMP15),
-                  NOP, NOP, NOP_SEQWORD },
+    /* ═══ c3 = 2·a0·a3 + 2·a1·a2 (2 MULs) ═══ */
+    { MUL_DSZ64_DRR(RCX, RDI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      ADD_DSZ64_DRR(RDX, TMP12, TMP12),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX),
+      ADD_DSZ64_DRR(TMP4, TMP4, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP9, TMP0, 8),
+      SHR_DSZ64_DRI(R10, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      ADD_DSZ64_DRR(RDX, TMP13, TMP13),
+      NOP, NOP_SEQWORD },
 
-    /* ═══ w4 = 2*a1*a3 + a2^2 (2 MULs) ═══ */
-    /* SQ4-0: MAC1 = a1 * 2a3 */
-    /* SQ4-0 */ { MUL_DSZ64_DRR(RCX, TMP1, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ4-1 */ { ADD_DSZ64_DRR(TMP13, R8, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  ZEROEXT_DSZ64_DR(RDX, TMP2),         /* RDX = a2 */
-                  NOP_SEQWORD },
-    /* SQ4-2: hi1 + carry1; MAC2 = a2 * a2 */
-    /* SQ4-2 */ { ADD_DSZ64_DRR(R8, RCX, TMP15),
-                  MUL_DSZ64_DRR(RCX, TMP2, RDX),
-                  NOP, NOP_SEQWORD },
-    /* SQ4-3 */ { ADD_DSZ64_DRR(TMP13, TMP13, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  NOP, NOP_SEQWORD },
-    /* SQ4-4: w4→RBP, R8 += hi2 */
-    /* SQ4-4 */ { ZEROEXT_DSZ64_DR(RBP, TMP13),       /* w4 → RBP */
-                  ADD_DSZ64_DRR(R8, R8, RCX),
-                  ZEROEXT_DSZ64_DR(RDX, TMP6),         /* RDX = 2*a2 for w5 */
-                  NOP_SEQWORD },
-    /* SQ4-5: R8 += carry2 */
-    /* SQ4-5 */ { ADD_DSZ64_DRR(R8, R8, TMP15),
-                  NOP, NOP, NOP_SEQWORD },
+    /* ═══ c4 = 2·a1·a3 + a2² (2 MULs) ═══ */
+    { MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      ZEROEXT_DSZ64_DR(RDX, TMP12),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, RCX),
+      ADD_DSZ64_DRR(TMP4, TMP4, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP9, TMP0, 8),
+      SHR_DSZ64_DRI(RBX, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      ADD_DSZ64_DRR(RDX, TMP13, TMP13),
+      NOP, NOP_SEQWORD },
 
-    /* ═══ w5 = 2*a2*a3 (1 MUL) ═══ */
-    /* Use a3 * 2a2 */
-    /* SQ5-0: MUL a3 * 2a2 */
-    /* SQ5-0 */ { MUL_DSZ64_DRR(RCX, TMP3, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ5-1: w5 = R8(carry) + lo */
-    /* SQ5-1 */ { ADD_DSZ64_DRR(TMP13, R8, RDX),
-                  SETCC_CONDB_DR(TMP15, TMP13),
-                  ZEROEXT_DSZ64_DR(RDX, TMP3),         /* RDX = a3 for w6 */
-                  NOP_SEQWORD },
-    /* SQ5-2: w5→RBX, R8 = hi + carry */
-    /* SQ5-2 */ { ZEROEXT_DSZ64_DR(RBX, TMP13),       /* w5 → RBX */
-                  ADD_DSZ64_DRR(R8, RCX, TMP15),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c5 = 2·a2·a3 (1 MUL) ═══ */
+    { MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56),
+      SHL_DSZ64_DRI(TMP9, TMP0, 8), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(RBP, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
 
-    /* ═══ w6 = a3^2 (1 MUL) ═══ */
-    /* SQ6-0: MUL a3 * a3 */
-    /* SQ6-0 */ { MUL_DSZ64_DRR(RCX, TMP3, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-    /* SQ6-1: w6 = R8(carry) + lo → R12 */
-    /* SQ6-1 */ { ADD_DSZ64_DRR(R12, R8, RDX),
-                  NOP, NOP, NOP_SEQWORD },
-
-    /* ═══ END: output w[0..6] in RDI, RSI, R11, R14, RBP, RBX, R12 ═══ */
-    { NOP, NOP, NOP, END_SEQWORD }
+    /* ═══ c6 = a3² (1 MUL) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP13),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(TMP4, RCX, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 56), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP9, TMP0, 8),
+      SHR_DSZ64_DRI(RAX, TMP9, 8),
+      SHL_DSZ64_DRI(TMP1, TMP4, 8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(R14, TMP8, TMP1),
+      NOP, NOP, END_SEQWORD }
 
     };
 
@@ -535,56 +517,83 @@ static void install_p224_solinas_sq_patch(void) {
 /* ── fe_sq via microcode ─────────────────────────────────────── */
 
 static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
-    register const uint64_t *_a   asm("rcx") = a;
+    /*
+     * Convert 4×64-bit → 4×56-bit, squaring in microcode, convert back.
+     * 56-bit limbs avoid all overflow issues (2×a < 2^57, hi < 2^48).
+     */
+
+    /* Step 1: convert to 56-bit limbs */
+    uint64_t a56[4];
+    a56[0] = a[0] & 0xFFFFFFFFFFFFFFULL;
+    a56[1] = (a[0] >> 56) | ((a[1] << 8) & 0xFFFFFFFFFFFFFFULL);
+    a56[2] = (a[1] >> 48) | ((a[2] << 16) & 0xFFFFFFFFFFFFFFULL);
+    a56[3] = (a[2] >> 40) | (a[3] << 24);  /* ≤56 bits since a[3] < 2^32 */
+
+    /* Step 2: vmwrite — 4-limb 56-bit squaring (same proven patch as P-448).
+     * Optimization: PREP reads inputs directly from RDI/RSI/R12/R11 (no extra
+     * copies needed), and the output pointer lives in R8 (preserved by the
+     * patch — R8 is never written), so we don't need to stash it on stack. */
+    uint64_t w56[8];
+    {
+        register uint64_t *_a56 asm("rcx") = a56;
+        register uint64_t *_w56 asm("r8")  = w56;
+
+        asm volatile(
+            "push rbp\n\t"
+
+            "mov rdi, [rcx]\n\t"
+            "mov rsi, [rcx + 8]\n\t"
+            "mov r12, [rcx + 16]\n\t"
+            "mov r11, [rcx + 24]\n\t"
+
+            "vmwrite rcx, rdx\n\t"
+
+            /* Patch outputs: R15=w56[0], R13=w56[1], R9=w56[2], R10=w56[3],
+             *                RBX=w56[4], RBP=w56[5], RAX=w56[6], R14=w56[7].
+             * R8 (output ptr) is preserved by the patch. */
+            "mov [r8],      r15\n\t"
+            "mov [r8 + 8],  r13\n\t"
+            "mov [r8 + 16], r9\n\t"
+            "mov [r8 + 24], r10\n\t"
+            "mov [r8 + 32], rbx\n\t"
+            "mov [r8 + 40], rbp\n\t"
+            "mov [r8 + 48], rax\n\t"
+            "mov [r8 + 56], r14\n\t"
+
+            "pop rbp\n\t"
+
+            : "+r"(_a56), "+r"(_w56)
+            :
+            : "rax", "rbx", "rdx", "rsi", "rdi", "rbp",
+              "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+              "memory", "cc"
+        );
+    }
+
+    /* Step 3: convert 56-bit product limbs → 64-bit for Solinas reduction
+     * Product = w56[0] + w56[1]·2^56 + ... + w56[7]·2^392
+     * Repack to W64[0..6] (7 × 64-bit words, 448 bits).
+     * Must use __uint128_t to avoid shift overflow! */
     uint64_t w[7];
-    register uint64_t       *_w  asm("r8")  = w;  /* patch stores products here */
+    { __uint128_t acc;
+      acc = w56[0];
+      acc |= (__uint128_t)w56[1] << 56;
+      w[0] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[2] << 48;
+      w[1] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[3] << 40;
+      w[2] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[4] << 32;
+      w[3] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[5] << 24;
+      w[4] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[6] << 16;
+      w[5] = (uint64_t)acc; acc >>= 64;
+      acc |= (__uint128_t)w56[7] << 8;
+      w[6] = (uint64_t)acc;
+    }
 
-    asm volatile(
-        /* save callee-saved registers + w[] pointer */
-        "push rbp\n\t"
-        "push rbx\n\t"
-        "push r12\n\t"
-        "push r13\n\t"
-        "push r14\n\t"
-        "push r15\n\t"
-        "push r8\n\t"         /* save w[] pointer */
-
-        /* load a[0..3] into input regs */
-        "mov rdi, [rcx]\n\t"          /* a0 */
-        "mov rsi, [rcx + 8]\n\t"      /* a1 */
-        "mov r11, [rcx + 16]\n\t"     /* a2 */
-        "mov r14, [rcx + 24]\n\t"     /* a3 */
-
-        /* fire microcode — single vmwrite computes schoolbook squaring */
-        "vmwrite rcx, rdx\n\t"
-
-        /* w[0..6] now in: RDI, RSI, R11, R14, RBP, RBX, R12 */
-        /* store to w[] array */
-        "pop rcx\n\t"         /* rcx = w[] pointer */
-        "mov [rcx],      rdi\n\t"     /* w[0] */
-        "mov [rcx + 8],  rsi\n\t"     /* w[1] */
-        "mov [rcx + 16], r11\n\t"     /* w[2] */
-        "mov [rcx + 24], r14\n\t"     /* w[3] */
-        "mov [rcx + 32], rbp\n\t"     /* w[4] */
-        "mov [rcx + 40], rbx\n\t"     /* w[5] */
-        "mov [rcx + 48], r12\n\t"     /* w[6] */
-
-        /* restore callee-saved */
-        "pop r15\n\t"
-        "pop r14\n\t"
-        "pop r13\n\t"
-        "pop r12\n\t"
-        "pop rbx\n\t"
-        "pop rbp\n\t"
-
-        : "+r"(_a), "+r"(_w)
-        :
-        : "rax", "rdx", "rsi", "rdi",
-          "r9", "r10", "r11",
-          "memory", "cc"
-    );
-
-    /* Solinas reduction in native C */
+    /* Step 4: Solinas reduction (existing, proven code) */
     solinas_reduce(w, out);
 }
 
@@ -636,8 +645,8 @@ static int verify_all(void) {
     };
     int nvecs = sizeof(vecs)/sizeof(vecs[0]);
 
-    /* Debug: compare raw w[] products for the "large" test vector */
-    {
+    /* Debug DISABLED: the patch now uses 56-bit limbs, raw 64-bit vmwrite is invalid */
+    if (0) {
         uint64_t a_dbg[4] = {UINT64_C(0xFEDCBA9876543210), UINT64_C(0x1234567890ABCDEF),
                               UINT64_C(0xAAAABBBBCCCCDDDD), UINT64_C(0x12345678)};
         uint64_t w_nat[7] = {0}, w_ucd[7] = {0};
@@ -698,7 +707,6 @@ static int verify_all(void) {
         uint64_t w_n2[7]={0}, w_u2[7]={0};
         {
             uint64_t a3=a_a3only[3];
-            __uint128_t acc = 0;
             /* w0-w5 = 0 since a0=a1=a2=0 */
             w_n2[6] = (uint64_t)((__uint128_t)a3*a3);
         }
@@ -851,6 +859,18 @@ int main(void) {
         uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
     }
     printf("Naive -O3:   min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n",
+           min/BATCH, sum/REPS/BATCH);
+
+    /* fiat-crypto (the real GCC baseline CryptOpt compares against) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < REPS; r++) {
+        memcpy(tmp, state, 32);
+        t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) fe_sq_fiat(tmp, tmp);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; sum += dt; if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto: min/op %4"PRIu64"  avg/op %4"PRIu64" cycles\n",
            min/BATCH, sum/REPS/BATCH);
 
     min = UINT64_MAX; sum = 0;
