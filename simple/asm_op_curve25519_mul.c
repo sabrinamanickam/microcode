@@ -10,18 +10,27 @@
  *   c3 = a0*b3 + a1*b2      + a2*b1      + a3*b0      + a4*(19*b4)
  *   c4 = a0*b4 + a1*b3      + a2*b2      + a3*b1      + a4*b0
  *
- * Patch: 88 triads at U7c00, hooked on vmwrite (0x0cd8).
- * All 25 MACs + carry propagation + reduction in microcode.
+ * Patch: 73 triads (was 88). Optimized using p521_sq's progressive carry
+ * accumulation pattern: per-MAC carry bits flow into TMP9 inside the MAC
+ * triad's free slot (instead of being saved to separate TMPs and summed
+ * at the end), and per-MAC hi values flow into R8 the same way.
  *
  * Register convention (caller → microcode):
  *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
  *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4
  *   RAX=0  R8=0
  *
- * Microcode PREP saves b[0..4] → TMP10..TMP14, then computes:
+ * Microcode PREP: saves b[0..4] → TMP10..TMP14, then in-place computes
  *   R13=19*b1  R9=19*b2  R10=19*b3  RBX=19*b4
+ * Initializes TMP0=0 (lo accumulator) and seeds RDX=b0 for c0's MAC1.
  *
- * Output: R15=h0  R13=h1  R9=h2  R10=h3  RAX=h4
+ * Per-limb carry chain (TMP8 = 13-bit lo carry, TMP1 = hi carry shifted by 13):
+ *   limb K's T9 slot 2: SHR TMP8 = TMP0 >> 51
+ *   limb K's T11 slot 2: SHL TMP1 = R8 << 13
+ *   limb K+1's T0 slot 0: OR TMP0 = TMP8 | TMP1   (link)
+ *
+ * Output: R15=h0  R13=h1  R9=h2  R10=h3  RAX=h4   (all masked to 51 bits;
+ * R13 may be lazily ≤ 52 bits after final fold's carry propagation)
  *
  * Build:  make PROG=asm_op_curve25519_mul
  * Run:    sudo taskset -c 0 ./asm_op_curve25519_mul_static
@@ -51,18 +60,34 @@ static void install_fe_mul_patch(void) {
     ucode_t patch[] = {
 
     /*
+     * 73-triad version (was 88) using p521_sq's progressive accumulation:
+     *   R8  accumulates per-MAC hi values inside the MAC triad's slot 0
+     *   TMP9 accumulates per-MAC SETCC carry bits in the MAC triad's slot 2
+     *   TMP1 = hi carry to next limb (R8 << 13, computed in T11)
+     *   TMP8 = lo carry to next limb (TMP0 >> 51, computed in T9)
+     *   TMP2 = mask scratch (TMP0 << 13, computed in T10)
+     *
+     * Per-limb (13 triads, c4 omits T12):
+     *   T0  LINK or NOP: OR TMP0=link, MUL_MAC1, NOTAND R8=0
+     *   T1  ACC1+prep:   ADD TMP0+=lo, SETCC, prep RDX
+     *   T2  hi+MAC2+init: ADD R8+=hi, MUL_MAC2, ZEROEXT TMP9=TMP15
+     *   T3..T7  alternating ACC+prep / hi+MAC+carry-sum
+     *   T8  hi+MAC5+carry
+     *   T9  lastACC+SHR_TMP8: ADD TMP0+=lo, SETCC, SHR TMP8=TMP0>>51
+     *   T10 last_hi+last_carry+mask_prep: ADD R8+=hi, ADD TMP9+=carry, SHL TMP2=TMP0<<13
+     *   T11 finalize+output+hi_carry: ADD R8+=TMP9, SHR out=TMP2>>13, SHL TMP1=R8<<13
+     *   T12 prep RDX for next limb's MAC1   (omitted on c4)
+     *
      * Register state at entry:
      *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
-     *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4
-     *   RAX=0   R8=0    RCX=free  RDX=free
-     *
+     *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4   RAX=0  R8=0
      * After PREP:
-     *   TMP10=b0  TMP11=b1  TMP12=b2  TMP13=b3  TMP14=b4
-     *   R13=19*b1  R9=19*b2  R10=19*b3  RBX=19*b4
-     *   R15=b0 (unchanged)  RAX=0  R8=0
+     *   TMP10..14 = b0..b4 (preserved across patch)
+     *   R13=19*b1, R9=19*b2, R10=19*b3, RBX=19*b4
+     *   RDX = b0, TMP0 = 0 (lo accumulator init)
      */
 
-    /* ═══ PREP: save b values, compute 19*bi ═══ */
+    /* ═══ PREP (6 triads) ═══ */
     /* P0 */ { ZEROEXT_DSZ64_DR(TMP10, R15),
                ZEROEXT_DSZ64_DR(TMP11, R13),
                ZEROEXT_DSZ64_DR(TMP12, R9),
@@ -77,313 +102,288 @@ static void install_fe_mul_patch(void) {
     /* P4 */ { MUL_DSZ64_DIR(RCX, 19, R10),       /* R10 = 19*b3 */
                NOP, NOP, NOP_SEQWORD },
     /* P5 */ { MUL_DSZ64_DIR(RCX, 19, RBX),       /* RBX = 19*b4 */
-               NOP, NOP, NOP_SEQWORD },
+               ZEROEXT_DSZ64_DR(RDX, TMP10),       /* prep b0 for c0's MAC1 */
+               NOTAND_DSZ64_DRR(TMP0, TMP0, TMP0), /* TMP0 = 0 (acc init) */
+               NOP_SEQWORD },
 
-    /* ═══ LIMB c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 ═══ */
+    /* ═══ c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 (13 triads) ═══ */
 
-    /* init acc=0, copy b0→RDX */
-    /* C0-0 */ { ZEROEXT_DSZ64_DR(TMP0, RAX),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP, NOP_SEQWORD },
-    /* Product 1: a0 × b0 */
-    /* C0-1 */ { MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP, NOP_SEQWORD },
-    /* C0-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),      /* prep 19*b4 → RDX */
-                 NOP_SEQWORD },
-    /* Product 2: a1 × 19*b4 */
-    /* C0-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, R10),       /* prep 19*b3 → RDX */
-                 NOP_SEQWORD },
-    /* Product 3: a2 × 19*b3 */
-    /* C0-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, R9),        /* prep 19*b2 → RDX */
-                 NOP_SEQWORD },
-    /* Product 4: a3 × 19*b2 */
-    /* C0-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 5: a4 × 19*b1 (direct — last use of R13=19*b1) */
-    /* C0-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R13),
-                 NOP, NOP_SEQWORD },
-    /* C0-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R13),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* MAC_TAIL_5: carry extraction → R15 = out[0] */
-    /* C0-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C0-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C0-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C0-14 */ { SHR_DSZ64_DRI(R15, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* T0  MAC1: a0×b0. RDX=b0 from PREP; TMP0=0; R8=0. */
+    { NOP, MUL_DSZ64_DRR(RCX, RDI, RDX), NOP, NOP_SEQWORD },
+    /* T1  ACC1, SETCC, prep RDX=19*b4 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    /* T2  hi+=hi, MAC2: a1×19b4, init carry sum */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T3  ACC2, SETCC, prep RDX=19*b3 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    /* T4  hi+=hi, MAC3: a2×19b3, TMP9+=carry */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T5  ACC3, SETCC, prep RDX=19*b2 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R9), NOP_SEQWORD },
+    /* T6  hi+=hi, MAC4: a3×19b2, TMP9+=carry */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T7  ACC4, SETCC, prep RDX=19*b1 (R13, last use) */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R13), NOP_SEQWORD },
+    /* T8  hi+=hi, MAC5: a4×19b1, TMP9+=carry */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T9  lastACC, SETCC, SHR TMP8=TMP0>>51 (slot 0→2 RAW) */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    /* T10 last hi, last carry, mask prep TMP2=TMP0<<13 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    /* T11 R8+=carry_sum, output R15=TMP2>>13 (masked), TMP1=R8<<13 (slot 0→2 RAW) */
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R15, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    /* T12 prep RDX = b1 for c1's MAC1 */
+    { ZEROEXT_DSZ64_DR(RDX, TMP11), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c0→c1 LINK + LIMB c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 ═══ */
+    /* ═══ c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 (13 triads) ═══ */
 
-    /* LIMB_LINK: combine carry, prep b1→RDX, fire a0×b1 */
-    /* C1-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* C1-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* RESUME + prep b0→RDX */
-    /* C1-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* Product 2: a1 × b0 */
-    /* C1-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),
-                 NOP_SEQWORD },
-    /* Product 3: a2 × 19*b4 */
-    /* C1-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, R10),
-                 NOP_SEQWORD },
-    /* Product 4: a3 × 19*b3 */
-    /* C1-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 5: a4 × 19*b2 (direct — last use of R9=19*b2) */
-    /* C1-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R9),
-                 NOP, NOP_SEQWORD },
-    /* C1-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R9),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* MAC_TAIL_5 → R13 = out[1] (R13 freed after c0) */
-    /* C1-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C1-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C1-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C1-14 */ { SHR_DSZ64_DRI(R13, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* T0  LINK: TMP0 = TMP8|TMP1, MAC1: a0×b1, reset R8 */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+    /* T1  ACC1, SETCC, prep RDX=b0 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    /* T2  hi+=hi, MAC2: a1×b0, init carry sum */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T3  ACC2, SETCC, prep RDX=19*b4 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    /* T4  hi+=hi, MAC3: a2×19b4 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T5  ACC3, SETCC, prep RDX=19*b3 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    /* T6  hi+=hi, MAC4: a3×19b3 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T7  ACC4, SETCC, prep RDX=19*b2 (R9, last use) */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R9), NOP_SEQWORD },
+    /* T8  hi+=hi, MAC5: a4×19b2 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T9  lastACC, SETCC, SHR TMP8 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    /* T10 last hi, last carry, mask prep */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    /* T11 R8+=carry_sum, output R13 (freed after c0), TMP1=R8<<13 */
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R13, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    /* T12 prep RDX = b2 for c2's MAC1 */
+    { ZEROEXT_DSZ64_DR(RDX, TMP12), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c1→c2 LINK + LIMB c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 ═══ */
+    /* ═══ c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 (13 triads) ═══ */
 
-    /* C2-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP12),
-                 NOP_SEQWORD },
-    /* C2-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* Product 2: a1 × b1 */
-    /* C2-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* Product 3: a2 × b0 */
-    /* C2-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),
-                 NOP_SEQWORD },
-    /* Product 4: a3 × 19*b4 */
-    /* C2-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 5: a4 × 19*b3 (direct — last use of R10=19*b3) */
-    /* C2-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R10),
-                 NOP, NOP_SEQWORD },
-    /* C2-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R10),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* MAC_TAIL_5 → R9 = out[2] (R9 freed after c1) */
-    /* C2-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C2-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C2-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C2-14 */ { SHR_DSZ64_DRI(R9, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* T0  LINK, MAC1: a0×b2, reset R8 */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+    /* T1  ACC1, SETCC, prep RDX=b1 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    /* T2  hi+=hi, MAC2: a1×b1, init carry sum */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T3  ACC2, SETCC, prep RDX=b0 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    /* T4  hi+=hi, MAC3: a2×b0 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T5  ACC3, SETCC, prep RDX=19*b4 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    /* T6  hi+=hi, MAC4: a3×19b4 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T7  ACC4, SETCC, prep RDX=19*b3 (R10, last use) */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    /* T8  hi+=hi, MAC5: a4×19b3 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T9  lastACC, SETCC, SHR TMP8 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    /* T10 last hi, last carry, mask prep */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    /* T11 output R9 (freed after c1) */
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R9, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    /* T12 prep RDX = b3 for c3's MAC1 */
+    { ZEROEXT_DSZ64_DR(RDX, TMP13), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c2→c3 LINK + LIMB c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 ═══ */
+    /* ═══ c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 (13 triads) ═══ */
 
-    /* C3-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP13),
-                 NOP_SEQWORD },
-    /* C3-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP12),
-                 NOP_SEQWORD },
-    /* Product 2: a1 × b2 */
-    /* C3-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* Product 3: a2 × b1 */
-    /* C3-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* Product 4: a3 × b0 */
-    /* C3-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 5: a4 × 19*b4 (direct — last use of RBX=19*b4) */
-    /* C3-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, RBX),
-                 NOP, NOP_SEQWORD },
-    /* C3-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, RBX),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* MAC_TAIL_5 → R10 = out[3] (R10 freed after c2) */
-    /* C3-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C3-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C3-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C3-14 */ { SHR_DSZ64_DRI(R10, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* T0  LINK, MAC1: a0×b3, reset R8 */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+    /* T1  ACC1, SETCC, prep RDX=b2 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP12), NOP_SEQWORD },
+    /* T2  hi+=hi, MAC2: a1×b2, init carry sum */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T3  ACC2, SETCC, prep RDX=b1 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    /* T4  hi+=hi, MAC3: a2×b1 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T5  ACC3, SETCC, prep RDX=b0 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    /* T6  hi+=hi, MAC4: a3×b0 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T7  ACC4, SETCC, prep RDX=19*b4 (RBX, last use) */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    /* T8  hi+=hi, MAC5: a4×19b4 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T9  lastACC, SETCC, SHR TMP8 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    /* T10 last hi, last carry, mask prep */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    /* T11 output R10 (freed after c2) */
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R10, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    /* T12 prep RDX = b4 for c4's MAC1 */
+    { ZEROEXT_DSZ64_DR(RDX, TMP14), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c3→c4 LINK + LIMB c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 ═══ */
-    /* All b values from TMP10-14, each used for last time → direct srcB */
+    /* ═══ c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (12 triads, no T12) ═══ */
 
-    /* C4-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 NOP, NOP_SEQWORD },
-    /* C4-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, TMP14),  /* a0 × b4 (consumes TMP14) */
-                 NOP, NOP_SEQWORD },
-    /* C4-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP14),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 NOP, NOP_SEQWORD },
-    /* Product 2: a1 × b3 (consumes TMP13) */
-    /* C4-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, TMP13),
-                 NOP, NOP_SEQWORD },
-    /* C4-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, TMP13),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 3: a2 × b2 (consumes TMP12) */
-    /* C4-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, TMP12),
-                 NOP, NOP_SEQWORD },
-    /* C4-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP12),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 NOP, NOP_SEQWORD },
-    /* Product 4: a3 × b1 (consumes TMP11) */
-    /* C4-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, TMP11),
-                 NOP, NOP_SEQWORD },
-    /* C4-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, TMP11),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* Product 5: a4 × b0 (consumes TMP10) */
-    /* C4-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, TMP10),
-                 NOP, NOP_SEQWORD },
-    /* C4-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP10),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* MAC_TAIL_5 → RAX = out[4] */
-    /* C4-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C4-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C4-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C4-14 */ { SHR_DSZ64_DRI(RAX, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* T0  LINK, MAC1: a0×b4, reset R8 */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+    /* T1  ACC1, SETCC, prep RDX=b3 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP13), NOP_SEQWORD },
+    /* T2  hi+=hi, MAC2: a1×b3, init carry sum */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T3  ACC2, SETCC, prep RDX=b2 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP12), NOP_SEQWORD },
+    /* T4  hi+=hi, MAC3: a2×b2 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T5  ACC3, SETCC, prep RDX=b1 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    /* T6  hi+=hi, MAC4: a3×b1 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T7  ACC4, SETCC, prep RDX=b0 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    /* T8  hi+=hi, MAC5: a4×b0 */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    /* T9  lastACC, SETCC, SHR TMP8 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    /* T10 last hi, last carry, mask prep */
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    /* T11 output → RAX, TMP1 = R8<<13 (final hi carry, used in F0) */
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(RAX, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* ═══ FINAL REDUCTION ═══ */
-    /* R0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-               NOP, NOP, NOP_SEQWORD },
-    /* R1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-               NOP, NOP, NOP_SEQWORD },
-    /* R2 */ { MUL_DSZ64_DIR(TMP1, 19, TMP0),     /* TMP0 = 19*carry */
-               NOP, NOP, NOP_SEQWORD },
-    /* R3 */ { ADD_DSZ64_DRR(R15, R15, TMP0),
-               NOP, NOP, NOP_SEQWORD },
-    /* R4 */ { SHR_DSZ64_DRI(TMP0, R15, 51),
-               NOP, NOP, NOP_SEQWORD },
-    /* R5 */ { SHL_DSZ64_DRI(TMP1, R15, 13),
-               ADD_DSZ64_DRR(R13, R13, TMP0),
-               NOP, NOP_SEQWORD },
-    /* R6 */ { SHR_DSZ64_DRI(R15, TMP1, 13),
-               NOP, NOP, END_SEQWORD }
+    /* ═══ FINAL REDUCTION (3 triads) ═══
+     * full_carry = TMP8 | TMP1 (lo | hi)
+     * R15 += 19*full_carry; propagate overflow to R13; mask R15. */
+
+    /* F0: TMP0 = full carry (slot 0); MUL TMP0 = 19*TMP0 (slot 1, 0→1 RAW);
+     *     R15 += TMP0 (slot 2 reads new TMP0 = 19*carry, 1→2 RAW). */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DIR(TMP2, 19, TMP0),
+      ADD_DSZ64_DRR(R15, R15, TMP0), NOP_SEQWORD },
+    /* F1: extract overflow from R15, propagate to R13 (lazy: R13 may be ≤52 bits) */
+    { SHR_DSZ64_DRI(TMP0, R15, 51),
+      ADD_DSZ64_DRR(R13, R13, TMP0),
+      NOP, NOP_SEQWORD },
+    /* F2: mask R15 to 51 bits (SHL+SHR pair) */
+    { SHL_DSZ64_DRI(TMP2, R15, 13),
+      SHR_DSZ64_DRI(R15, TMP2, 13),
+      NOP, END_SEQWORD }
 
     };
 
