@@ -10,10 +10,17 @@
  *   c3 = a0*b3 + a1*b2      + a2*b1      + a3*b0      + a4*(19*b4)
  *   c4 = a0*b4 + a1*b3      + a2*b2      + a3*b1      + a4*b0
  *
- * Patch: 73 triads (was 88). Optimized using p521_sq's progressive carry
+ * Patch: 66 triads (was 73). Optimized using p521_sq's progressive carry
  * accumulation pattern: per-MAC carry bits flow into TMP9 inside the MAC
  * triad's free slot (instead of being saved to separate TMPs and summed
  * at the end), and per-MAC hi values flow into R8 the same way.
+ *
+ * 73→66 packing (test_raw_war_waw.c, 2026-05-11):
+ *   - PREP 6→3 triads via 3-MUL-per-triad packing (RCX WAW between slots).
+ *   - T12 prep-triads dropped from c0..c3 by pulling ZEROEXT(RDX) into next
+ *     limb's T0 s0 and moving OR(LINK) to T0 s2 (s0→s1 RAW on RDX).
+ *   - NOTAND(R8) dropped from each limb's T0 by overwriting R8 with hi_1 in
+ *     T2 s0 via ZEROEXT(R8,RCX) instead of ADD(R8,R8,RCX).
  *
  * Register convention (caller → microcode):
  *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
@@ -87,35 +94,35 @@ static void install_fe_mul_patch(void) {
      *   RDX = b0, TMP0 = 0 (lo accumulator init)
      */
 
-    /* ═══ PREP (6 triads) ═══ */
-    /* P0 */ { ZEROEXT_DSZ64_DR(TMP10, R15),
-               ZEROEXT_DSZ64_DR(TMP11, R13),
-               ZEROEXT_DSZ64_DR(TMP12, R9),
-               NOP_SEQWORD },
-    /* P1 */ { ZEROEXT_DSZ64_DR(TMP13, R10),
-               ZEROEXT_DSZ64_DR(TMP14, RBX),
-               NOP, NOP_SEQWORD },
-    /* P2 */ { MUL_DSZ64_DIR(RCX, 19, R13),       /* R13 = 19*b1 */
-               NOP, NOP, NOP_SEQWORD },
-    /* P3 */ { MUL_DSZ64_DIR(RCX, 19, R9),        /* R9  = 19*b2 */
-               NOP, NOP, NOP_SEQWORD },
-    /* P4 */ { MUL_DSZ64_DIR(RCX, 19, R10),       /* R10 = 19*b3 */
-               NOP, NOP, NOP_SEQWORD },
-    /* P5 */ { MUL_DSZ64_DIR(RCX, 19, RBX),       /* RBX = 19*b4 */
-               ZEROEXT_DSZ64_DR(RDX, TMP10),       /* prep b0 for c0's MAC1 */
-               NOTAND_DSZ64_DRR(TMP0, TMP0, TMP0), /* TMP0 = 0 (acc init) */
-               NOP_SEQWORD },
+    /* ═══ PREP (3 triads — pack 3 MULs/triad via slot-WAW; RDX/TMP0 init moved to c0 T0) ═══ */
+    /* P0  save b0..b2 → TMP10..12 */
+    { ZEROEXT_DSZ64_DR(TMP10, R15),
+      ZEROEXT_DSZ64_DR(TMP11, R13),
+      ZEROEXT_DSZ64_DR(TMP12, R9), NOP_SEQWORD },
+    /* P1  save b3..b4, start R13 *= 19 */
+    { ZEROEXT_DSZ64_DR(TMP13, R10),
+      ZEROEXT_DSZ64_DR(TMP14, RBX),
+      MUL_DSZ64_DIR(RCX, 19, R13),       /* R13 = 19*b1 */
+      NOP_SEQWORD },
+    /* P2  three more *= 19 in one triad (RCX WAW: last write of hi wins, unused) */
+    { MUL_DSZ64_DIR(RCX, 19, R9),        /* R9  = 19*b2 */
+      MUL_DSZ64_DIR(RCX, 19, R10),       /* R10 = 19*b3 */
+      MUL_DSZ64_DIR(RCX, 19, RBX),       /* RBX = 19*b4 */
+      NOP_SEQWORD },
 
-    /* ═══ c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 (13 triads) ═══ */
+    /* ═══ c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 (12 triads — RDX/TMP0
+           init absorbed into T0, T2 uses ZEROEXT(R8) so no NOTAND needed, T12 dropped) ═══ */
 
-    /* T0  MAC1: a0×b0. RDX=b0 from PREP; TMP0=0; R8=0. */
-    { NOP, MUL_DSZ64_DRR(RCX, RDI, RDX), NOP, NOP_SEQWORD },
+    /* T0  RDX=b0, MAC1=a0×b0, TMP0=0 (s0→s1 RAW on RDX) */
+    { ZEROEXT_DSZ64_DR(RDX, TMP10),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(TMP0, TMP0, TMP0), NOP_SEQWORD },
     /* T1  ACC1, SETCC, prep RDX=19*b4 */
     { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
       SETCC_CONDB_DR(TMP15, TMP0),
       ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
-    /* T2  hi+=hi, MAC2: a1×19b4, init carry sum */
-    { ADD_DSZ64_DRR(R8, R8, RCX),
+    /* T2  R8=hi_1 (overwrite, no NOTAND needed), MAC2: a1×19b4, init carry sum */
+    { ZEROEXT_DSZ64_DR(R8, RCX),
       MUL_DSZ64_DRR(RCX, RSI, RDX),
       ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
     /* T3  ACC2, SETCC, prep RDX=19*b3 */
@@ -154,21 +161,20 @@ static void install_fe_mul_patch(void) {
     { ADD_DSZ64_DRR(R8, R8, TMP9),
       SHR_DSZ64_DRI(R15, TMP2, 13),
       SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
-    /* T12 prep RDX = b1 for c1's MAC1 */
-    { ZEROEXT_DSZ64_DR(RDX, TMP11), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 (13 triads) ═══ */
+    /* ═══ c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 (12 triads — T12 absorbed
+           into next limb's T0; OR(LINK) moved to T0 s2; NOTAND gone via ZEROEXT(R8) in T2) ═══ */
 
-    /* T0  LINK: TMP0 = TMP8|TMP1, MAC1: a0×b1, reset R8 */
-    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+    /* T0  RDX=b1 (from c0 T12), MAC1: a0×b1, LINK (s0→s1 RAW on RDX) */
+    { ZEROEXT_DSZ64_DR(RDX, TMP11),
       MUL_DSZ64_DRR(RCX, RDI, RDX),
-      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
     /* T1  ACC1, SETCC, prep RDX=b0 */
     { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
       SETCC_CONDB_DR(TMP15, TMP0),
       ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
-    /* T2  hi+=hi, MAC2: a1×b0, init carry sum */
-    { ADD_DSZ64_DRR(R8, R8, RCX),
+    /* T2  R8=hi_1 (overwrite), MAC2: a1×b0, init carry sum */
+    { ZEROEXT_DSZ64_DR(R8, RCX),
       MUL_DSZ64_DRR(RCX, RSI, RDX),
       ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
     /* T3  ACC2, SETCC, prep RDX=19*b4 */
@@ -207,21 +213,19 @@ static void install_fe_mul_patch(void) {
     { ADD_DSZ64_DRR(R8, R8, TMP9),
       SHR_DSZ64_DRI(R13, TMP2, 13),
       SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
-    /* T12 prep RDX = b2 for c2's MAC1 */
-    { ZEROEXT_DSZ64_DR(RDX, TMP12), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 (13 triads) ═══ */
+    /* ═══ c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 (12 triads) ═══ */
 
-    /* T0  LINK, MAC1: a0×b2, reset R8 */
-    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+    /* T0  RDX=b2, MAC1: a0×b2, LINK */
+    { ZEROEXT_DSZ64_DR(RDX, TMP12),
       MUL_DSZ64_DRR(RCX, RDI, RDX),
-      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
     /* T1  ACC1, SETCC, prep RDX=b1 */
     { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
       SETCC_CONDB_DR(TMP15, TMP0),
       ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
-    /* T2  hi+=hi, MAC2: a1×b1, init carry sum */
-    { ADD_DSZ64_DRR(R8, R8, RCX),
+    /* T2  R8=hi_1, MAC2: a1×b1, init carry sum */
+    { ZEROEXT_DSZ64_DR(R8, RCX),
       MUL_DSZ64_DRR(RCX, RSI, RDX),
       ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
     /* T3  ACC2, SETCC, prep RDX=b0 */
@@ -260,21 +264,19 @@ static void install_fe_mul_patch(void) {
     { ADD_DSZ64_DRR(R8, R8, TMP9),
       SHR_DSZ64_DRI(R9, TMP2, 13),
       SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
-    /* T12 prep RDX = b3 for c3's MAC1 */
-    { ZEROEXT_DSZ64_DR(RDX, TMP13), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 (13 triads) ═══ */
+    /* ═══ c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 (12 triads) ═══ */
 
-    /* T0  LINK, MAC1: a0×b3, reset R8 */
-    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+    /* T0  RDX=b3, MAC1: a0×b3, LINK */
+    { ZEROEXT_DSZ64_DR(RDX, TMP13),
       MUL_DSZ64_DRR(RCX, RDI, RDX),
-      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
     /* T1  ACC1, SETCC, prep RDX=b2 */
     { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
       SETCC_CONDB_DR(TMP15, TMP0),
       ZEROEXT_DSZ64_DR(RDX, TMP12), NOP_SEQWORD },
-    /* T2  hi+=hi, MAC2: a1×b2, init carry sum */
-    { ADD_DSZ64_DRR(R8, R8, RCX),
+    /* T2  R8=hi_1, MAC2: a1×b2, init carry sum */
+    { ZEROEXT_DSZ64_DR(R8, RCX),
       MUL_DSZ64_DRR(RCX, RSI, RDX),
       ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
     /* T3  ACC2, SETCC, prep RDX=b1 */
@@ -313,21 +315,19 @@ static void install_fe_mul_patch(void) {
     { ADD_DSZ64_DRR(R8, R8, TMP9),
       SHR_DSZ64_DRI(R10, TMP2, 13),
       SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
-    /* T12 prep RDX = b4 for c4's MAC1 */
-    { ZEROEXT_DSZ64_DR(RDX, TMP14), NOP, NOP, NOP_SEQWORD },
 
-    /* ═══ c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (12 triads, no T12) ═══ */
+    /* ═══ c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (12 triads, last limb) ═══ */
 
-    /* T0  LINK, MAC1: a0×b4, reset R8 */
-    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+    /* T0  RDX=b4, MAC1: a0×b4, LINK */
+    { ZEROEXT_DSZ64_DR(RDX, TMP14),
       MUL_DSZ64_DRR(RCX, RDI, RDX),
-      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
     /* T1  ACC1, SETCC, prep RDX=b3 */
     { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
       SETCC_CONDB_DR(TMP15, TMP0),
       ZEROEXT_DSZ64_DR(RDX, TMP13), NOP_SEQWORD },
-    /* T2  hi+=hi, MAC2: a1×b3, init carry sum */
-    { ADD_DSZ64_DRR(R8, R8, RCX),
+    /* T2  R8=hi_1, MAC2: a1×b3, init carry sum */
+    { ZEROEXT_DSZ64_DR(R8, RCX),
       MUL_DSZ64_DRR(RCX, RSI, RDX),
       ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
     /* T3  ACC2, SETCC, prep RDX=b2 */

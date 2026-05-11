@@ -1,0 +1,2 @@
+compiler/c/clang_-mcpu=native_-O3_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_hash/prh64s512/ref

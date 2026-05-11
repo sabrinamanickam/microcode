@@ -3,7 +3,8 @@
  *
  * Field: GF(2^255 - 19), unsaturated radix-2^51, 5 limbs, 15 MACs.
  *
- * Patch: 43 triads (was 57), using p521_sq's progressive accumulation:
+ * Patch: 42 triads (was 43; c4 packed 8→7 via cross-slot RAW/WAR — test_raw_war_waw.c),
+ *        using p521_sq's progressive accumulation:
  *   R8  accumulates per-MAC hi values inside the MAC triad's slot 0
  *   TMP9 accumulates per-MAC SETCC carries in the MAC triad's slot 2
  *   TMP1 = hi carry to next limb (R8 << 13, computed in T6)
@@ -195,39 +196,37 @@ static void install_fe_sq_patch(void) {
       SHL_DSZ64_DRI(TMP1, R8, 13),
       NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
 
-    /* ═══ c4 = d0*a4 + d1*a3 + a2*a2 (8 triads) ═══ */
+    /* ═══ c4 = d0*a4 + d1*a3 + a2*a2 (7 triads — last limb;
+           3 NOPs from the original 8-triad layout pulled up via cross-slot RAW/WAR) ═══ */
 
     /* T0  LINK, MAC1=(R15,R14)=d0*a4 (R14=lo), ACC1 */
     { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
       MUL_DSZ64_DRR(RCX, R15, R14),
       ADD_DSZ64_DRR(TMP0, TMP0, R14), NOP_SEQWORD },
-    /* T1  SETCC, R8+=hi MAC1 */
+    /* T1  SETCC MAC1, R8+=hi MAC1, init carry_sum (s0→s2 RAW on TMP15) */
     { SETCC_CONDB_DR(TMP15, TMP0),
       ADD_DSZ64_DRR(R8, R8, RCX),
-      NOP, NOP_SEQWORD },
-    /* T2  init carry_sum, MAC2=(R13,R11)=d1*a3 (R11=lo), ACC2 */
-    { ZEROEXT_DSZ64_DR(TMP9, TMP15),
-      MUL_DSZ64_DRR(RCX, R13, R11),
-      ADD_DSZ64_DRR(TMP0, TMP0, R11), NOP_SEQWORD },
-    /* T3 */
-    { SETCC_CONDB_DR(TMP15, TMP0),
-      ADD_DSZ64_DRR(R8, R8, RCX),
-      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
-    /* T4  MAC3=(R12,R12)=a2² (R12=lo), ACC3, SETCC */
-    { MUL_DSZ64_DRR(RCX, R12, R12),
-      ADD_DSZ64_DRR(TMP0, TMP0, R12),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    /* T2  MAC2=(R13,R11)=d1*a3 (R11=lo), ACC2, SETCC MAC2 (s1→s2 flag RAW) */
+    { MUL_DSZ64_DRR(RCX, R13, R11),
+      ADD_DSZ64_DRR(TMP0, TMP0, R11),
       SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
-    /* T5 */
+    /* T3  R8+=hi MAC2, carry_sum+=, MAC3=(R12,R12)=a2² (s0→s2 WAR on RCX) */
     { ADD_DSZ64_DRR(R8, R8, RCX),
       ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
-      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
-    /* T6  R8+=carry_sum, SHL mask, SHL TMP_HI_C (used by F0) */
-    { ADD_DSZ64_DRR(R8, R8, TMP9),
-      SHL_DSZ64_DRI(TMP6, TMP0, 13),
-      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
-    /* T7  output→RAX (no NOTAND, no prep — last limb) */
-    { SHR_DSZ64_DRI(RAX, TMP6, 13),
-      NOP, NOP, NOP_SEQWORD },
+      MUL_DSZ64_DRR(RCX, R12, R12), NOP_SEQWORD },
+    /* T4  ACC3 (R12=lo from T3 s2 MUL), SETCC MAC3, R8+=hi MAC3 */
+    { ADD_DSZ64_DRR(TMP0, TMP0, R12),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+    /* T5  carry_sum+=, SHR TMP_LO_C, R8+=carry_sum (s0→s2 RAW on TMP9) */
+    { ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51),
+      ADD_DSZ64_DRR(R8, R8, TMP9), NOP_SEQWORD },
+    /* T6  SHL mask, SHL TMP_HI_C (for F0), output→RAX (s0→s2 RAW on TMP6) */
+    { SHL_DSZ64_DRI(TMP6, TMP0, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13),
+      SHR_DSZ64_DRI(RAX, TMP6, 13), NOP_SEQWORD },
 
     /* ═══ FINAL REDUCTION (3 triads) ═══ */
 

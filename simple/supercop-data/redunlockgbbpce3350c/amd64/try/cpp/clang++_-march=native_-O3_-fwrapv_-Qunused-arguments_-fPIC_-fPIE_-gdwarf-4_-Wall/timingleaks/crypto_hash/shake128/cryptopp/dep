@@ -1,0 +1,2 @@
+compiler/cpp/clang++_-march=native_-O3_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_hash/shake128/cryptopp

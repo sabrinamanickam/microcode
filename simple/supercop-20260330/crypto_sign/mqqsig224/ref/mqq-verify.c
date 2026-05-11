@@ -1,0 +1,1 @@
+../../mqqsig192/ref/mqq-verify.c

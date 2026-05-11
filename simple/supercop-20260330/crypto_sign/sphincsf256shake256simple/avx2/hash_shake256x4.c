@@ -1,0 +1,1 @@
+../../sphincsf128shake256robust/avx2/hash_shake256x4.c

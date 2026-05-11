@@ -11,14 +11,13 @@ Build: `make PROG=asm_op_<name>` produces `<name>_static`. Run: `sudo taskset -c
 ## Hardware Constraints
 
 - 128-triad patch RAM limit (each triad = 4 address units)
-- MUL must be in slot 0 of a triad
-- Intra-triad RAW: **ALL slots confirmed** for values AND flags:
-  - Slot 0->1 value+flags: confirmed (production code)
-  - Slot 0->2 value: **CONFIRMED** (test_slot02_raw.c, 2026-04-28)
-  - Slot 1->2 value: **CONFIRMED** (test_slot_raw_extended.c, 2026-04-28)
-  - MUL srcB (RDX) slot 0->1: **CONFIRMED** (test_slot_raw_extended.c, 2026-04-28)
-- Slot 0+2 WAW: **CONFIRMED, slot 2 wins** (test_slot02_raw.c, 2026-04-28)
-- **Full sequential semantics within triads**: every slot can read values from any earlier slot
+- MUL works in any slot (0, 1, or 2) — confirmed by test_mul_slot2.c, 2026-05-05
+- **Full sequential semantics within triads** for arch regs AND TMP regs — every slot pair, every hazard (test_raw_war_waw.c, 2026-05-11):
+  - RAW (writer earlier, reader later): all pairs (0→1, 0→2, 1→2) confirmed for arch + TMP
+  - WAR (reader earlier, writer later): all pairs confirmed — reader sees OLD value; writer's value persists as final
+  - WAW (two writes to same reg): all pairs confirmed — **later slot always wins** for arch + TMP
+  - Flags RAW slot 1→2 (SETCC reads slot-1 ADD's flags): confirmed in production
+  - MUL srcB (RDX) slot 0→1: confirmed (test_slot_raw_extended.c, 2026-04-28)
 - SETCC_CONDB_DR only works on TMP registers, NOT arch registers
 - TMP registers don't persist across vmwrite calls — keep state in arch regs
 - MUL_DSZ64_DRR(hi, srcA, srcB): srcA preserved, srcB gets lo, hi gets hi
@@ -29,7 +28,7 @@ Build: `make PROG=asm_op_<name>` produces `<name>_static`. Run: `sudo taskset -c
 | Curve | Type | Limbs | Files | Perf vs GCC |
 |-------|------|-------|-------|-------------|
 | P-256 | Montgomery 4x64 | 4 | asm_op_p256_sq.c, asm_op_p256_mul.c | 119cyc (27% faster) |
-| curve25519 | Dettman 5x51 | 5 | asm_op_curve25519.c, asm_op_curve25519_mul.c | faster |
+| curve25519 | Dettman 5x51 | 5 | asm_op_curve25519.c, asm_op_curve25519_mul.c | sq 37cyc (26% faster than fiat), mul 58cyc (3% faster) |
 | secp256k1 (Dettman) | Dettman 5x52/48 | 5 | asm_op_secp256k1.c, asm_op_secp256k1_mul.c | faster |
 | poly1305 | Solinas 3x44/43 | 3 | asm_op_poly1305.c, asm_op_poly1305_mul.c | ~same |
 | secp256k1 (Montgomery) | Montgomery 4x64 | 4 | asm_op_secp256k1_mont_sq.c, asm_op_secp256k1_mont_mul.c | in progress |

@@ -1,0 +1,1 @@
+../../sphincsf128shake256robust/avx2/SIMD256-config.h

@@ -36,11 +36,12 @@ filling all 3 slots with useful work. The reasons, in roughly decreasing
 frequency:
 
 ### 2a. **MUL placement constraints**
-`MUL_DSZ64_DRR` is verified working in **slot 0 or slot 1** of a triad.
-Slot 2 has not been tested in production code; we treat it as risky. A
-triad whose only useful op is a MUL therefore wastes 1 slot at minimum (the
-slot before MUL if MUL is in slot 1, or slots 1 and 2 if MUL is in slot 0
-with no follow-on work).
+`MUL_DSZ64_DRR` is verified working in **slot 0, slot 1, AND slot 2** of a
+triad (confirmed by `test_mul_slot2.c`, 2026-05-05; 3 deterministic runs
+each in all three positions). Earlier production code only used slots 0/1
+out of caution, but the hardware has no slot restriction for MUL. NOPs in
+MUL triads are therefore avoidable — what matters is operand-flow ordering,
+not slot index.
 
 ```
 { MUL_DSZ64_DRR(RCX, RDI, RDX),
@@ -285,9 +286,6 @@ From the cross-curve experience:
 
 ## 8. Things we did *not* discover (open questions)
 
-- **Whether MUL works in slot 2** — we never needed it badly enough to risk
-  a debugging session on it. Treating slot 2 as MUL-prohibited has cost us
-  ~2-3 triads per multiplication-heavy patch but stays safe.
 - **The full SSE/AVX micro-op vocabulary** — Goldmont implements SSE
   internally with micro-ops, but we don't have a documented opcode list
   for them. All our patches are integer-domain.

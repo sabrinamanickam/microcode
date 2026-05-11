@@ -1,0 +1,8 @@
+g++ -march=native -mtune=native -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall
+g++ -march=native -mtune=native -Os -fwrapv -fPIC -fPIE -gdwarf-4 -Wall
+g++ -march=native -mtune=native -O2 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall
+g++ -march=native -mtune=native -O -fwrapv -fPIC -fPIE -gdwarf-4 -Wall
+clang++ -march=native -O3 -fwrapv -Qunused-arguments -fPIC -fPIE -gdwarf-4 -Wall
+clang++ -march=native -Os -fwrapv -Qunused-arguments -fPIC -fPIE -gdwarf-4 -Wall
+clang++ -march=native -O2 -fwrapv -Qunused-arguments -fPIC -fPIE -gdwarf-4 -Wall
+clang++ -march=native -O -fwrapv -Qunused-arguments -fPIC -fPIE -gdwarf-4 -Wall

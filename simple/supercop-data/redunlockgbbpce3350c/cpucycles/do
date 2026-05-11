@@ -1,0 +1,98 @@
+#!/bin/sh -e
+
+okabi | (
+  while read abi
+  do
+    newabi=$abi
+    [ $abi = aarch64 ] && newabi=amd64
+
+    : > options1.inc
+    : > options2.inc
+
+    (
+      tr '\055' ' ' < options
+      echo default zero
+    ) | (
+      while read arch x
+      do
+        [ x"$CPUCYCLESTIMECOP" = x1 ] && case "$x" in
+          *pmc*) continue
+        esac
+        case "$arch" in
+          "$newabi"|default) ;;
+          *) continue
+        esac
+        opts="-Dticks=supercop_cpucycles_ticks_${arch}_$x -Dticks_setup=supercop_cpucycles_ticks_${arch}_${x}_setup -Dticks_close=supercop_cpucycles_ticks_${arch}_${x}_close"
+        okc-$abi | (
+          while read c
+          do
+            echo "=== `date` === Trying ${arch}-$x.c with $c..." >&2
+            $c $opts -c ${arch}-$x.c || continue
+            echo "=== `date` === Success. Including ${arch}-$x.c." >&2
+            exit 0
+          done
+          echo "=== `date` === ${arch}-$x.c does not compile, replacing with default-zero.c..." >&2
+          cp default-zero.c ${arch}-$x.c
+          okc-$abi | (
+            while read c
+            do
+              echo "=== `date` === Trying ${arch}-$x.c with $c..." >&2
+              $c $opts -c ${arch}-$x.c || continue
+              echo "=== `date` === Success. Including ${arch}-$x.c." >&2
+              exit 0
+            done
+            echo "=== `date` === ${arch}-$x.c still does not compile" >&2
+            exit 111
+          ) && exit 0
+          exit 111
+        )
+        (
+          echo "extern long long supercop_cpucycles_ticks_${arch}_${x}_setup(void);"
+          echo "extern long long supercop_cpucycles_ticks_${arch}_${x}(void);\n"
+          echo "extern void supercop_cpucycles_ticks_${arch}_${x}_close(void);\n"
+        ) >> options1.inc
+        echo "{ \"${arch}-${x}\", supercop_cpucycles_ticks_${arch}_${x}_setup, supercop_cpucycles_ticks_${arch}_${x}, supercop_cpucycles_ticks_${arch}_${x}_close }," >> options2.inc
+      done
+    ) || (
+      echo ===== Giving up. >&2
+      exit 111
+    )
+
+    (
+      numoptions=`wc -l < options2.inc`
+      echo '#define NUMOPTIONS '$numoptions
+      echo '#define DEFAULTOPTION (NUMOPTIONS-1)'
+      echo ''
+      cat options1.inc
+      echo ''
+      echo 'static struct {'
+      echo '  const char *implementation;'
+      echo '  long long (*ticks_setup)(void);'
+      echo '  long long (*ticks)(void);'
+      echo '  void (*ticks_close)(void);'
+      echo '} options[NUMOPTIONS] = {'
+      cat options2.inc
+      echo '} ;'
+    ) > options.inc
+
+    okc-$abi | (
+      while read c
+      do
+        echo "=== `date` === Trying wrapper.c with $c..." >&2
+        $c -c wrapper.c || continue
+        echo "=== `date` === Success. Including wrapper.c." >&2
+        exit 0
+      done
+      exit 111
+    ) || (
+      echo ===== Giving up. >&2
+      exit 111
+    )
+
+    mkdir -p lib/$abi include/$abi
+    okar-$abi cr lib/$abi/libcpucycles.a *.o || continue
+    ranlib lib/$abi/libcpucycles.a || :
+    cp cpucycles.h include/$abi/cpucycles.h
+  done
+  exit 0
+) || exit 111

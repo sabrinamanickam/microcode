@@ -1,0 +1,2 @@
+compiler/c/clang_-march=native_-Os_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_decode/1277x7879/ref

@@ -1,0 +1,2 @@
+compiler/cpp/clang++_-march=native_-Os_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_stream/sosemanuk/cryptopp

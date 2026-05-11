@@ -1,0 +1,1 @@
+../../sphincsf128sha256robust/avx2/thash_sha256_robustx8.c

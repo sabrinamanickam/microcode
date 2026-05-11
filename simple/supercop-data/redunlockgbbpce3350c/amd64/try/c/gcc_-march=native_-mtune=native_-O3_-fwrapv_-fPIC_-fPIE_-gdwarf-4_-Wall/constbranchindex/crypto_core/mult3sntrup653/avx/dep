@@ -1,0 +1,2 @@
+compiler/c/gcc_-march=native_-mtune=native_-O3_-fwrapv_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_core/mult3sntrup653/avx

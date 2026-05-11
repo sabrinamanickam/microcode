@@ -1,0 +1,2 @@
+compiler/cpp/g++_-march=native_-mtune=native_-O_-fwrapv_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_hash/sha256/cryptopp

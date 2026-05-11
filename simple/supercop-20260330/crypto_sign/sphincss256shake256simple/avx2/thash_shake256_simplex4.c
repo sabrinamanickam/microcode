@@ -1,0 +1,1 @@
+../../sphincsf128shake256simple/avx2/thash_shake256_simplex4.c

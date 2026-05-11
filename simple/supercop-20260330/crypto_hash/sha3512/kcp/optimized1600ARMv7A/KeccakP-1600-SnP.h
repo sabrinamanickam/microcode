@@ -1,0 +1,1 @@
+../../../sha3224/kcp/optimized1600ARMv7A/KeccakP-1600-SnP.h

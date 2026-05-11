@@ -1,0 +1,1 @@
+../../luffa256/opt32/luffa_for_32.c

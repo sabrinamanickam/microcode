@@ -1,0 +1,1 @@
+../varglv8/fp_inv_2e061m1.s

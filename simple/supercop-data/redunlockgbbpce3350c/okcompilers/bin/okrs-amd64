@@ -1,0 +1,5 @@
+#!/bin/sh
+echo 'rustc -C target-cpu=native -C opt-level=3'
+echo 'rustc -C target-cpu=native -C opt-level=s'
+echo 'rustc -C target-cpu=native -C opt-level=2'
+echo 'rustc -C target-cpu=native -C opt-level=1'

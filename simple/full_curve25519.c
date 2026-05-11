@@ -3,13 +3,14 @@
  *
  * Implements the full Montgomery ladder (RFC 7748) using:
  *   - Native C field arithmetic (-O3, __uint128_t)
- *   - Microcode-accelerated field arithmetic (fe_mul via vmwrite hook)
+ *   - Microcode-accelerated field arithmetic (fe_mul + fe_sq via vmwrite/vmread)
  *
  * Field: GF(2^255 - 19), unsaturated radix-2^51, 5 limbs.
  *
- * Strategy: fe_mul microcode patch handles both multiplication and squaring.
- * For squaring, we call fe_mul(a, a, out) — mathematically correct, avoids
- * needing two patches in limited patch RAM.
+ * Two patches are installed simultaneously:
+ *   fe_mul (66 triads) at U7c00, fires on vmwrite (opcode 0x0cd8)
+ *   fe_sq  (42 triads) at U7d08, fires on vmread  (opcode 0x0618, byte: 0f 78 ca)
+ * Total patch RAM: 108 triads (under 128 limit).
  *
  * Build:  make PROG=full_curve25519
  * Run:    sudo taskset -c 0 ./full_curve25519_static
@@ -31,316 +32,398 @@ typedef uint64_t fe[5];   /* 5 limbs x 51 bits */
 
 /* ════════════════════════════════════════════════════════════════════
  * MICROCODE PATCH INSTALLATION
+ *
+ * Patch contents are verbatim from asm_op_curve25519_mul.c and
+ * asm_op_curve25519.c (the standalone benchmark files).
  * ════════════════════════════════════════════════════════════════════ */
 
-static void install_fe_mul_patch(void) {
-    ucode_t patch[] = {
-
-    /*
-     * Register state at entry:
-     *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
-     *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4
-     *   RAX=0   R8=0    RCX=free  RDX=free
+static void install_field_patches(void) {
+    /* ─────────────────────────────────────────────────────────────────
+     * fe_mul patch (66 triads, hooked to vmwrite at U7c00).
      *
-     * After PREP:
-     *   TMP10=b0  TMP11=b1  TMP12=b2  TMP13=b3  TMP14=b4
-     *   R13=19*b1  R9=19*b2  R10=19*b3  RBX=19*b4
-     *   R15=b0 (unchanged)  RAX=0  R8=0
-     */
+     * Caller convention (set up in fe_mul_ucode inline asm):
+     *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
+     *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4   RAX=0  R8=0
+     * Output: R15=h0  R13=h1  R9=h2  R10=h3  RAX=h4
+     * ───────────────────────────────────────────────────────────────── */
+    ucode_t mul_patch[] = {
 
-    /* PREP: save b values, compute 19*bi */
-    /* P0 */ { ZEROEXT_DSZ64_DR(TMP10, R15),
-               ZEROEXT_DSZ64_DR(TMP11, R13),
-               ZEROEXT_DSZ64_DR(TMP12, R9),
-               NOP_SEQWORD },
-    /* P1 */ { ZEROEXT_DSZ64_DR(TMP13, R10),
-               ZEROEXT_DSZ64_DR(TMP14, RBX),
-               NOP, NOP_SEQWORD },
-    /* P2 */ { MUL_DSZ64_DIR(RCX, 19, R13),
-               NOP, NOP, NOP_SEQWORD },
-    /* P3 */ { MUL_DSZ64_DIR(RCX, 19, R9),
-               NOP, NOP, NOP_SEQWORD },
-    /* P4 */ { MUL_DSZ64_DIR(RCX, 19, R10),
-               NOP, NOP, NOP_SEQWORD },
-    /* P5 */ { MUL_DSZ64_DIR(RCX, 19, RBX),
-               NOP, NOP, NOP_SEQWORD },
+    /* ═══ PREP (3 triads — 3 MULs/triad via slot-WAW) ═══ */
+    { ZEROEXT_DSZ64_DR(TMP10, R15),
+      ZEROEXT_DSZ64_DR(TMP11, R13),
+      ZEROEXT_DSZ64_DR(TMP12, R9), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP13, R10),
+      ZEROEXT_DSZ64_DR(TMP14, RBX),
+      MUL_DSZ64_DIR(RCX, 19, R13), NOP_SEQWORD },
+    { MUL_DSZ64_DIR(RCX, 19, R9),
+      MUL_DSZ64_DIR(RCX, 19, R10),
+      MUL_DSZ64_DIR(RCX, 19, RBX), NOP_SEQWORD },
 
-    /* LIMB c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 */
-    /* C0-0 */ { ZEROEXT_DSZ64_DR(TMP0, RAX),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP, NOP_SEQWORD },
-    /* C0-1 */ { MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP, NOP_SEQWORD },
-    /* C0-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),
-                 NOP_SEQWORD },
-    /* C0-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, R10),
-                 NOP_SEQWORD },
-    /* C0-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, R9),
-                 NOP_SEQWORD },
-    /* C0-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C0-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C0-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R13),
-                 NOP, NOP_SEQWORD },
-    /* C0-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R13),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* C0-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C0-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C0-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C0-14 */ { SHR_DSZ64_DRI(R15, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c0 = a0*b0 + a1*19b4 + a2*19b3 + a3*19b2 + a4*19b1 (12 triads) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP10),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      NOTAND_DSZ64_DRR(TMP0, TMP0, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R9), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R15, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* LIMB c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 */
-    /* C1-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* C1-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* C1-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),
-                 NOP_SEQWORD },
-    /* C1-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, R10),
-                 NOP_SEQWORD },
-    /* C1-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C1-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C1-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R9),
-                 NOP, NOP_SEQWORD },
-    /* C1-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R9),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* C1-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C1-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C1-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C1-14 */ { SHR_DSZ64_DRI(R13, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c1 = a0*b1 + a1*b0 + a2*19b4 + a3*19b3 + a4*19b2 (12 triads) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP11),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R9), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R13, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* LIMB c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 */
-    /* C2-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP12),
-                 NOP_SEQWORD },
-    /* C2-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* C2-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* C2-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, RBX),
-                 NOP_SEQWORD },
-    /* C2-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C2-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C2-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, R10),
-                 NOP, NOP_SEQWORD },
-    /* C2-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, R10),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* C2-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C2-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C2-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C2-14 */ { SHR_DSZ64_DRI(R9, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c2 = a0*b2 + a1*b1 + a2*b0 + a3*19b4 + a4*19b3 (12 triads) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP12),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, R10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R9, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* LIMB c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 */
-    /* C3-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 ZEROEXT_DSZ64_DR(RDX, TMP13),
-                 NOP_SEQWORD },
-    /* C3-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP12),
-                 NOP_SEQWORD },
-    /* C3-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 ZEROEXT_DSZ64_DR(RDX, TMP11),
-                 NOP_SEQWORD },
-    /* C3-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 ZEROEXT_DSZ64_DR(RDX, TMP10),
-                 NOP_SEQWORD },
-    /* C3-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, RDX),
-                 NOP, NOP_SEQWORD },
-    /* C3-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, RDX),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C3-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, RBX),
-                 NOP, NOP_SEQWORD },
-    /* C3-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, RBX),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* C3-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C3-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C3-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C3-14 */ { SHR_DSZ64_DRI(R10, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*19b4 (12 triads) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP13),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP12), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(R10, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* LIMB c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 */
-    /* C4-0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-                 NOTAND_DSZ64_DRR(R8, R8, R8),
-                 NOP, NOP_SEQWORD },
-    /* C4-1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-                 MUL_DSZ64_DRR(RCX, RDI, TMP14),
-                 NOP, NOP_SEQWORD },
-    /* C4-2 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP14),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 NOP, NOP_SEQWORD },
-    /* C4-3 */ { ADD_DSZ64_DRR(TMP4, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, RSI, TMP13),
-                 NOP, NOP_SEQWORD },
-    /* C4-4 */ { ADD_DSZ64_DRR(TMP0, TMP2, TMP13),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C4-5 */ { ADD_DSZ64_DRR(TMP5, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R12, TMP12),
-                 NOP, NOP_SEQWORD },
-    /* C4-6 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP12),
-                 SETCC_CONDB_DR(TMP3, TMP2),
-                 NOP, NOP_SEQWORD },
-    /* C4-7 */ { ADD_DSZ64_DRR(TMP6, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R11, TMP11),
-                 NOP, NOP_SEQWORD },
-    /* C4-8 */ { ADD_DSZ64_DRR(TMP0, TMP2, TMP11),
-                 SETCC_CONDB_DR(TMP3, TMP0),
-                 NOP, NOP_SEQWORD },
-    /* C4-9 */ { ADD_DSZ64_DRR(TMP7, RCX, TMP3),
-                 MUL_DSZ64_DRR(RCX, R14, TMP10),
-                 NOP, NOP_SEQWORD },
-    /* C4-10 */ { ADD_DSZ64_DRR(TMP2, TMP0, TMP10),
-                  SETCC_CONDB_DR(TMP3, TMP2),
-                  NOP, NOP_SEQWORD },
-    /* C4-11 */ { SHR_DSZ64_DRI(TMP8, TMP2, 51),
-                  ADD_DSZ64_DRR(TMP0, RCX, TMP3),
-                  NOP, NOP_SEQWORD },
-    /* C4-12 */ { SHL_DSZ64_DRI(TMP9, TMP2, 13),
-                  ADD_DSZ64_DRR(TMP1, TMP4, TMP5),
-                  ADD_DSZ64_DRR(TMP0, TMP6, TMP0),
-                  NOP_SEQWORD },
-    /* C4-13 */ { ADD_DSZ64_DRR(R8, R8, TMP7),
-                  ADD_DSZ64_DRR(TMP0, TMP1, TMP0),
-                  NOP, NOP_SEQWORD },
-    /* C4-14 */ { SHR_DSZ64_DRI(RAX, TMP9, 13),
-                  ADD_DSZ64_DRR(R8, R8, TMP0),
-                  NOP, NOP_SEQWORD },
+    /* ═══ c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (12 triads, last limb) ═══ */
+    { ZEROEXT_DSZ64_DR(RDX, TMP14),
+      MUL_DSZ64_DRR(RCX, RDI, RDX),
+      OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP13), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R8, RCX),
+      MUL_DSZ64_DRR(RCX, RSI, RDX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP12), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R12, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP11), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      MUL_DSZ64_DRR(RCX, R14, RDX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(RAX, TMP2, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
 
-    /* FINAL REDUCTION */
-    /* R0 */ { SHL_DSZ64_DRI(TMP1, R8, 13),
-               NOP, NOP, NOP_SEQWORD },
-    /* R1 */ { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
-               NOP, NOP, NOP_SEQWORD },
-    /* R2 */ { MUL_DSZ64_DIR(TMP1, 19, TMP0),
-               NOP, NOP, NOP_SEQWORD },
-    /* R3 */ { ADD_DSZ64_DRR(R15, R15, TMP0),
-               NOP, NOP, NOP_SEQWORD },
-    /* R4 */ { SHR_DSZ64_DRI(TMP0, R15, 51),
-               NOP, NOP, NOP_SEQWORD },
-    /* R5 */ { SHL_DSZ64_DRI(TMP1, R15, 13),
-               ADD_DSZ64_DRR(R13, R13, TMP0),
-               NOP, NOP_SEQWORD },
-    /* R6 */ { SHR_DSZ64_DRI(R15, TMP1, 13),
-               NOP, NOP, END_SEQWORD }
-
+    /* ═══ FINAL REDUCTION (3 triads): R15 += 19*carry, propagate, mask ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DIR(TMP2, 19, TMP0),
+      ADD_DSZ64_DRR(R15, R15, TMP0), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP0, R15, 51),
+      ADD_DSZ64_DRR(R13, R13, TMP0),
+      NOP, NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP2, R15, 13),
+      SHR_DSZ64_DRI(R15, TMP2, 13),
+      NOP, END_SEQWORD }
     };
 
-    patch_ucode(0x7c00, patch, ARRAY_SZ(patch));
+    /* ─────────────────────────────────────────────────────────────────
+     * fe_sq patch (42 triads, hooked to vmread at U7d08).
+     *
+     * Caller convention (set up in fe_sq_ucode inline asm):
+     *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
+     *   R15=2*a0  R13=2*a1  R9=2*a2  R10=2*a3
+     *   RBX=19*a4  RDX=19*a3   RAX=0  R8=0
+     * Output: RDI=h0  R9=h1  R10=h2  RBX=h3  RAX=h4
+     * ───────────────────────────────────────────────────────────────── */
+    ucode_t sq_patch[] = {
+
+    /* ═══ c0 = a0*a0 + d1*r4 + d2*r3 (8 triads) ═══ */
+    { ZEROEXT_DSZ64_DR(TMP0, RAX),
+      MUL_DSZ64_DRR(RCX, RDI, RDI),
+      NOP, NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDI),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP9, TMP15),
+      MUL_DSZ64_DRR(RCX, RBX, R13),
+      ADD_DSZ64_DRR(TMP0, TMP0, R13), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, RDX, R9),
+      ADD_DSZ64_DRR(TMP0, TMP0, R9),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHL_DSZ64_DRI(TMP6, TMP0, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(RDI, TMP6, 13),
+      ZEROEXT_DSZ64_DR(R13, RSI),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+
+    /* ═══ c1 = d0*a1 + r3*a3 + d2*r4 (8 triads) ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, R15, R13),
+      ADD_DSZ64_DRR(TMP0, TMP0, R13), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(R9, R12, R12), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP9, TMP15),
+      MUL_DSZ64_DRR(RCX, R11, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, RBX, R9),
+      ADD_DSZ64_DRR(TMP0, TMP0, R9),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHL_DSZ64_DRI(TMP6, TMP0, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(R9, TMP6, 13),
+      ZEROEXT_DSZ64_DR(RDX, R12),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+
+    /* ═══ c2 = d0*a2 + a1*a1 + d3*r4 (8 triads) ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, R15, RDX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ZEROEXT_DSZ64_DR(R13, RSI), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP9, TMP15),
+      MUL_DSZ64_DRR(RCX, RSI, R13),
+      ADD_DSZ64_DRR(TMP0, TMP0, R13), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, RBX, R10),
+      ADD_DSZ64_DRR(TMP0, TMP0, R10),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHL_DSZ64_DRI(TMP6, TMP0, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(R10, TMP6, 13),
+      ZEROEXT_DSZ64_DR(RDX, R11),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+
+    /* ═══ c3 = d0*a3 + d1*a2 + r4*a4 (8 triads) ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, R15, RDX),
+      ADD_DSZ64_DRR(R13, RSI, RSI), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RDX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(RAX, R12),
+      MUL_DSZ64_DRR(RCX, R13, RAX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, RAX),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, R14, RBX),
+      ADD_DSZ64_DRR(TMP0, TMP0, RBX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP9),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51),
+      SHL_DSZ64_DRI(TMP6, TMP0, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(RBX, TMP6, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13),
+      NOTAND_DSZ64_DRR(R8, R8, R8), NOP_SEQWORD },
+
+    /* ═══ c4 = d0*a4 + d1*a3 + a2*a2 (7 triads — last limb) ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DRR(RCX, R15, R14),
+      ADD_DSZ64_DRR(TMP0, TMP0, R14), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX),
+      ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RCX, R13, R11),
+      ADD_DSZ64_DRR(TMP0, TMP0, R11),
+      SETCC_CONDB_DR(TMP15, TMP0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, RCX),
+      ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      MUL_DSZ64_DRR(RCX, R12, R12), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, R12),
+      SETCC_CONDB_DR(TMP15, TMP0),
+      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+      SHR_DSZ64_DRI(TMP8, TMP0, 51),
+      ADD_DSZ64_DRR(R8, R8, TMP9), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP6, TMP0, 13),
+      SHL_DSZ64_DRI(TMP1, R8, 13),
+      SHR_DSZ64_DRI(RAX, TMP6, 13), NOP_SEQWORD },
+
+    /* ═══ FINAL REDUCTION (3 triads): RDI += 19*carry, propagate, mask ═══ */
+    { OR_DSZ64_DRR(TMP0, TMP8, TMP1),
+      MUL_DSZ64_DIR(TMP6, 19, TMP0),
+      ADD_DSZ64_DRR(RDI, RDI, TMP0), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP0, RDI, 51),
+      ADD_DSZ64_DRR(R9, R9, TMP0),
+      NOP, NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP6, RDI, 13),
+      SHR_DSZ64_DRI(RDI, TMP6, 13),
+      NOP, END_SEQWORD }
+    };
+
+    /* Install fe_mul at U7c00, hooked to vmwrite (slot 0). */
+    patch_ucode(0x7c00, mul_patch, ARRAY_SZ(mul_patch));
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
-    printf("fe_mul patch installed: %d triads at U7c00\n", (int)ARRAY_SZ(patch));
+
+    /* Install fe_sq immediately after, hooked to vmread (slot 1). */
+    uint64_t sq_addr = 0x7c00 + ARRAY_SZ(mul_patch) * 4;
+    patch_ucode(sq_addr, sq_patch, ARRAY_SZ(sq_patch));
+    hook_match_and_patch(1, 0x0618, sq_addr);
+
+    printf("fe_mul: %d triads at U%04lx (vmwrite hook)\n",
+           (int)ARRAY_SZ(mul_patch), (unsigned long)0x7c00);
+    printf("fe_sq : %d triads at U%04lx (vmread  hook)\n",
+           (int)ARRAY_SZ(sq_patch),  (unsigned long)sq_addr);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -373,7 +456,7 @@ static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
         "xor eax, eax\n\t"
         "xor r8d, r8d\n\t"
 
-        /* fire microcode */
+        /* fire fe_mul microcode via vmwrite */
         "vmwrite rcx, rdx\n\t"
 
         /* recover output pointer, store 5 result limbs */
@@ -392,9 +475,49 @@ static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
     );
 }
 
-/* fe_sq via microcode: just call fe_mul(a, a, out) */
-static inline void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
-    fe_mul_ucode(a, a, out);
+static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
+    register uint64_t *_in  asm("rcx") = (uint64_t *)a;
+    register uint64_t *_out asm("r15") = out;
+
+    asm volatile(
+        "push r15\n\t"
+
+        /* load 5 limbs from rcx (= input pointer) */
+        "mov rdi, [rcx]\n\t"
+        "mov rsi, [rcx + 8]\n\t"
+        "mov r12, [rcx + 16]\n\t"
+        "mov r11, [rcx + 24]\n\t"
+        "mov r14, [rcx + 32]\n\t"
+
+        /* precompute doubled (2*a_i) and reduced (19*a_i) operands */
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+
+        /* clear accumulators */
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        /* recover output pointer, store 5 result limbs */
+        "pop rcx\n\t"
+        "mov [rcx],      rdi\n\t"
+        "mov [rcx + 8],  r9\n\t"
+        "mov [rcx + 16], r10\n\t"
+        "mov [rcx + 24], rbx\n\t"
+        "mov [rcx + 32], rax\n\t"
+
+        : "+r"(_in), "+r"(_out)
+        :
+        : "rax", "rbx", "rdx", "rsi", "rdi",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14",
+          "memory", "cc"
+    );
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -459,7 +582,26 @@ static void fe_sq_native(const uint64_t *a, uint64_t *out) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * COMMON FIELD OPERATIONS (pure C, used by both native and ucode)
+ * FIAT-CRYPTO FIELD OPERATIONS (SUPERCOP-style reference baseline)
+ *
+ * Both files share identical helper typedefs; C11 allows redundant
+ * typedef declarations of the same type, so including both compiles
+ * cleanly under -std=gnu11+. We only consume the two carry_* functions.
+ * ════════════════════════════════════════════════════════════════════ */
+
+#include "../curvesC/curve25519_mul.c"
+#include "../curvesC/curve25519_square.c"
+
+static inline void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_curve25519_carry_mul(out, a, b);
+}
+
+static inline void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_curve25519_carry_square(out, a);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * COMMON FIELD OPERATIONS (pure C, used by all backends)
  * ════════════════════════════════════════════════════════════════════ */
 
 static inline void fe_add(fe out, const fe a, const fe b) {
@@ -606,17 +748,7 @@ static void fe_tobytes(uint8_t out[32], const fe in) {
     fe t;
     fe_reduce(t, in);
 
-    /* pack 5 x 51-bit limbs into 32 bytes, little-endian */
-    /* We have 255 bits: limbs 0..4, each 51 bits */
-    /* Total bits: 5 * 51 = 255 */
     uint64_t h0 = t[0], h1 = t[1], h2 = t[2], h3 = t[3], h4 = t[4];
-
-    /* Combine into a 256-bit number (bit 255 = 0) */
-    /* limb 0: bits 0..50 */
-    /* limb 1: bits 51..101 */
-    /* limb 2: bits 102..152 */
-    /* limb 3: bits 153..203 */
-    /* limb 4: bits 204..254 */
 
     out[0]  = (uint8_t)(h0);
     out[1]  = (uint8_t)(h0 >> 8);
@@ -659,55 +791,52 @@ static void fe_tobytes(uint8_t out[32], const fe in) {
  * Standard addition chain from donna/ref10.
  * ════════════════════════════════════════════════════════════════════ */
 
-/* fe_invert using native C field operations */
 static void fe_invert_native(fe out, const fe z) {
     fe z2, z9, z11, t, t0, t1, t2, t3;
     int i;
 
-    /* Standard addition chain for p-2 = 2^255 - 21 */
-    fe_sq_native(z, z2);                     /* z^2 */
-    fe_sq_native(z2, t);                     /* z^4 */
-    fe_sq_native(t, t);                      /* z^8 */
-    fe_mul_native(t, z, z9);                 /* z^9 */
-    fe_mul_native(z9, z2, z11);              /* z^11 */
-    fe_sq_native(z11, t);                    /* z^22 */
-    fe_mul_native(t, z9, t0);                /* z^31 = z^(2^5-1) */
+    fe_sq_native(z, z2);
+    fe_sq_native(z2, t);
+    fe_sq_native(t, t);
+    fe_mul_native(t, z, z9);
+    fe_mul_native(z9, z2, z11);
+    fe_sq_native(z11, t);
+    fe_mul_native(t, z9, t0);
 
     fe_sq_native(t0, t1);
     for (i = 1; i < 5; i++) fe_sq_native(t1, t1);
-    fe_mul_native(t1, t0, t1);               /* z^(2^10-1) */
+    fe_mul_native(t1, t0, t1);
 
     fe_sq_native(t1, t2);
     for (i = 1; i < 10; i++) fe_sq_native(t2, t2);
-    fe_mul_native(t2, t1, t2);               /* z^(2^20-1) */
+    fe_mul_native(t2, t1, t2);
 
     fe_sq_native(t2, t3);
     for (i = 1; i < 20; i++) fe_sq_native(t3, t3);
-    fe_mul_native(t3, t2, t3);               /* z^(2^40-1) */
+    fe_mul_native(t3, t2, t3);
 
     for (i = 0; i < 10; i++) fe_sq_native(t3, t3);
-    fe_mul_native(t3, t1, t1);               /* z^(2^50-1) */
+    fe_mul_native(t3, t1, t1);
 
     fe_sq_native(t1, t2);
     for (i = 1; i < 50; i++) fe_sq_native(t2, t2);
-    fe_mul_native(t2, t1, t2);               /* z^(2^100-1) */
+    fe_mul_native(t2, t1, t2);
 
     fe_sq_native(t2, t3);
     for (i = 1; i < 100; i++) fe_sq_native(t3, t3);
-    fe_mul_native(t3, t2, t3);               /* z^(2^200-1) */
+    fe_mul_native(t3, t2, t3);
 
     for (i = 0; i < 50; i++) fe_sq_native(t3, t3);
-    fe_mul_native(t3, t1, t1);               /* z^(2^250-1) */
+    fe_mul_native(t3, t1, t1);
 
-    fe_sq_native(t1, t1);                    /* z^(2^251-2) */
-    fe_sq_native(t1, t1);                    /* z^(2^252-4) */
-    fe_sq_native(t1, t1);                    /* z^(2^253-8) */
-    fe_sq_native(t1, t1);                    /* z^(2^254-16) */
-    fe_sq_native(t1, t1);                    /* z^(2^255-32) */
-    fe_mul_native(t1, z11, out);             /* z^(2^255-21) = z^(p-2) */
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_mul_native(t1, z11, out);
 }
 
-/* fe_invert using microcode field operations */
 static void fe_invert_ucode(fe out, const fe z) {
     fe z2, z9, z11, t, t0, t1, t2, t3;
     int i;
@@ -754,22 +883,62 @@ static void fe_invert_ucode(fe out, const fe z) {
     fe_mul_ucode(z11, t1, out);
 }
 
+static void fe_invert_fiat(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_fiat(z, z2);
+    fe_sq_fiat(z2, t);
+    fe_sq_fiat(t, t);
+    fe_mul_fiat(t, z, z9);
+    fe_mul_fiat(z9, z2, z11);
+    fe_sq_fiat(z11, t);
+    fe_mul_fiat(t, z9, t0);
+
+    fe_sq_fiat(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_fiat(t1, t1);
+    fe_mul_fiat(t1, t0, t1);
+
+    fe_sq_fiat(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_fiat(t2, t2);
+    fe_mul_fiat(t2, t1, t2);
+
+    fe_sq_fiat(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t1, t1);
+
+    fe_sq_fiat(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_fiat(t2, t2);
+    fe_mul_fiat(t2, t1, t2);
+
+    fe_sq_fiat(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t1, t1);
+
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_mul_fiat(t1, z11, out);
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * X25519 MONTGOMERY LADDER (RFC 7748)
  * ════════════════════════════════════════════════════════════════════ */
 
 static void scalar_clamp(uint8_t s[32]) {
-    s[0]  &= 248;   /* clear bits 0, 1, 2 */
-    s[31] &= 127;   /* clear bit 255 */
-    s[31] |= 64;    /* set bit 254 */
+    s[0]  &= 248;
+    s[31] &= 127;
+    s[31] |= 64;
 }
 
-/*
- * x25519_native: native C implementation of the full X25519 function.
- * scalar: 32-byte secret key (will be clamped)
- * point:  32-byte u-coordinate of the base point
- * out:    32-byte result
- */
 static void x25519_native(uint8_t out[32], const uint8_t scalar[32],
                            const uint8_t point[32]) {
     uint8_t e[32];
@@ -826,10 +995,6 @@ static void x25519_native(uint8_t out[32], const uint8_t scalar[32],
     fe_tobytes(out, x2);
 }
 
-/*
- * x25519_ucode: microcode-accelerated X25519.
- * Uses fe_mul_ucode for all multiplications and squarings.
- */
 static void x25519_ucode(uint8_t out[32], const uint8_t scalar[32],
                           const uint8_t point[32]) {
     uint8_t e[32];
@@ -883,6 +1048,62 @@ static void x25519_ucode(uint8_t out[32], const uint8_t scalar[32],
 
     fe_invert_ucode(z2, z2);
     fe_mul_ucode(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+static void x25519_fiat(uint8_t out[32], const uint8_t scalar[32],
+                        const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_fiat(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_fiat(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_fiat(D, A, DA);
+        fe_mul_fiat(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_fiat(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_fiat(t0, z3);
+        fe_mul_fiat(x1, z3, z3);
+
+        fe_mul_fiat(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_fiat(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_fiat(z2, z2);
+    fe_mul_fiat(x2, z2, x2);
     fe_tobytes(out, x2);
 }
 
@@ -977,7 +1198,6 @@ static int test_rfc7748(void) {
     /* --- Iterated test: 1 iteration --- */
     printf("\n--- Iterated test (1 iteration) ---\n");
     {
-        /* Start: k = u = basepoint (9) */
         uint8_t k[32] = {0}, u[32] = {0}, r[32];
         k[0] = 9;
         u[0] = 9;
@@ -993,7 +1213,6 @@ static int test_rfc7748(void) {
             printf("  native: FAIL\n"); fail++;
         }
 
-        /* Also test ucode */
         x25519_ucode(r, k, u);
         print_hex("ucode  after 1", r, 32);
         if (memcmp_hex(r,
@@ -1012,7 +1231,6 @@ static int test_rfc7748(void) {
         k[0] = 9;
         u[0] = 9;
 
-        /* native */
         uint8_t kn[32], un[32];
         memcpy(kn, k, 32);
         memcpy(un, u, 32);
@@ -1030,7 +1248,6 @@ static int test_rfc7748(void) {
             printf("  native: FAIL\n"); fail++;
         }
 
-        /* ucode */
         uint8_t ku[32], uu[32];
         memcpy(ku, k, 32);
         memcpy(uu, u, 32);
@@ -1048,11 +1265,32 @@ static int test_rfc7748(void) {
             printf("  ucode:  FAIL\n"); fail++;
         }
 
-        /* Cross-check: native == ucode */
+        uint8_t kf[32], uf[32];
+        memcpy(kf, k, 32);
+        memcpy(uf, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_fiat(r, kf, uf);
+            memcpy(uf, kf, 32);
+            memcpy(kf, r, 32);
+        }
+        print_hex("fiat   after 1000", kf, 32);
+        if (memcmp_hex(kf,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  fiat:   PASS\n"); pass++;
+        } else {
+            printf("  fiat:   FAIL\n"); fail++;
+        }
+
         if (memcmp(kn, ku, 32) == 0) {
             printf("  native==ucode: PASS\n"); pass++;
         } else {
             printf("  native==ucode: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kf, 32) == 0) {
+            printf("  native==fiat:  PASS\n"); pass++;
+        } else {
+            printf("  native==fiat:  FAIL\n"); fail++;
         }
     }
 
@@ -1083,7 +1321,6 @@ static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
     uint64_t t0, t1, min, sum;
 
-    /* Use the RFC test vector 1 scalar and basepoint for benchmarking */
     hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
                  scalar, 32);
     hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
@@ -1093,6 +1330,7 @@ static void benchmark(void) {
 
     /* Warm up */
     x25519_native(out, scalar, point);
+    x25519_fiat(out, scalar, point);
     x25519_ucode(out, scalar, point);
 
     /* Benchmark native C */
@@ -1108,6 +1346,19 @@ static void benchmark(void) {
     printf("Native C (-O3):     min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
            min, sum / BENCH_REPS);
 
+    /* Benchmark fiat-crypto (SUPERCOP-style baseline) */
+    min = UINT64_MAX; sum = 0;
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_fiat(out, scalar, point);
+        t1 = rdtsc_end();
+        uint64_t dt = t1 - t0;
+        sum += dt;
+        if (dt < min) min = dt;
+    }
+    printf("Fiat-crypto (-O3):  min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
+           min, sum / BENCH_REPS);
+
     /* Benchmark microcode */
     min = UINT64_MAX; sum = 0;
     for (int r = 0; r < BENCH_REPS; r++) {
@@ -1118,7 +1369,7 @@ static void benchmark(void) {
         sum += dt;
         if (dt < min) min = dt;
     }
-    printf("Microcode (vmwrite): min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
+    printf("Microcode:          min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
            min, sum / BENCH_REPS);
 
     printf("\n");
@@ -1134,7 +1385,7 @@ int main(void) {
     assign_to_core(0);
     init_match_and_patch();
     do_fix_IN_patch();
-    install_fe_mul_patch();
+    install_field_patches();
 
     /* Quick diagnostic: verify fe_invert and encode/decode */
     {
@@ -1147,19 +1398,17 @@ int main(void) {
         printf("  inv(7)*7 = {%lu,%lu,%lu,%lu,%lu} (expect {1,0,0,0,0})\n",
                product[0], product[1], product[2], product[3], product[4]);
 
-        /* Verify encode/decode roundtrip */
         uint8_t bytes[32];
         fe decoded;
         fe orig = {0x123456789ABULL, 0x23456789ABCULL, 0x3456789ABCDULL,
                    0x456789ABCDEULL, 0x56789ABCDEFULL};
         fe_tobytes(bytes, orig);
         fe_frombytes(decoded, bytes);
-        printf("  encode/decode: {%lx,%lx,%lx,%lx,%lx} → {%lx,%lx,%lx,%lx,%lx} %s\n",
+        printf("  encode/decode: {%lx,%lx,%lx,%lx,%lx} -> {%lx,%lx,%lx,%lx,%lx} %s\n",
                orig[0], orig[1], orig[2], orig[3], orig[4],
                decoded[0], decoded[1], decoded[2], decoded[3], decoded[4],
                memcmp(orig, decoded, 40) == 0 ? "MATCH" : "MISMATCH");
 
-        /* Verify single ladder step: 9 * 9 (basepoint * basepoint scalar) */
         uint8_t sc9[32] = {0}, bp9[32] = {0}, result9[32];
         sc9[0] = 9; bp9[0] = 9;
         x25519_native(result9, sc9, bp9);
@@ -1169,7 +1418,6 @@ int main(void) {
         printf("\n");
     }
 
-    /* Run RFC 7748 test vectors */
     int failures = test_rfc7748();
 
     if (failures) {
@@ -1179,10 +1427,8 @@ int main(void) {
         return 1;
     }
 
-    /* Benchmark */
     benchmark();
 
-    /* Clean up: remove patches */
     init_match_and_patch();
     do_fix_IN_patch();
     printf("Done.\n");

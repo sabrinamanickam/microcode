@@ -1,0 +1,2 @@
+compiler/c/clang_-march=native_-O3_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
+implementation/crypto_aead/cilipadi128v1extrahot/ref
