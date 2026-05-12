@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 #include "../../include/patch.h"
@@ -430,7 +431,9 @@ static void install_field_patches(void) {
  * MICROCODE FIELD OPERATIONS
  * ════════════════════════════════════════════════════════════════════ */
 
-static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+/* Non-static so the amd64-51-ucode hybrid (amd64-51-ucode/fe25519_mul.c)
+ * can call it directly. */
+void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
     register uint64_t *_a   asm("rcx") = (uint64_t *)a;
     register uint64_t *_b   asm("rbx") = (uint64_t *)b;
     register uint64_t *_out asm("r15") = out;
@@ -475,7 +478,7 @@ static void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
     );
 }
 
-static void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
+void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
     register uint64_t *_in  asm("rcx") = (uint64_t *)a;
     register uint64_t *_out asm("r15") = out;
 
@@ -599,6 +602,52 @@ static inline void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *o
 static inline void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
     fiat_curve25519_carry_square(out, a);
 }
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP donna_c64 (vendored from supercop-20260330)
+ *
+ * The entry point `crypto_scalarmult` in donna_c64/smult.c is renamed to
+ * x25519_donna_c64 via macro substitution before #include. The static
+ * helper functions (fmul, fexpand, crecip, ...) are self-contained and
+ * do not clash with our identifiers. The `crypto_scalarmult.h` stub at
+ * simple/include/ satisfies smult.c's only external include.
+ * ════════════════════════════════════════════════════════════════════ */
+
+#define crypto_scalarmult x25519_donna_c64
+#include "supercop-20260330/crypto_scalarmult/curve25519/donna_c64/smult.c"
+#undef crypto_scalarmult
+
+/* Forward-declare with our public name for use below. */
+extern int x25519_donna_c64(unsigned char *mypublic,
+                            const unsigned char *secret,
+                            const unsigned char *basepoint);
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP amd64-51 (hand-tuned x86-64 assembly, Bernstein/Schwabe 2011)
+ *
+ * Compiled as separate .o files by the Makefile from the SUPERCOP tree.
+ * The entry point `crypto_scalarmult` in mont25519.c is renamed to
+ * x25519_amd64_51 via -include include/amd64_51_namespace.h. The static
+ * library libcryptoint.a provides supercop_int64_optblocker.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_51(unsigned char *out,
+                           const unsigned char *scalar,
+                           const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * Hybrid: amd64-51's driver/invert/pack + microcode field ops.
+ *
+ * Same SUPERCOP framework (mont25519/mladder/invert/pack/unpack/freeze/
+ * cswap) but with ladderstep + fe25519_mul + fe25519_square replaced by
+ * C versions that call our microcode wrappers. Isolates field-op cost
+ * from the surrounding ladder structure — see benchmark_review.md issue
+ * #1. Sources in simple/amd64-51-ucode/.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_51_ucode(unsigned char *out,
+                                 const unsigned char *scalar,
+                                 const unsigned char *point);
 
 /* ════════════════════════════════════════════════════════════════════
  * COMMON FIELD OPERATIONS (pure C, used by all backends)
@@ -1282,6 +1331,57 @@ static int test_rfc7748(void) {
             printf("  fiat:   FAIL\n"); fail++;
         }
 
+        uint8_t kd[32], ud[32];
+        memcpy(kd, k, 32);
+        memcpy(ud, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_donna_c64(r, kd, ud);
+            memcpy(ud, kd, 32);
+            memcpy(kd, r, 32);
+        }
+        print_hex("donna  after 1000", kd, 32);
+        if (memcmp_hex(kd,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  donna:  PASS\n"); pass++;
+        } else {
+            printf("  donna:  FAIL\n"); fail++;
+        }
+
+        uint8_t ka[32], ua[32];
+        memcpy(ka, k, 32);
+        memcpy(ua, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51(r, ka, ua);
+            memcpy(ua, ka, 32);
+            memcpy(ka, r, 32);
+        }
+        print_hex("amd51  after 1000", ka, 32);
+        if (memcmp_hex(ka,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  amd51:  PASS\n"); pass++;
+        } else {
+            printf("  amd51:  FAIL\n"); fail++;
+        }
+
+        uint8_t kau[32], uau[32];
+        memcpy(kau, k, 32);
+        memcpy(uau, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51_ucode(r, kau, uau);
+            memcpy(uau, kau, 32);
+            memcpy(kau, r, 32);
+        }
+        print_hex("a51u   after 1000", kau, 32);
+        if (memcmp_hex(kau,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  a51u:   PASS\n"); pass++;
+        } else {
+            printf("  a51u:   FAIL\n"); fail++;
+        }
+
         if (memcmp(kn, ku, 32) == 0) {
             printf("  native==ucode: PASS\n"); pass++;
         } else {
@@ -1291,6 +1391,21 @@ static int test_rfc7748(void) {
             printf("  native==fiat:  PASS\n"); pass++;
         } else {
             printf("  native==fiat:  FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kd, 32) == 0) {
+            printf("  native==donna: PASS\n"); pass++;
+        } else {
+            printf("  native==donna: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, ka, 32) == 0) {
+            printf("  native==amd51: PASS\n"); pass++;
+        } else {
+            printf("  native==amd51: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kau, 32) == 0) {
+            printf("  native==a51u:  PASS\n"); pass++;
+        } else {
+            printf("  native==a51u:  FAIL\n"); fail++;
         }
     }
 
@@ -1315,11 +1430,24 @@ static inline uint64_t rdtsc_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define BENCH_REPS 50
+#define BENCH_REPS 100
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Sort samples in place and return (min, median). */
+static void bench_stats(uint64_t *samples, int n, uint64_t *out_min, uint64_t *out_median) {
+    qsort(samples, n, sizeof(uint64_t), cmp_u64);
+    *out_min    = samples[0];
+    *out_median = samples[n / 2];
+}
 
 static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
-    uint64_t t0, t1, min, sum;
+    uint64_t t0, t1, mn, med;
+    uint64_t samples[BENCH_REPS];
 
     hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
                  scalar, 32);
@@ -1331,46 +1459,70 @@ static void benchmark(void) {
     /* Warm up */
     x25519_native(out, scalar, point);
     x25519_fiat(out, scalar, point);
+    x25519_donna_c64(out, scalar, point);
+    x25519_amd64_51(out, scalar, point);
+    x25519_amd64_51_ucode(out, scalar, point);
     x25519_ucode(out, scalar, point);
 
     /* Benchmark native C */
-    min = UINT64_MAX; sum = 0;
     for (int r = 0; r < BENCH_REPS; r++) {
         t0 = rdtsc_start();
         x25519_native(out, scalar, point);
         t1 = rdtsc_end();
-        uint64_t dt = t1 - t0;
-        sum += dt;
-        if (dt < min) min = dt;
+        samples[r] = t1 - t0;
     }
-    printf("Native C (-O3):     min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
-           min, sum / BENCH_REPS);
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("ours/hand-C:          min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
 
-    /* Benchmark fiat-crypto (SUPERCOP-style baseline) */
-    min = UINT64_MAX; sum = 0;
+    /* Benchmark ours/fiat */
     for (int r = 0; r < BENCH_REPS; r++) {
         t0 = rdtsc_start();
         x25519_fiat(out, scalar, point);
         t1 = rdtsc_end();
-        uint64_t dt = t1 - t0;
-        sum += dt;
-        if (dt < min) min = dt;
+        samples[r] = t1 - t0;
     }
-    printf("Fiat-crypto (-O3):  min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
-           min, sum / BENCH_REPS);
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("ours/fiat:            min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
 
-    /* Benchmark microcode */
-    min = UINT64_MAX; sum = 0;
+    /* Benchmark donna_c64 (whole stack) */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_donna_c64(out, scalar, point);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("donna_c64:            min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
+
+    /* Benchmark amd64-51/asm (SUPERCOP whole stack) */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_amd64_51(out, scalar, point);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("amd64-51/asm:         min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
+
+    /* Benchmark amd64-51/ucode (amd64-51 framework + microcode field ops) */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_amd64_51_ucode(out, scalar, point);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("amd64-51/ucode:       min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
+
+    /* Benchmark ours/ucode (our ladder + microcode field ops) */
     for (int r = 0; r < BENCH_REPS; r++) {
         t0 = rdtsc_start();
         x25519_ucode(out, scalar, point);
         t1 = rdtsc_end();
-        uint64_t dt = t1 - t0;
-        sum += dt;
-        if (dt < min) min = dt;
+        samples[r] = t1 - t0;
     }
-    printf("Microcode:          min %8" PRIu64 "  avg %8" PRIu64 " cycles\n",
-           min, sum / BENCH_REPS);
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("ours/ucode:           min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
 
     printf("\n");
 }
@@ -1386,6 +1538,72 @@ int main(void) {
     init_match_and_patch();
     do_fix_IN_patch();
     install_field_patches();
+
+    /* Diagnostic: does our hybrid's C ladderstep produce the same field
+     * element values as amd64-51's asm ladderstep on the same input?
+     *
+     * We compare via fe25519_pack output (32 canonical bytes), which
+     * freezes the limbs first — so two different limb representations
+     * of the same field element compare equal here. */
+    {
+        typedef struct { unsigned long long v[5]; } sc_fe25519;
+        extern void supercop_amd64_51_ladderstep(void *work);
+        extern void supercop_amd64_51_ucode_ladderstep(void *work);
+        extern void supercop_amd64_51_fe25519_pack(unsigned char r[32], const void *x);
+        extern void supercop_amd64_51_ucode_fe25519_pack(unsigned char r[32], const void *x);
+
+        printf("--- Ladderstep equivalence diagnostic ---\n");
+        printf("  Initial work[] = small non-degenerate values; one ladderstep each.\n");
+        printf("  Comparing pack(x2), pack(z2), pack(x3), pack(z3) byte-for-byte.\n");
+
+        sc_fe25519 work_asm[5];
+        memset(work_asm, 0, sizeof(work_asm));
+        work_asm[0].v[0] = 9;        /* x1 */
+        work_asm[1].v[0] = 5;        /* x2 */
+        work_asm[2].v[0] = 7;        /* z2 */
+        work_asm[3].v[0] = 11;       /* x3 */
+        work_asm[4].v[0] = 13;       /* z3 */
+
+        sc_fe25519 work_ucode[5];
+        memcpy(work_ucode, work_asm, sizeof(work_asm));
+
+        supercop_amd64_51_ladderstep(work_asm);
+        supercop_amd64_51_ucode_ladderstep(work_ucode);
+
+        int all_field_match = 1;
+        int all_proj_match = 1;
+        const char *names[5] = {"x1", "x2", "z2", "x3", "z3"};
+        unsigned char b_asm[5][32], b_ucode[5][32];
+        for (int i = 0; i < 5; i++) {
+            supercop_amd64_51_fe25519_pack(b_asm[i],  &work_asm[i]);
+            supercop_amd64_51_ucode_fe25519_pack(b_ucode[i], &work_ucode[i]);
+            int match = (memcmp(b_asm[i], b_ucode[i], 32) == 0);
+            printf("  work[%d] (%s): %s\n", i, names[i],
+                   match ? "MATCH (field elem equal)" : "DIFFER (field elem differ)");
+            if (!match) all_field_match = 0;
+        }
+
+        /* If field elements differ, check projective equivalence: x2/z2 and
+         * x3/z3 ratios should still be equal. Two points are projectively
+         * equal iff x2_a * z2_b == x2_b * z2_a (mod p). We can't compute
+         * that directly without fe25519_mul, so skip — but if X25519
+         * end-to-end matches in the RFC test below, projective equivalence
+         * is implied. */
+
+        if (all_field_match) {
+            printf("  → Ladders produce IDENTICAL field elements (bit-for-bit\n"
+                   "    after canonicalization). Our hybrid is a faithful\n"
+                   "    drop-in for amd64-51's ladderstep.\n");
+        } else {
+            printf("  → Ladders produce DIFFERENT field elements. The two\n"
+                   "    formulations may be projectively equivalent (same\n"
+                   "    affine point x/z) but with different (x,z) scalings.\n"
+                   "    The end-to-end RFC 7748 test below will confirm whether\n"
+                   "    X25519 is still correct despite the divergence.\n");
+            (void)all_proj_match;
+        }
+        printf("\n");
+    }
 
     /* Quick diagnostic: verify fe_invert and encode/decode */
     {
