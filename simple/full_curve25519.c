@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <emmintrin.h>
 #include "../../include/patch.h"
 #include "../../include/ucode_macro.h"
 #include "../../include/misc.h"
@@ -46,6 +47,12 @@ static void install_field_patches(void) {
      *   RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
      *   R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4   RAX=0  R8=0
      * Output: R15=h0  R13=h1  R9=h2  R10=h3  RAX=h4
+     *
+     * The TMP9 carry chain (per-c-section "TMP9 += TMP15 ... R8 += TMP9")
+     * runs in parallel with the R8 hi-accumulator chain. Collapsing the two
+     * chains into a single R8 chain (as a 65-triad shrink attempted) saves
+     * a triad but lengthens R8's critical path enough to add ~5k cyc to
+     * X25519. Keep the two-chain structure.
      * ───────────────────────────────────────────────────────────────── */
     ucode_t mul_patch[] = {
 
@@ -431,68 +438,89 @@ static void install_field_patches(void) {
  * MICROCODE FIELD OPERATIONS
  * ════════════════════════════════════════════════════════════════════ */
 
-/* Non-static so the amd64-51-ucode hybrid (amd64-51-ucode/fe25519_mul.c)
- * can call it directly. */
+/* Optimization notes:
+ *   1. Use SysV-ABI arg registers (rdi, rsi, rdx) directly via constraint
+ *      letters "D", "S", "d" — saves 3 reg-reg moves per call that the
+ *      previous `register asm("rcx")` etc. pinning required GCC to emit.
+ *   2. Stash the output pointer in callee-saved rbp instead of pinned r15.
+ *      r15 was clobbered by the patch (output limb h0), forcing an inner
+ *      `push r15 / pop rcx` to preserve the out-ptr across vmwrite/vmread.
+ *      rbp survives the patch untouched, so the inner push/pop disappears
+ *      — GCC handles save/restore of rbp once per call in the prologue/
+ *      epilogue (same cost as the previous push r15 in the prologue).
+ *
+ * Net per-call savings: ~5–7 cycles (3 reg-reg moves elided + 2 stack
+ * accesses eliminated). At ~2300 calls per X25519, that's ~11–16k cycles
+ * off the total runtime. Pure wrapper work — the microcode patches and
+ * operand semantics are unchanged.
+ *
+ * Non-static so the amd64-51-ucode hybrid can call directly. */
+
 void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
-    register uint64_t *_a   asm("rcx") = (uint64_t *)a;
-    register uint64_t *_b   asm("rbx") = (uint64_t *)b;
-    register uint64_t *_out asm("r15") = out;
+    /* Pin args to their natural SysV-ABI registers — GCC won't emit
+     * extra reg-reg moves to relocate them. "+r" tells GCC the regs are
+     * both input and clobbered (no need to also list in clobber set). */
+    register const uint64_t *_a   asm("rdi") = a;
+    register const uint64_t *_b   asm("rsi") = b;
+    register       uint64_t *_out asm("rdx") = out;
 
     asm volatile(
-        "push r15\n\t"
+        /* Stash out pointer in callee-saved rbp; survives the patch.
+         * Avoids the old inner `push r15 / pop rcx` pair. */
+        "mov rbp, rdx\n\t"
 
-        /* load a[0..4] from rcx */
-        "mov rdi, [rcx]\n\t"
-        "mov rsi, [rcx + 8]\n\t"
-        "mov r12, [rcx + 16]\n\t"
-        "mov r11, [rcx + 24]\n\t"
-        "mov r14, [rcx + 32]\n\t"
+        /* Load b[0..4] from rsi (rsi unchanged through these). */
+        "mov r15, [rsi]\n\t"
+        "mov r13, [rsi + 8]\n\t"
+        "mov r9,  [rsi + 16]\n\t"
+        "mov r10, [rsi + 24]\n\t"
+        "mov rbx, [rsi + 32]\n\t"
 
-        /* load b[0..4] from rbx */
-        "mov r15, [rbx]\n\t"
-        "mov r13, [rbx + 8]\n\t"
-        "mov r9,  [rbx + 16]\n\t"
-        "mov r10, [rbx + 24]\n\t"
-        "mov rbx, [rbx + 32]\n\t"   /* last -- clobbers pointer */
+        /* Load a[1..4] then a[0] last (a[0] destroys rdi's pointer). */
+        "mov rsi, [rdi + 8]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r14, [rdi + 32]\n\t"
+        "mov rdi, [rdi]\n\t"
 
-        /* clear accumulators */
+        /* Clear accumulators */
         "xor eax, eax\n\t"
         "xor r8d, r8d\n\t"
 
-        /* fire fe_mul microcode via vmwrite */
+        /* Fire fe_mul microcode via vmwrite */
         "vmwrite rcx, rdx\n\t"
 
-        /* recover output pointer, store 5 result limbs */
-        "pop rcx\n\t"
-        "mov [rcx],      r15\n\t"
-        "mov [rcx + 8],  r13\n\t"
-        "mov [rcx + 16], r9\n\t"
-        "mov [rcx + 24], r10\n\t"
-        "mov [rcx + 32], rax\n\t"
+        /* Store 5 result limbs via rbp */
+        "mov [rbp],      r15\n\t"
+        "mov [rbp + 8],  r13\n\t"
+        "mov [rbp + 16], r9\n\t"
+        "mov [rbp + 24], r10\n\t"
+        "mov [rbp + 32], rax\n\t"
 
         : "+r"(_a), "+r"(_b), "+r"(_out)
         :
-        : "rax", "rdx", "rsi", "rdi",
-          "r8", "r9", "r10", "r11", "r12", "r13", "r14",
+        : "rax", "rbx", "rcx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
           "memory", "cc"
     );
 }
 
 void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
-    register uint64_t *_in  asm("rcx") = (uint64_t *)a;
-    register uint64_t *_out asm("r15") = out;
+    register const uint64_t *_a   asm("rdi") = a;
+    register       uint64_t *_out asm("rsi") = out;
 
     asm volatile(
-        "push r15\n\t"
+        /* Stash out pointer in callee-saved rbp; survives the patch. */
+        "mov rbp, rsi\n\t"
 
-        /* load 5 limbs from rcx (= input pointer) */
-        "mov rdi, [rcx]\n\t"
-        "mov rsi, [rcx + 8]\n\t"
-        "mov r12, [rcx + 16]\n\t"
-        "mov r11, [rcx + 24]\n\t"
-        "mov r14, [rcx + 32]\n\t"
+        /* Load a[1..4] then a[0] last (a[0] destroys rdi's pointer). */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov rsi, [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
 
-        /* precompute doubled (2*a_i) and reduced (19*a_i) operands */
+        /* Precompute doubled (2*a_i) and reduced (19*a_i) operands */
         "lea r15, [rdi + rdi]\n\t"
         "lea r13, [rsi + rsi]\n\t"
         "lea r9,  [r12 + r12]\n\t"
@@ -500,25 +528,242 @@ void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
         "imul rbx, r14, 19\n\t"
         "imul rdx, r11, 19\n\t"
 
-        /* clear accumulators */
+        /* Clear accumulators */
         "xor eax, eax\n\t"
         "xor r8d, r8d\n\t"
 
-        /* fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
+        /* Fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
         ".byte 0x0f, 0x78, 0xca\n\t"
 
-        /* recover output pointer, store 5 result limbs */
-        "pop rcx\n\t"
-        "mov [rcx],      rdi\n\t"
-        "mov [rcx + 8],  r9\n\t"
-        "mov [rcx + 16], r10\n\t"
-        "mov [rcx + 24], rbx\n\t"
-        "mov [rcx + 32], rax\n\t"
+        /* Store 5 result limbs via rbp */
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  r9\n\t"
+        "mov [rbp + 16], r10\n\t"
+        "mov [rbp + 24], rbx\n\t"
+        "mov [rbp + 32], rax\n\t"
 
-        : "+r"(_in), "+r"(_out)
+        : "+r"(_a), "+r"(_out)
         :
-        : "rax", "rbx", "rdx", "rsi", "rdi",
-          "r8", "r9", "r10", "r11", "r12", "r13", "r14",
+        : "rax", "rbx", "rcx", "rdx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+}
+
+/* fe_sq_ucode_n: square `a` `n` times in place (out = a^(2^n)).
+ *
+ * Keeps the running result in arch registers across iterations to
+ * skip the memory store/load and the precompute-from-memory cost each
+ * iteration. Saves ~10 cyc/iter vs n separate fe_sq_ucode calls.
+ *
+ * After each patch fire, the output lives in (rdi, r9, r10, rbx, rax)
+ * = (h0..h4). The next iter wants inputs in (rdi, rsi, r12, r11, r14).
+ * Only rdi is already in place; 4 reg-moves stage the next iter.
+ *
+ * n must be >= 1. */
+static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
+    register const uint64_t *_a   asm("rdi") = a;
+    register       uint64_t *_out asm("rsi") = out;
+    register int             _n   asm("edx") = n;
+
+    asm volatile(
+        /* Stash out ptr and counter on stack so they survive the
+         * patch's clobbering of every GP register. */
+        "sub rsp, 16\n\t"
+        "mov [rsp],   rsi\n\t"     /* save out ptr */
+        "mov [rsp+8], rdx\n\t"     /* save loop counter */
+
+        /* Load a[1..4] then a[0] (a[0] destroys rdi). */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov rsi, [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        "Lsqn%=:\n\t"
+        /* Precompute 2*a_i and 19*a_i for the patch */
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* Fire fe_sq (vmread, 0f 78 ca) */
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        /* After patch: rdi=h0, r9=h1, r10=h2, rbx=h3, rax=h4 */
+        /* Stage h[1..4] into the input regs for next iter.
+         * (rdi already has h0; need rsi=h1, r12=h2, r11=h3, r14=h4) */
+        "mov rsi, r9\n\t"
+        "mov r12, r10\n\t"
+        "mov r11, rbx\n\t"
+        "mov r14, rax\n\t"
+
+        "dec qword ptr [rsp+8]\n\t"
+        "jnz Lsqn%=\n\t"
+
+        /* Final result is now in rdi/rsi/r12/r11/r14 (h0..h4). */
+        "mov rbp, [rsp]\n\t"
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  rsi\n\t"
+        "mov [rbp + 16], r12\n\t"
+        "mov [rbp + 24], r11\n\t"
+        "mov [rbp + 32], r14\n\t"
+
+        "add rsp, 16\n\t"
+
+        : "+r"(_a), "+r"(_out), "+r"(_n)
+        :
+        : "rax", "rbx", "rcx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+}
+
+/* fe_add_sq_ucode: fused (x + y) → A_out, then A_out² → AA_out.
+ *
+ * EXPERIMENTAL: measured break-even with separate fe_add + fe_sq_ucode on
+ * Goldmont (2026-05-19). The memory roundtrip between the add and the
+ * patch fire is already hidden by OoO + store-to-load forwarding while
+ * the patch's ~37-cyc microcode block executes, so eliminating it via
+ * a fused wrapper yields no measurable gain. Kept here as documentation
+ * of the failed hypothesis; not used in the ladder.
+ *
+ * Register staging mirrors fe_sq_ucode after the add:
+ *   A[0]=RDI, A[1]=RSI, A[2]=R12, A[3]=R11, A[4]=R14
+ * Output of patch (h0..h4) goes through (RDI, R9, R10, RBX, RAX), stored to AA_out. */
+static void fe_add_sq_ucode(const uint64_t *x, const uint64_t *y,
+                            uint64_t *A_out, uint64_t *AA_out) {
+    register const uint64_t *_x    asm("rdi") = x;
+    register const uint64_t *_y    asm("rsi") = y;
+    register       uint64_t *_A    asm("rdx") = A_out;
+    register       uint64_t *_AA   asm("rcx") = AA_out;
+
+    asm volatile(
+        /* Load x[4..0]; x[1] parks in R8 so RSI stays live for y[] loads. */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov r8,  [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        /* Fold y[*] into the same registers via add-mem. */
+        "add r14, [rsi + 32]\n\t"
+        "add r11, [rsi + 24]\n\t"
+        "add r12, [rsi + 16]\n\t"
+        "add r8,  [rsi + 8]\n\t"
+        "add rdi, [rsi]\n\t"
+
+        /* Store A to A_out (RDX still holds A_out — still alive). */
+        "mov [rdx],      rdi\n\t"
+        "mov [rdx + 8],  r8\n\t"
+        "mov [rdx + 16], r12\n\t"
+        "mov [rdx + 24], r11\n\t"
+        "mov [rdx + 32], r14\n\t"
+
+        /* Move A[1] to RSI for the patch convention; AA_out to RBP. */
+        "mov rsi, r8\n\t"
+        "mov rbp, rcx\n\t"
+
+        /* Precompute 2A and 19A (RDX now safe to clobber). */
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* Fire fe_sq (vmread, 0f 78 ca) */
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  r9\n\t"
+        "mov [rbp + 16], r10\n\t"
+        "mov [rbp + 24], rbx\n\t"
+        "mov [rbp + 32], rax\n\t"
+
+        : "+r"(_x), "+r"(_y), "+r"(_A), "+r"(_AA)
+        :
+        : "rax", "rbx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+}
+
+/* fe_sub_sq_ucode: fused (x − y) → B_out, then B_out² → BB_out.
+ *
+ * EXPERIMENTAL — see fe_add_sq_ucode above. Same break-even result; kept
+ * as documentation. Subtraction uses the 2p bias (same constants as the
+ * scalar fe_sub) to keep limbs positive prior to squaring. */
+static void fe_sub_sq_ucode(const uint64_t *x, const uint64_t *y,
+                            uint64_t *B_out, uint64_t *BB_out) {
+    register const uint64_t *_x    asm("rdi") = x;
+    register const uint64_t *_y    asm("rsi") = y;
+    register       uint64_t *_B    asm("rdx") = B_out;
+    register       uint64_t *_BB   asm("rcx") = BB_out;
+
+    asm volatile(
+        /* Load x[4..0]. */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov r8,  [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        /* Bias: limb 0 += 2*(2^51-19); limbs 1..4 += 2*(2^51-1). */
+        "mov rax, 0xFFFFFFFFFFFDA\n\t"
+        "mov rbx, 0xFFFFFFFFFFFFE\n\t"
+        "add rdi, rax\n\t"
+        "add r8,  rbx\n\t"
+        "add r12, rbx\n\t"
+        "add r11, rbx\n\t"
+        "add r14, rbx\n\t"
+
+        /* Subtract y[*]. */
+        "sub rdi, [rsi]\n\t"
+        "sub r8,  [rsi + 8]\n\t"
+        "sub r12, [rsi + 16]\n\t"
+        "sub r11, [rsi + 24]\n\t"
+        "sub r14, [rsi + 32]\n\t"
+
+        /* Store B to B_out (RDX still alive). */
+        "mov [rdx],      rdi\n\t"
+        "mov [rdx + 8],  r8\n\t"
+        "mov [rdx + 16], r12\n\t"
+        "mov [rdx + 24], r11\n\t"
+        "mov [rdx + 32], r14\n\t"
+
+        "mov rsi, r8\n\t"
+        "mov rbp, rcx\n\t"
+
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  r9\n\t"
+        "mov [rbp + 16], r10\n\t"
+        "mov [rbp + 24], rbx\n\t"
+        "mov [rbp + 32], rax\n\t"
+
+        : "+r"(_x), "+r"(_y), "+r"(_B), "+r"(_BB)
+        :
+        : "rax", "rbx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
           "memory", "cc"
     );
 }
@@ -603,6 +848,20 @@ static inline void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
     fiat_curve25519_carry_square(out, a);
 }
 
+/* CryptOpt-tuned x86-64 asm (assembled from cryptopt_{mul,sq}.asm). Same
+ * fiat-style signature as the C version; symbols renamed at assemble
+ * time to avoid clashing. */
+extern void cryptopt_carry_mul(uint64_t out[5], const uint64_t a[5], const uint64_t b[5]);
+extern void cryptopt_carry_square(uint64_t out[5], const uint64_t a[5]);
+
+static inline void fe_mul_cryptopt(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    cryptopt_carry_mul(out, a, b);
+}
+
+static inline void fe_sq_cryptopt(const uint64_t *a, uint64_t *out) {
+    cryptopt_carry_square(out, a);
+}
+
 /* ════════════════════════════════════════════════════════════════════
  * SUPERCOP donna_c64 (vendored from supercop-20260330)
  *
@@ -632,6 +891,19 @@ extern int x25519_donna_c64(unsigned char *mypublic,
  * ════════════════════════════════════════════════════════════════════ */
 
 extern int x25519_amd64_51(unsigned char *out,
+                           const unsigned char *scalar,
+                           const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP amd64-64 (4x64-bit saturated, Bernstein/Schwabe)
+ *
+ * Same author family as amd64-51 but uses radix 2^64 (saturated 4-limb
+ * representation). lib25519's autotuner selects this on Goldmont — its
+ * Goldmont measurement of ~280k cycles maps to this implementation,
+ * not amd64-51.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_64(unsigned char *out,
                            const unsigned char *scalar,
                            const unsigned char *point);
 
@@ -695,14 +967,44 @@ static void fe_mul121665(fe out, const fe a) {
     out[1] += carry;
 }
 
-/* constant-time conditional swap */
-static void fe_cswap(fe a, fe b, uint64_t swap) {
+/* constant-time conditional swap — scalar */
+static inline void fe_cswap_scalar(fe a, fe b, uint64_t swap) {
     swap = (uint64_t)(-(int64_t)swap);  /* 0 or 0xFFFF...FFFF */
     for (int i = 0; i < 5; i++) {
         uint64_t x = (a[i] ^ b[i]) & swap;
         a[i] ^= x;
         b[i] ^= x;
     }
+}
+
+/* SSE2 conditional swap: 5 limbs packed as 2 × (2 × 64-bit) XMMs plus
+ * one scalar word for limb 4. */
+static inline void fe_cswap_sse2(fe a, fe b, uint64_t swap) {
+    uint64_t mask = (uint64_t)(-(int64_t)swap);
+    __m128i m = _mm_set1_epi64x((long long)mask);
+
+    __m128i a01 = _mm_loadu_si128((const __m128i *)&a[0]);
+    __m128i b01 = _mm_loadu_si128((const __m128i *)&b[0]);
+    __m128i x01 = _mm_and_si128(_mm_xor_si128(a01, b01), m);
+    _mm_storeu_si128((__m128i *)&a[0], _mm_xor_si128(a01, x01));
+    _mm_storeu_si128((__m128i *)&b[0], _mm_xor_si128(b01, x01));
+
+    __m128i a23 = _mm_loadu_si128((const __m128i *)&a[2]);
+    __m128i b23 = _mm_loadu_si128((const __m128i *)&b[2]);
+    __m128i x23 = _mm_and_si128(_mm_xor_si128(a23, b23), m);
+    _mm_storeu_si128((__m128i *)&a[2], _mm_xor_si128(a23, x23));
+    _mm_storeu_si128((__m128i *)&b[2], _mm_xor_si128(b23, x23));
+
+    uint64_t x4 = (a[4] ^ b[4]) & mask;
+    a[4] ^= x4;
+    b[4] ^= x4;
+}
+
+/* Scalar wins on Goldmont: 2.63 cyc/call vs SSE2 3.10 cyc/call.
+ * GCC -O3 -march=native pipelines the 5-iter scalar loop well; the
+ * SSE2 version pays a mask-broadcast and cross-domain penalty. */
+static inline void fe_cswap(fe a, fe b, uint64_t swap) {
+    fe_cswap_scalar(a, b, swap);
 }
 
 static inline void fe_copy(fe out, const fe a) {
@@ -888,7 +1190,6 @@ static void fe_invert_native(fe out, const fe z) {
 
 static void fe_invert_ucode(fe out, const fe z) {
     fe z2, z9, z11, t, t0, t1, t2, t3;
-    int i;
 
     fe_sq_ucode(z, z2);
     fe_sq_ucode(z2, t);
@@ -898,37 +1199,28 @@ static void fe_invert_ucode(fe out, const fe z) {
     fe_sq_ucode(z11, t);
     fe_mul_ucode(z9, t, t0);
 
-    fe_sq_ucode(t0, t1);
-    for (i = 1; i < 5; i++) fe_sq_ucode(t1, t1);
+    fe_sq_ucode_n(t1, t0,   5);    /* 5 squarings */
     fe_mul_ucode(t0, t1, t1);
 
-    fe_sq_ucode(t1, t2);
-    for (i = 1; i < 10; i++) fe_sq_ucode(t2, t2);
+    fe_sq_ucode_n(t2, t1,  10);    /* 10 */
     fe_mul_ucode(t1, t2, t2);
 
-    fe_sq_ucode(t2, t3);
-    for (i = 1; i < 20; i++) fe_sq_ucode(t3, t3);
+    fe_sq_ucode_n(t3, t2,  20);    /* 20 */
     fe_mul_ucode(t2, t3, t3);
 
-    for (i = 0; i < 10; i++) fe_sq_ucode(t3, t3);
+    fe_sq_ucode_n(t3, t3,  10);    /* 10 */
     fe_mul_ucode(t1, t3, t1);
 
-    fe_sq_ucode(t1, t2);
-    for (i = 1; i < 50; i++) fe_sq_ucode(t2, t2);
+    fe_sq_ucode_n(t2, t1,  50);    /* 50 */
     fe_mul_ucode(t1, t2, t2);
 
-    fe_sq_ucode(t2, t3);
-    for (i = 1; i < 100; i++) fe_sq_ucode(t3, t3);
+    fe_sq_ucode_n(t3, t2, 100);    /* 100 */
     fe_mul_ucode(t2, t3, t3);
 
-    for (i = 0; i < 50; i++) fe_sq_ucode(t3, t3);
+    fe_sq_ucode_n(t3, t3,  50);    /* 50 */
     fe_mul_ucode(t1, t3, t1);
 
-    fe_sq_ucode(t1, t1);
-    fe_sq_ucode(t1, t1);
-    fe_sq_ucode(t1, t1);
-    fe_sq_ucode(t1, t1);
-    fe_sq_ucode(t1, t1);
+    fe_sq_ucode_n(t1, t1,   5);    /* final 5 */
     fe_mul_ucode(z11, t1, out);
 }
 
@@ -976,6 +1268,52 @@ static void fe_invert_fiat(fe out, const fe z) {
     fe_sq_fiat(t1, t1);
     fe_sq_fiat(t1, t1);
     fe_mul_fiat(t1, z11, out);
+}
+
+static void fe_invert_cryptopt(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_cryptopt(z, z2);
+    fe_sq_cryptopt(z2, t);
+    fe_sq_cryptopt(t, t);
+    fe_mul_cryptopt(t, z, z9);
+    fe_mul_cryptopt(z9, z2, z11);
+    fe_sq_cryptopt(z11, t);
+    fe_mul_cryptopt(t, z9, t0);
+
+    fe_sq_cryptopt(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_cryptopt(t1, t1);
+    fe_mul_cryptopt(t1, t0, t1);
+
+    fe_sq_cryptopt(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_cryptopt(t2, t2);
+    fe_mul_cryptopt(t2, t1, t2);
+
+    fe_sq_cryptopt(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t1, t1);
+
+    fe_sq_cryptopt(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_cryptopt(t2, t2);
+    fe_mul_cryptopt(t2, t1, t2);
+
+    fe_sq_cryptopt(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t1, t1);
+
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_mul_cryptopt(t1, z11, out);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1153,6 +1491,62 @@ static void x25519_fiat(uint8_t out[32], const uint8_t scalar[32],
 
     fe_invert_fiat(z2, z2);
     fe_mul_fiat(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+static void x25519_cryptopt(uint8_t out[32], const uint8_t scalar[32],
+                            const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_cryptopt(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_cryptopt(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_cryptopt(D, A, DA);
+        fe_mul_cryptopt(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_cryptopt(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_cryptopt(t0, z3);
+        fe_mul_cryptopt(x1, z3, z3);
+
+        fe_mul_cryptopt(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_cryptopt(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_cryptopt(z2, z2);
+    fe_mul_cryptopt(x2, z2, x2);
     fe_tobytes(out, x2);
 }
 
@@ -1382,6 +1776,40 @@ static int test_rfc7748(void) {
             printf("  a51u:   FAIL\n"); fail++;
         }
 
+        uint8_t ka4[32], ua4[32];
+        memcpy(ka4, k, 32);
+        memcpy(ua4, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_64(r, ka4, ua4);
+            memcpy(ua4, ka4, 32);
+            memcpy(ka4, r, 32);
+        }
+        print_hex("amd64  after 1000", ka4, 32);
+        if (memcmp_hex(ka4,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  amd64:  PASS\n"); pass++;
+        } else {
+            printf("  amd64:  FAIL\n"); fail++;
+        }
+
+        uint8_t kc[32], uc[32];
+        memcpy(kc, k, 32);
+        memcpy(uc, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_cryptopt(r, kc, uc);
+            memcpy(uc, kc, 32);
+            memcpy(kc, r, 32);
+        }
+        print_hex("crypto after 1000", kc, 32);
+        if (memcmp_hex(kc,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  crypto: PASS\n"); pass++;
+        } else {
+            printf("  crypto: FAIL\n"); fail++;
+        }
+
         if (memcmp(kn, ku, 32) == 0) {
             printf("  native==ucode: PASS\n"); pass++;
         } else {
@@ -1406,6 +1834,16 @@ static int test_rfc7748(void) {
             printf("  native==a51u:  PASS\n"); pass++;
         } else {
             printf("  native==a51u:  FAIL\n"); fail++;
+        }
+        if (memcmp(kn, ka4, 32) == 0) {
+            printf("  native==amd64: PASS\n"); pass++;
+        } else {
+            printf("  native==amd64: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kc, 32) == 0) {
+            printf("  native==crypto: PASS\n"); pass++;
+        } else {
+            printf("  native==crypto: FAIL\n"); fail++;
         }
     }
 
@@ -1444,6 +1882,111 @@ static void bench_stats(uint64_t *samples, int n, uint64_t *out_min, uint64_t *o
     *out_median = samples[n / 2];
 }
 
+/* Micro-bench the cswap variants directly.
+ *
+ * Runs 1000 cswap pairs (x2,x3) + (z2,z3) per rep — i.e. 2000 cswap
+ * calls — matching the X25519 ladder's per-call density (≈512/X25519
+ * × 4× to get a stable sample). Tests both swap=0 and swap=1 to make
+ * sure the constant-time path isn't optimized away.
+ */
+static void cswap_microbench(void) {
+    uint64_t t0, t1, mn, med;
+    uint64_t samples[BENCH_REPS];
+    fe a, b;
+    /* arbitrary fixed bit pattern, alternating */
+    for (int i = 0; i < 5; i++) { a[i] = 0x1234567890abcdefULL ^ (i*0x111); b[i] = ~a[i]; }
+
+    printf("=== fe_cswap microbench (2000 calls/rep) ===\n");
+
+    /* SSE2 */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        for (int i = 0; i < 1000; i++) {
+            fe_cswap_sse2(a, b, (uint64_t)(i & 1));
+            fe_cswap_sse2(a, b, (uint64_t)((i ^ 1) & 1));
+        }
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("  sse2  : min %6" PRIu64 "  median %6" PRIu64 "  cyc/2000-calls   (%.2f cyc/call)\n",
+           mn, med, (double)mn / 2000.0);
+
+    /* Scalar */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        for (int i = 0; i < 1000; i++) {
+            fe_cswap_scalar(a, b, (uint64_t)(i & 1));
+            fe_cswap_scalar(a, b, (uint64_t)((i ^ 1) & 1));
+        }
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("  scalar: min %6" PRIu64 "  median %6" PRIu64 "  cyc/2000-calls   (%.2f cyc/call)\n",
+           mn, med, (double)mn / 2000.0);
+
+    /* Anti-DCE: ensure the compiler can't elide the work */
+    volatile uint64_t sink = 0;
+    for (int i = 0; i < 5; i++) sink ^= a[i] ^ b[i];
+    (void)sink;
+    printf("\n");
+}
+
+/* Measure cost of N back-to-back fe_sq_ucode calls.
+ * Comparing:
+ *   100 separate fe_sq_ucode calls (mem round-trip between each)
+ *   1 fe_sq_ucode_n call with n=100 (registers chained)
+ * The delta is per-iter wrapper savings × 99. */
+static void fe_sq_chain_microbench(void) {
+    uint64_t t0, t1, mn, med;
+    uint64_t samples[BENCH_REPS];
+    fe x;
+    /* Small valid limbs */
+    for (int i = 0; i < 5; i++) x[i] = (uint64_t)(0x123456ULL + i);
+
+    printf("=== fe_sq chaining microbench (100 sequential squarings) ===\n");
+
+    /* Method A: 100 separate calls */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        fe tmp; memcpy(tmp, x, sizeof(tmp));
+        t0 = rdtsc_start();
+        for (int i = 0; i < 100; i++) fe_sq_ucode(tmp, tmp);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    uint64_t mn_separate = mn;
+    printf("  100 × fe_sq_ucode (separate): min %6" PRIu64 "  median %6" PRIu64
+           "   (%.1f cyc/call)\n", mn, med, (double)mn / 100.0);
+
+    /* Method B: 1 chained call with n=100 */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        fe tmp; memcpy(tmp, x, sizeof(tmp));
+        t0 = rdtsc_start();
+        fe_sq_ucode_n(tmp, tmp, 100);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    uint64_t mn_chained = mn;
+    printf("  1 × fe_sq_ucode_n(100):       min %6" PRIu64 "  median %6" PRIu64
+           "   (%.1f cyc/iter)\n", mn, med, (double)mn / 100.0);
+
+    int64_t saved = (int64_t)mn_separate - (int64_t)mn_chained;
+    printf("  chaining saves: %+" PRId64 " cyc total (%.1f cyc/iter)\n\n",
+           saved, (double)saved / 99.0);
+
+    /* Verify correctness: 100 fe_sq is equivalent to fe_sq_ucode_n(100) */
+    fe ref, chained;
+    memcpy(ref, x, sizeof(ref));
+    memcpy(chained, x, sizeof(chained));
+    for (int i = 0; i < 100; i++) fe_sq_ucode(ref, ref);
+    fe_sq_ucode_n(chained, chained, 100);
+    int ok = memcmp(ref, chained, sizeof(ref)) == 0;
+    printf("  correctness vs reference: %s\n\n", ok ? "PASS" : "FAIL");
+}
+
 static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
     uint64_t t0, t1, mn, med;
@@ -1459,9 +2002,11 @@ static void benchmark(void) {
     /* Warm up */
     x25519_native(out, scalar, point);
     x25519_fiat(out, scalar, point);
+    x25519_cryptopt(out, scalar, point);
     x25519_donna_c64(out, scalar, point);
     x25519_amd64_51(out, scalar, point);
     x25519_amd64_51_ucode(out, scalar, point);
+    x25519_amd64_64(out, scalar, point);
     x25519_ucode(out, scalar, point);
 
     /* Benchmark native C */
@@ -1483,6 +2028,16 @@ static void benchmark(void) {
     }
     bench_stats(samples, BENCH_REPS, &mn, &med);
     printf("ours/fiat:            min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
+
+    /* Benchmark ours/cryptopt (our ladder + CryptOpt Goldmont-tuned asm field ops) */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_cryptopt(out, scalar, point);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("ours/cryptopt:        min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
 
     /* Benchmark donna_c64 (whole stack) */
     for (int r = 0; r < BENCH_REPS; r++) {
@@ -1513,6 +2068,17 @@ static void benchmark(void) {
     }
     bench_stats(samples, BENCH_REPS, &mn, &med);
     printf("amd64-51/ucode:       min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
+
+    /* Benchmark amd64-64/asm (SUPERCOP whole stack, 4x64 saturated;
+     * what lib25519's autotuner selects on Goldmont) */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        t0 = rdtsc_start();
+        x25519_amd64_64(out, scalar, point);
+        t1 = rdtsc_end();
+        samples[r] = t1 - t0;
+    }
+    bench_stats(samples, BENCH_REPS, &mn, &med);
+    printf("amd64-64/asm:         min %8" PRIu64 "  median %8" PRIu64 " cycles\n", mn, med);
 
     /* Benchmark ours/ucode (our ladder + microcode field ops) */
     for (int r = 0; r < BENCH_REPS; r++) {
@@ -1645,6 +2211,8 @@ int main(void) {
         return 1;
     }
 
+    cswap_microbench();
+    fe_sq_chain_microbench();
     benchmark();
 
     init_match_and_patch();
