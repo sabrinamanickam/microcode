@@ -1,3 +1,15 @@
+supercop-20260330/
+supercop-20260330.tar.xz
 supercop-data/
-supercop-20260330/
-supercop-20260330/
+lib25519-20241004/
+lib25519.cr.yp.to
+
+# Compiled object files
+*.o
+
+# Build artifacts
+*_static
+*.asm
+
+# Benchmark and test logs
+bench.log
