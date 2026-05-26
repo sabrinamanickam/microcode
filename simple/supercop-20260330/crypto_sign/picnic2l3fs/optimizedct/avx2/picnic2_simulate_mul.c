@@ -1,1 +1,0 @@
-../../../picnic2l1fs/optimizedct/avx2/picnic2_simulate_mul.c

@@ -1,1 +1,0 @@
-gcc_-march=native_-mtune=native_-O_-fwrapv_-fPIC_-fPIE_-gdwarf-4_-Wall amd64

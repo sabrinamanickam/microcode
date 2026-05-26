@@ -1,1 +1,0 @@
-../varglv8/divisor_dbl_a2is0_a3is0.S

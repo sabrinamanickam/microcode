@@ -1,1 +1,0 @@
-../../../firesaber2/neon2/rq_mul/neon_matrix_transpose.c

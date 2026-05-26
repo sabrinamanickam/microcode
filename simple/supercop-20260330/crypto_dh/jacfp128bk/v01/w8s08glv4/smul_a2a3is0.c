@@ -1,1 +1,0 @@
-../w4s01glv4/smul_a2a3is0.c

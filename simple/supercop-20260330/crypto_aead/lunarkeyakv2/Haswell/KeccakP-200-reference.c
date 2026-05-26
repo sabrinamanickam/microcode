@@ -1,1 +1,0 @@
-../../seakeyakv2/ARMv7A/KeccakP-200-reference.c

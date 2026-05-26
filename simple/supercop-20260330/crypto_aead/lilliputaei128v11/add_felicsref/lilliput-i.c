@@ -1,1 +1,0 @@
-../ref/lilliput-i.c

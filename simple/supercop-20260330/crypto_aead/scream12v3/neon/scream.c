@@ -1,1 +1,0 @@
-../../scream10v3/neon/scream.c

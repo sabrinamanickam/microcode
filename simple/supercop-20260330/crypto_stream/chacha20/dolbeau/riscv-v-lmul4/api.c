@@ -1,1 +1,0 @@
-../riscv-v-strided/api.c

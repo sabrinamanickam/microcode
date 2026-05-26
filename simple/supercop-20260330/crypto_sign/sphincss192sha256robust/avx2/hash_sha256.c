@@ -1,1 +1,0 @@
-../../sphincsf128sha256robust/ref/hash_sha256.c

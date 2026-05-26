@@ -1,2 +1,0 @@
-compiler/c/clang_-march=native_-Os_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
-implementation/crypto_hash/bmw512/opt008_asm64

@@ -1,1 +1,0 @@
-../../lima2p1024cca/ref/lima.c

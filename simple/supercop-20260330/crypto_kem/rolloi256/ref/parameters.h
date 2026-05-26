@@ -1,1 +1,0 @@
-../avx/parameters.h

@@ -1,1 +1,0 @@
-../../bikel1/portable/gf2x_ksqr_portable.c

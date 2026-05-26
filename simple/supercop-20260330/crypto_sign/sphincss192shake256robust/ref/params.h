@@ -1,1 +1,0 @@
-../../sphincss192harakarobust/ref/params.h

@@ -1,1 +1,0 @@
-../../sphincsf128shake256robust/ref/thash_shake256_robust.c

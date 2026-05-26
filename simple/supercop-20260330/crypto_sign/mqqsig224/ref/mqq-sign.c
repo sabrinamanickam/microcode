@@ -1,1 +1,0 @@
-../../mqqsig192/ref/mqq-sign.c

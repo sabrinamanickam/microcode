@@ -1,1 +1,0 @@
-../../nccsign1/avx2/sign.h

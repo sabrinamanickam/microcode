@@ -1,1 +1,0 @@
-../../seakeyakv2/compact/KeccakP-800-SnP.h

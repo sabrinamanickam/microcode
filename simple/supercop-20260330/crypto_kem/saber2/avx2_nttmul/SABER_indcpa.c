@@ -1,1 +1,0 @@
-../../firesaber2/avx2_nttmul/SABER_indcpa.c

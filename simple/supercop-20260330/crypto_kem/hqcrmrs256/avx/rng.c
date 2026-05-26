@@ -1,1 +1,0 @@
-../../hqcrmrs128/avx/rng.c

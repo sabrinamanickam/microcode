@@ -1,2 +1,0 @@
-compiler/c/gcc_-march=native_-mtune=native_-O_-fwrapv_-fPIC_-fPIE_-gdwarf-4_-Wall
-implementation/crypto_aead/colm0v1/aesni8

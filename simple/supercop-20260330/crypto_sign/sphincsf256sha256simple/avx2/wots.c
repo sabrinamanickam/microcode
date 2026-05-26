@@ -1,1 +1,0 @@
-../../sphincsf128sha256robust/avx2/wots.c

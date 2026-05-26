@@ -1,1 +1,0 @@
-../../seakeyakv2/ARMv7M/KetjeSr-armv7m-le-gcc.s

@@ -1,2 +1,0 @@
-compiler/c/clang_-march=native_-O2_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
-implementation/crypto_aead/ascon128abi32v12/bi32_lowreg

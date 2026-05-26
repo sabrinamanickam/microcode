@@ -1,1 +1,0 @@
-../../nccsign1/ref/symmetric-shake.c

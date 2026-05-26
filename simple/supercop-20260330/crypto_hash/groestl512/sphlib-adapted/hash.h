@@ -1,1 +1,0 @@
-../../groestl256/sphlib-adapted/hash.h

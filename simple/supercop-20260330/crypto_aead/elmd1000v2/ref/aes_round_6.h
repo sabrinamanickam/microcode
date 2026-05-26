@@ -1,1 +1,0 @@
-../../elmd600v2/ref/aes_round_6.h

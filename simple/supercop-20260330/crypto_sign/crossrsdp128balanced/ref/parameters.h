@@ -1,1 +1,0 @@
-../opt/parameters.h

@@ -1,1 +1,0 @@
-../../../picnicl5fs/optimizedct/c/lowmc_256_256_38.c

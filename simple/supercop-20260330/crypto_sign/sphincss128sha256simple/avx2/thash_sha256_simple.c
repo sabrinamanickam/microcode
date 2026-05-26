@@ -1,1 +1,0 @@
-../../sphincsf128sha256simple/ref/thash_sha256_simple.c

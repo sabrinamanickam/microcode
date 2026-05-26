@@ -1,1 +1,0 @@
-../w8s01glv8/smul.c

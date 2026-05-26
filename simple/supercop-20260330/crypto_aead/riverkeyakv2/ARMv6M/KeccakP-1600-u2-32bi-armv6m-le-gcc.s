@@ -1,1 +1,0 @@
-../../seakeyakv2/ARMv6M/KeccakP-1600-u2-32bi-armv6m-le-gcc.s

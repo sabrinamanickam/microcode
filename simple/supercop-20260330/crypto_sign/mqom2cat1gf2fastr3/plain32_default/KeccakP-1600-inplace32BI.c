@@ -1,1 +1,0 @@
-../plain32_memopt/KeccakP-1600-inplace32BI.c

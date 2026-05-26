@@ -1,1 +1,0 @@
-../../groestl256/arm32/groestl_tables_c.h

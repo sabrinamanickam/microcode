@@ -1,1 +1,0 @@
-../varglv4/divisor.c

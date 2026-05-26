@@ -1,1 +1,0 @@
-../../bikel1/ches2021/rkara3_mul_avx2.c

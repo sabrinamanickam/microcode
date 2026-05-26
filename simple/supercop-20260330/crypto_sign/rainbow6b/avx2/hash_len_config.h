@@ -1,1 +1,0 @@
-../../rainbow1b/ref/hash_len_config.h

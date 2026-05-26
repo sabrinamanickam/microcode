@@ -1,1 +1,0 @@
-../../sphincsf128harakarobust/ref/sign.c

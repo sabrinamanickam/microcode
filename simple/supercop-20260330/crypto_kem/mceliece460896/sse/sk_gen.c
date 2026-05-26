@@ -1,1 +1,0 @@
-../avx/sk_gen.c

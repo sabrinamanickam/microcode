@@ -1,1 +1,0 @@
-../../../sha3224/kcp/optimized1600ARMv7A/keccak.s

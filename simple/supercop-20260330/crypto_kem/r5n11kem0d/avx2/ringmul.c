@@ -1,1 +1,0 @@
-../opt/ringmul.c

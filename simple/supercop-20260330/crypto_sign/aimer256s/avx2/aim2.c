@@ -1,1 +1,0 @@
-../../aimer256f/avx2/aim2.c

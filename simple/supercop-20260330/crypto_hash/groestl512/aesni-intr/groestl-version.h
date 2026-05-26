@@ -1,1 +1,0 @@
-../../groestl256/aesni-intr/groestl-version.h

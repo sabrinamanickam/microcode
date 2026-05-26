@@ -1,1 +1,0 @@
-../../cubehash512/spec/parameters.h

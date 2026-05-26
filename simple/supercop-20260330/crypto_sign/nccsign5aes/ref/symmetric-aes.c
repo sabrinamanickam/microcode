@@ -1,1 +1,0 @@
-../../nccsign1/ref/symmetric-aes.c

@@ -1,1 +1,0 @@
-../avx2/mqs_blas_simd.h

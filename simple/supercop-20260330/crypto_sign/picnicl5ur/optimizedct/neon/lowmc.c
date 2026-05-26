@@ -1,1 +1,0 @@
-../../../picnicl5fs/optimizedct/neon/lowmc.c

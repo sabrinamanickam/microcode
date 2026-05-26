@@ -1,1 +1,0 @@
-../../aimer256f/ref/sign.c

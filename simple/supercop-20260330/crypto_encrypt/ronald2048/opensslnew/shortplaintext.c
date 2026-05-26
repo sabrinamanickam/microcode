@@ -1,1 +1,0 @@
-../../ronald1024/opensslnew/shortplaintext.c

@@ -1,1 +1,0 @@
-../../rainbow1a/avx2/blas_config.h

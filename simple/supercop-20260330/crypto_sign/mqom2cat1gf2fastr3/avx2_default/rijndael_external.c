@@ -1,1 +1,0 @@
-../ref_memopt/rijndael_external.c

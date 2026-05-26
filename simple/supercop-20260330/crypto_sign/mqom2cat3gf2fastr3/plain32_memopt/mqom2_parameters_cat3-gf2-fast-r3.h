@@ -1,1 +1,0 @@
-../ref_memopt/mqom2_parameters_cat3-gf2-fast-r3.h

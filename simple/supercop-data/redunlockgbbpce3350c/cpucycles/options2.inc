@@ -1,7 +1,0 @@
-{ "amd64-tsc", supercop_cpucycles_ticks_amd64_tsc_setup, supercop_cpucycles_ticks_amd64_tsc, supercop_cpucycles_ticks_amd64_tsc_close },
-{ "amd64-tscasm", supercop_cpucycles_ticks_amd64_tscasm_setup, supercop_cpucycles_ticks_amd64_tscasm, supercop_cpucycles_ticks_amd64_tscasm_close },
-{ "default-perfevent", supercop_cpucycles_ticks_default_perfevent_setup, supercop_cpucycles_ticks_default_perfevent, supercop_cpucycles_ticks_default_perfevent_close },
-{ "default-mach", supercop_cpucycles_ticks_default_mach_setup, supercop_cpucycles_ticks_default_mach, supercop_cpucycles_ticks_default_mach_close },
-{ "default-monotonic", supercop_cpucycles_ticks_default_monotonic_setup, supercop_cpucycles_ticks_default_monotonic, supercop_cpucycles_ticks_default_monotonic_close },
-{ "default-gettimeofday", supercop_cpucycles_ticks_default_gettimeofday_setup, supercop_cpucycles_ticks_default_gettimeofday, supercop_cpucycles_ticks_default_gettimeofday_close },
-{ "default-zero", supercop_cpucycles_ticks_default_zero_setup, supercop_cpucycles_ticks_default_zero, supercop_cpucycles_ticks_default_zero_close },

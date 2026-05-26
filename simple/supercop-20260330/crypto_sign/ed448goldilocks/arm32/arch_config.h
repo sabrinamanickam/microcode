@@ -1,1 +1,0 @@
-../32/arch_config.h

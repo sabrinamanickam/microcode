@@ -1,1 +1,0 @@
-../../aimer192f/aarch64/aim2.c

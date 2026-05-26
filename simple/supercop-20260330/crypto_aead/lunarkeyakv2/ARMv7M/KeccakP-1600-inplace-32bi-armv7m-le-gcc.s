@@ -1,1 +1,0 @@
-../../seakeyakv2/ARMv7M/KeccakP-1600-inplace-32bi-armv7m-le-gcc.s

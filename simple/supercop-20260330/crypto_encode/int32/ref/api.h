@@ -1,3 +1,0 @@
-#define CRYPTO_STRBYTES 4
-#define CRYPTO_ITEMBYTES 4
-#define CRYPTO_ITEMS 1

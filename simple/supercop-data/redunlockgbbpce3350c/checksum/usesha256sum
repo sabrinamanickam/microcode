@@ -1,2 +1,0 @@
-#!/bin/sh
-sha256sum | awk '{print $1}'

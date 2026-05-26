@@ -1,1 +1,0 @@
-../ref/stribob.h

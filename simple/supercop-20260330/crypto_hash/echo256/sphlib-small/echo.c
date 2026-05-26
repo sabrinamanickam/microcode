@@ -1,1 +1,0 @@
-../sphlib/echo.c

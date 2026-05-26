@@ -1,1 +1,0 @@
-../riscv-v-strided/chacha.c

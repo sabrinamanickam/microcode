@@ -1,1 +1,0 @@
-../asmx86-64/SnP-interface.h

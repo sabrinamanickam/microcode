@@ -1,1 +1,0 @@
-../avx/wrap_dec.c

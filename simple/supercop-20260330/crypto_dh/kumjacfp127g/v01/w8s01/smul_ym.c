@@ -1,1 +1,0 @@
-../var/smul_ym.c

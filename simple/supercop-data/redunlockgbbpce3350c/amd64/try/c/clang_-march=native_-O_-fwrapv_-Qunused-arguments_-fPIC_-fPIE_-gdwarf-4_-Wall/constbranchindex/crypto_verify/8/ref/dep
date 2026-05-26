@@ -1,2 +1,0 @@
-compiler/c/clang_-march=native_-O_-fwrapv_-Qunused-arguments_-fPIC_-fPIE_-gdwarf-4_-Wall
-implementation/crypto_verify/8/ref

@@ -1,1 +1,0 @@
-../portable/gf2x_ksqr_portable.c

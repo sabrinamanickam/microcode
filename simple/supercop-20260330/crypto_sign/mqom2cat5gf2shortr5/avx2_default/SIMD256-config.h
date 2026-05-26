@@ -1,1 +1,0 @@
-../../mqom2cat1gf2fastr3/avx2_memopt/SIMD256-config.h

@@ -1,1 +1,0 @@
-../../bigquake1/ref/goppa.c

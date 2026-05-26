@@ -1,1 +1,0 @@
-../avx2/mqs_config.h

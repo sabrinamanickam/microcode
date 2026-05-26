@@ -1,1 +1,0 @@
-../../sphincsf128harakasimple/ref/thash_haraka_simple.c

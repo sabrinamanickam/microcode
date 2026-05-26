@@ -1,1 +1,0 @@
-../../skein256256/arm_thumb/api.h

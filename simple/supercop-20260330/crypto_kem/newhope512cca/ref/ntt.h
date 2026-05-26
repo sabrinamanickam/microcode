@@ -1,1 +1,0 @@
-../../newhope1024cca/ref/ntt.h

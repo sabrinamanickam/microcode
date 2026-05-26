@@ -1,1 +1,0 @@
-../../seakeyakv2/generic32lc/KeccakP-800-opt32-config.h

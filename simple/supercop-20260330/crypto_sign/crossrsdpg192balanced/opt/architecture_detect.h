@@ -1,1 +1,0 @@
-../../crossrsdp128balanced/opt/architecture_detect.h

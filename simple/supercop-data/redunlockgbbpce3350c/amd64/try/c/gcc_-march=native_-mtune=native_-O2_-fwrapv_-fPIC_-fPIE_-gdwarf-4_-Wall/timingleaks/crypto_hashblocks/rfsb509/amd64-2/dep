@@ -1,2 +1,0 @@
-compiler/c/gcc_-march=native_-mtune=native_-O2_-fwrapv_-fPIC_-fPIE_-gdwarf-4_-Wall
-implementation/crypto_hashblocks/rfsb509/amd64-2

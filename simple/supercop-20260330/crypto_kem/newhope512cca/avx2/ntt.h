@@ -1,1 +1,0 @@
-../../newhope1024cca/avx2/ntt.h

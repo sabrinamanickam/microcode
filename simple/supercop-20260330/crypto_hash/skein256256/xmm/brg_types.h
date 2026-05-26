@@ -1,1 +1,0 @@
-../arm/brg_types.h

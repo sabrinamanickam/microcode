@@ -1,1 +1,0 @@
-../../mqqsig224/ref/keygen.c

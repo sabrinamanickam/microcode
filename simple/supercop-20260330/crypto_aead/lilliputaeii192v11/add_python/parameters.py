@@ -1,2 +1,0 @@
-MODE = 2
-KEYBYTES = 24

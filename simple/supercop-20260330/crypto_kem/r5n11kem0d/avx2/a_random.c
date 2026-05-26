@@ -1,1 +1,0 @@
-../opt/a_random.c

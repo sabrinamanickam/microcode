@@ -1,1 +1,0 @@
-../avx/vec_reduce_asm.S

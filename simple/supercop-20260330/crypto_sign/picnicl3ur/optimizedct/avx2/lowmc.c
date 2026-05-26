@@ -1,1 +1,0 @@
-../../../picnicl3fs/optimizedct/avx2/lowmc.c

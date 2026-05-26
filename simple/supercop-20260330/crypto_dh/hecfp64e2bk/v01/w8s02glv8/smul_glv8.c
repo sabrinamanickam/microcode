@@ -1,1 +1,0 @@
-../varglv8/smul_glv8.c

@@ -1,1 +1,0 @@
-../../scream10v1/sse/params.h

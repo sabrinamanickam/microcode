@@ -1,1 +1,0 @@
-../avx2/gf2x_ksqr_avx2.c
