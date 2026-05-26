@@ -1,9 +1,9 @@
 # X25519 Microcode Benchmark Results
 
-**Generated:** Tue 26 May 2026 18:38:41 ACST
+**Generated:** Tue 26 May 2026 19:11:22 ACST
 **Host:** redunlock-GB-BPCE-3350C
 **CPU:** Intel(R) Celeron(R) CPU N3350 @ 1.10GHz
-**Pinned freq:** 1094410 kHz   (governor: `performance`, no_turbo: `1`)
+**Pinned freq:** 1094400 kHz   (governor: `performance`, no_turbo: `1`)
 **Configs that ran:** 24 / 24
 **Pipeline:** `taskset -c 0 ./full_curve25519_static` for each (compiler, -O) combo
 

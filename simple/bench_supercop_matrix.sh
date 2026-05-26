@@ -650,4 +650,31 @@ echo "  Markdown tables written to:  $RESULTS_FILE"
 echo "═══════════════════════════════════════════════════════════════"
 
 echo
+
+# ───────────────────── auto-commit RESULTS.md to git ──────────────────────
+# Stage ONLY RESULTS.md — the working tree intentionally carries many
+# untracked/modified WIP files that must NOT be swept in by `git add -A`.
+# Commit + push if RESULTS.md actually changed since the last commit.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    git add -- "$RESULTS_FILE"
+    if git diff --cached --quiet -- "$RESULTS_FILE"; then
+        echo "  RESULTS.md unchanged — skipping git commit."
+    else
+        configs_ran=$(grep -m1 -oP 'Configs that ran:\*\* \K[0-9]+ */ *[0-9]+' "$RESULTS_FILE" 2>/dev/null || echo "?/?")
+        commit_msg="Auto-update RESULTS.md ($configs_ran configs, $(date '+%Y-%m-%d %H:%M %Z'))"
+        if git commit -m "$commit_msg"; then
+            if git push; then
+                echo "  Committed + pushed RESULTS.md to $(git rev-parse --abbrev-ref @{u} 2>/dev/null || echo 'remote')."
+            else
+                echo "  [warn] commit succeeded but 'git push' failed — push manually when ready."
+            fi
+        else
+            echo "  [warn] git commit failed; RESULTS.md left staged for manual review."
+        fi
+    fi
+else
+    echo "  (not a git checkout — skipping auto-commit)"
+fi
+
+echo
 echo "Done."
