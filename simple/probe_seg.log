@@ -1,0 +1,25 @@
+=== probe_seg run: seg=0x18  g_buf=0x4c8100 ===
+ATTEMPT seg=0x18  about to fire vmwrite (LDZX [g_buf]=0xdeadbeefcafe1234)
+RESULT  seg=0x18  rax=0xdeadbeefcafe1234  PASS (seg works!)
+=== probe_seg done: seg=0x18 ===
+
+=== probe_seg run: seg=0x18  g_buf=0x4c8100 ===
+ATTEMPT seg=0x18  about to fire vmwrite (LDZX [g_buf]=0xdeadbeefcafe1234)
+RESULT  seg=0x18  rax=0xdeadbeefcafe1234  PASS (seg works!)
+=== probe_seg done: seg=0x18 ===
+
+=== probe_seg run: seg=0x18  g_buf=0x4c8100 ===
+ATTEMPT seg=0x18  about to fire vmwrite (LDZX [g_buf]=0xdeadbeefcafe1234)
+RESULT  seg=0x18  rax=0xdeadbeefcafe1234  PASS (seg works!)
+=== probe_seg done: seg=0x18 ===
+
+=== probe_seg run: seg=0x18  g_buf=0x4c8100 ===
+ATTEMPT seg=0x18  about to fire vmwrite (LDZX [g_buf]=0xdeadbeefcafe1234)
+RESULT  seg=0x18  rax=0xdeadbeefcafe1234  PASS (seg works!)
+=== probe_seg done: seg=0x18 ===
+
+=== probe_seg run: seg=0x18  g_buf=0x4c8100 ===
+ATTEMPT seg=0x18  about to fire vmwrite (LDZX [g_buf]=0xdeadbeefcafe1234)
+RESULT  seg=0x18  rax=0xdeadbeefcafe1234  PASS (seg works!)
+=== probe_seg done: seg=0x18 ===
+

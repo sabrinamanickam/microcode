@@ -444,8 +444,8 @@ emit_results_md() {
                         "ours/ucode" "${SAME_LADDER_OURS[@]}"
         md_ratio_matrix "min" "Same-ladder amd64-51 — ratios vs amd64-51/ucode" \
                         "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-        md_ratio_matrix "min" "End-to-end — ratios vs ours/ucode" \
-                        "ours/ucode" "${END_TO_END[@]}"
+        md_ratio_matrix "min" "End-to-end — ratios vs ours/ucode-inline" \
+                        "ours/ucode-inline" "${END_TO_END[@]}"
         echo
         echo "## MEDIAN cycles"
         md_matrix "median" "Same-ladder OUR" "${SAME_LADDER_OURS[@]}"
@@ -457,8 +457,8 @@ emit_results_md() {
                         "ours/ucode" "${SAME_LADDER_OURS[@]}"
         md_ratio_matrix "median" "Same-ladder amd64-51 — ratios vs amd64-51/ucode" \
                         "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-        md_ratio_matrix "median" "End-to-end — ratios vs ours/ucode" \
-                        "ours/ucode" "${END_TO_END[@]}"
+        md_ratio_matrix "median" "End-to-end — ratios vs ours/ucode-inline" \
+                        "ours/ucode-inline" "${END_TO_END[@]}"
         echo
         echo "## Best per contender (SUPERCOP-style)"
         echo
@@ -565,8 +565,8 @@ print_ratio_matrix "min" "OUR ladder — ratios vs ours/ucode" \
                    "ours/ucode" "${SAME_LADDER_OURS[@]}"
 print_ratio_matrix "min" "amd64-51 ladder — ratios vs amd64-51/ucode" \
                    "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-print_ratio_matrix "min" "End-to-end — ratios vs ours/ucode" \
-                   "ours/ucode" "${END_TO_END[@]}"
+print_ratio_matrix "min" "End-to-end — ratios vs ours/ucode-inline" \
+                   "ours/ucode-inline" "${END_TO_END[@]}"
 
 echo
 echo "###############################################################"
@@ -587,8 +587,8 @@ print_ratio_matrix "median" "OUR ladder — ratios vs ours/ucode" \
                    "ours/ucode" "${SAME_LADDER_OURS[@]}"
 print_ratio_matrix "median" "amd64-51 ladder — ratios vs amd64-51/ucode" \
                    "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-print_ratio_matrix "median" "End-to-end — ratios vs ours/ucode" \
-                   "ours/ucode" "${END_TO_END[@]}"
+print_ratio_matrix "median" "End-to-end — ratios vs ours/ucode-inline" \
+                   "ours/ucode-inline" "${END_TO_END[@]}"
 
 echo
 echo "═══════════════════════════════════════════════════════════════"

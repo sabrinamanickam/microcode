@@ -73,6 +73,31 @@ typedef struct {
 #define CB_OFF  520
 #define T0_OFF  560
 
+/* Invert state — local to fe_invert, kept on stack with rbp pointing at it
+ * during the inverse exponentiation. Held in its own struct so the offsets
+ * are independent of ladder_state_t. */
+typedef struct {
+    uint64_t z[5];     /* offset 0   — input copy */
+    uint64_t z2[5];    /* offset 40  */
+    uint64_t z9[5];    /* offset 80  */
+    uint64_t z11[5];   /* offset 120 */
+    uint64_t t[5];     /* offset 160 */
+    uint64_t t0[5];    /* offset 200 */
+    uint64_t t1[5];    /* offset 240 */
+    uint64_t t2[5];    /* offset 280 */
+    uint64_t t3[5];    /* offset 320 */
+} invert_state_t;
+
+#define IZ_OFF    0
+#define IZ2_OFF   40
+#define IZ9_OFF   80
+#define IZ11_OFF  120
+#define IT_OFF    160
+#define IT0_OFF   200
+#define IT1_OFF   240
+#define IT2_OFF   280
+#define IT3_OFF   320
+
 /* Two-step stringify so macro args like X2_OFF expand to their integer
  * literal before being placed into the asm string. */
 #define _S(x) #x
@@ -455,6 +480,81 @@ static void install_field_patches(void) {
 /* Use a C helper for fe_mul121665 — too complex to write cleanly inline. */
 
 /* ════════════════════════════════════════════════════════════════════
+ * INVERT-CHAIN MACROS
+ *
+ * For fe_invert we want to chain consecutive squarings inside one asm
+ * block without round-tripping through memory between squarings. The
+ * sq patch's caller convention is:
+ *   inputs : a in {rdi, rsi, r12, r11, r14}
+ *   outputs: h in {rdi, r9, r10, rbx, rax}
+ *
+ * Only rdi (a[0] = h[0]) overlaps. To chain, we rename the other 4
+ * outputs back to the input slots (4 movs) between consecutive sqs.
+ * No memory traffic for the intermediate.
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* Load `a` from [rbp+a_off] into the sq input registers. */
+#define INV_SQ_LOAD(a) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t"
+
+/* Rename previous sq's output {rdi, r9, r10, rbx, rax} → input {rdi, rsi, r12, r11, r14}.
+ * rdi is already correct (h[0] = a[0]); 4 movs cover the other 4 limbs. */
+#define INV_SQ_RENAME \
+    "mov rsi, r9\n\t"  \
+    "mov r12, r10\n\t" \
+    "mov r11, rbx\n\t" \
+    "mov r14, rax\n\t"
+
+/* Execute one squaring: inputs assumed already in sq input regs; outputs to sq output regs.
+ * Identical to FE_SQ's body without the load/store wrappers. */
+#define INV_SQ_OP \
+    "lea r15, [rdi + rdi]\n\t"           \
+    "lea r13, [rsi + rsi]\n\t"           \
+    "lea r9,  [r12 + r12]\n\t"           \
+    "lea r10, [r11 + r11]\n\t"           \
+    "imul rbx, r14, 19\n\t"              \
+    "imul rdx, r11, 19\n\t"              \
+    "xor eax, eax\n\t"                   \
+    "xor r8d, r8d\n\t"                   \
+    ".byte 0x0f, 0x78, 0xca\n\t"
+
+/* Store sq output to [rbp+out_off]. */
+#define INV_SQ_STORE(out) \
+    "mov [rbp + " S(out) " + 0],  rdi\n\t" \
+    "mov [rbp + " S(out) " + 8],  r9\n\t"  \
+    "mov [rbp + " S(out) " + 16], r10\n\t" \
+    "mov [rbp + " S(out) " + 24], rbx\n\t" \
+    "mov [rbp + " S(out) " + 32], rax\n\t"
+
+/* Single sq (memory → memory). No chain. */
+#define INV_SQ(out, a) INV_SQ_LOAD(a) INV_SQ_OP INV_SQ_STORE(out)
+
+/* MUL (memory → memory). Standalone; standard fe_mul caller convention. */
+#define INV_MUL(out, a, b) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t" \
+    "mov r15, [rbp + " S(b) " + 0]\n\t"  \
+    "mov r13, [rbp + " S(b) " + 8]\n\t"  \
+    "mov r9,  [rbp + " S(b) " + 16]\n\t" \
+    "mov r10, [rbp + " S(b) " + 24]\n\t" \
+    "mov rbx, [rbp + " S(b) " + 32]\n\t" \
+    "xor eax, eax\n\t"                   \
+    "xor r8d, r8d\n\t"                   \
+    "vmwrite rcx, rdx\n\t"               \
+    "mov [rbp + " S(out) " + 0],  r15\n\t" \
+    "mov [rbp + " S(out) " + 8],  r13\n\t" \
+    "mov [rbp + " S(out) " + 16], r9\n\t"  \
+    "mov [rbp + " S(out) " + 24], r10\n\t" \
+    "mov [rbp + " S(out) " + 32], rax\n\t"
+
+/* ════════════════════════════════════════════════════════════════════
  * LADDER STEP — one big asm block per iteration
  * ════════════════════════════════════════════════════════════════════ */
 
@@ -648,104 +748,94 @@ static void fe_tobytes(uint8_t out[32], const uint64_t in[5]) {
     out[31] = (uint8_t)(h[4] >> 44);
 }
 
-/* Wrapper fe_mul / fe_sq for use in fe_invert (where the asm-block savings
- * don't apply — fe_invert is a long mostly-sq chain). */
-static void fe_mul_wrap(uint64_t *out, const uint64_t *a, const uint64_t *b) {
-    register const uint64_t *_a   asm("rdi") = a;
-    register const uint64_t *_b   asm("rsi") = b;
-    register       uint64_t *_out asm("rdx") = out;
-    asm volatile(
-        "mov rbp, rdx\n\t"
-        "mov r15, [rsi]\n\t"
-        "mov r13, [rsi + 8]\n\t"
-        "mov r9,  [rsi + 16]\n\t"
-        "mov r10, [rsi + 24]\n\t"
-        "mov rbx, [rsi + 32]\n\t"
-        "mov rsi, [rdi + 8]\n\t"
-        "mov r12, [rdi + 16]\n\t"
-        "mov r11, [rdi + 24]\n\t"
-        "mov r14, [rdi + 32]\n\t"
-        "mov rdi, [rdi]\n\t"
-        "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
-        "vmwrite rcx, rdx\n\t"
-        "mov [rbp],      r15\n\t"
-        "mov [rbp + 8],  r13\n\t"
-        "mov [rbp + 16], r9\n\t"
-        "mov [rbp + 24], r10\n\t"
-        "mov [rbp + 32], rax\n\t"
-        : "+r"(_a), "+r"(_b), "+r"(_out)
-        :
-        : "rax", "rbx", "rcx", "rbp",
-          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-          "memory", "cc"
-    );
-}
-
-static void fe_sq_wrap(uint64_t *out, const uint64_t *a) {
-    register const uint64_t *_a   asm("rdi") = a;
-    register       uint64_t *_out asm("rsi") = out;
-    asm volatile(
-        "mov rbp, rsi\n\t"
-        "mov r14, [rdi + 32]\n\t"
-        "mov r11, [rdi + 24]\n\t"
-        "mov r12, [rdi + 16]\n\t"
-        "mov rsi, [rdi + 8]\n\t"
-        "mov rdi, [rdi]\n\t"
-        "lea r15, [rdi + rdi]\n\t"
-        "lea r13, [rsi + rsi]\n\t"
-        "lea r9,  [r12 + r12]\n\t"
-        "lea r10, [r11 + r11]\n\t"
-        "imul rbx, r14, 19\n\t"
-        "imul rdx, r11, 19\n\t"
-        "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
-        ".byte 0x0f, 0x78, 0xca\n\t"
-        "mov [rbp],      rdi\n\t"
-        "mov [rbp + 8],  r9\n\t"
-        "mov [rbp + 16], r10\n\t"
-        "mov [rbp + 24], rbx\n\t"
-        "mov [rbp + 32], rax\n\t"
-        : "+r"(_a), "+r"(_out)
-        :
-        : "rax", "rbx", "rcx", "rdx", "rbp",
-          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-          "memory", "cc"
-    );
-}
-
+/* fe_invert — inverse via Fermat's little theorem, z^(p-2).
+ *
+ * Inlined into one large asm block with chained squarings. The Fermat
+ * addition chain has 254 sqs split into runs of 1, 2, 1, 5, 10, 20, 10,
+ * 50, 100, 50, 5 — the runs of length ≥ 2 are SQ-chained (intermediates
+ * stay in registers; only the start loads from memory and only the end
+ * stores back). 11 muls separate the runs and are standalone (output of
+ * sq doesn't match mul input register set).
+ *
+ * Final result is computed into the t1 slot and copied to *out. */
 static void fe_invert(uint64_t out[5], const uint64_t z[5]) {
-    fe z2, z9, z11, t, t0, t1, t2, t3;
-    int i;
-    fe_sq_wrap(z2, z);
-    fe_sq_wrap(t, z2);
-    fe_sq_wrap(t, t);
-    fe_mul_wrap(z9, t, z);
-    fe_mul_wrap(z11, z9, z2);
-    fe_sq_wrap(t, z11);
-    fe_mul_wrap(t0, t, z9);
-    fe_sq_wrap(t1, t0);
-    for (i = 1; i < 5; i++) fe_sq_wrap(t1, t1);
-    fe_mul_wrap(t1, t1, t0);
-    fe_sq_wrap(t2, t1);
-    for (i = 1; i < 10; i++) fe_sq_wrap(t2, t2);
-    fe_mul_wrap(t2, t2, t1);
-    fe_sq_wrap(t3, t2);
-    for (i = 1; i < 20; i++) fe_sq_wrap(t3, t3);
-    fe_mul_wrap(t3, t3, t2);
-    for (i = 0; i < 10; i++) fe_sq_wrap(t3, t3);
-    fe_mul_wrap(t1, t3, t1);
-    fe_sq_wrap(t2, t1);
-    for (i = 1; i < 50; i++) fe_sq_wrap(t2, t2);
-    fe_mul_wrap(t2, t2, t1);
-    fe_sq_wrap(t3, t2);
-    for (i = 1; i < 100; i++) fe_sq_wrap(t3, t3);
-    fe_mul_wrap(t3, t3, t2);
-    for (i = 0; i < 50; i++) fe_sq_wrap(t3, t3);
-    fe_mul_wrap(t1, t3, t1);
-    fe_sq_wrap(t1, t1); fe_sq_wrap(t1, t1); fe_sq_wrap(t1, t1);
-    fe_sq_wrap(t1, t1); fe_sq_wrap(t1, t1);
-    fe_mul_wrap(out, t1, z11);
+    invert_state_t st;
+    /* Copy z into st.z so the asm block can address it via [rbp+IZ_OFF]. */
+    st.z[0] = z[0]; st.z[1] = z[1]; st.z[2] = z[2]; st.z[3] = z[3]; st.z[4] = z[4];
+
+    register invert_state_t *_st asm("rbp") = &st;
+    asm volatile(
+        /* z2 = sq(z) */
+        INV_SQ(IZ2_OFF, IZ_OFF)
+        /* t  = sq^2(z2)  — chain of 2 */
+        INV_SQ_LOAD(IZ2_OFF) INV_SQ_OP
+        INV_SQ_RENAME INV_SQ_OP
+        INV_SQ_STORE(IT_OFF)
+        /* z9  = mul(t, z) */
+        INV_MUL(IZ9_OFF, IT_OFF, IZ_OFF)
+        /* z11 = mul(z9, z2) */
+        INV_MUL(IZ11_OFF, IZ9_OFF, IZ2_OFF)
+        /* t   = sq(z11) */
+        INV_SQ(IT_OFF, IZ11_OFF)
+        /* t0  = mul(t, z9) */
+        INV_MUL(IT0_OFF, IT_OFF, IZ9_OFF)
+        /* t1  = sq^5(t0) */
+        INV_SQ_LOAD(IT0_OFF) INV_SQ_OP
+        ".rept 4\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT1_OFF)
+        /* t1  = mul(t1, t0) */
+        INV_MUL(IT1_OFF, IT1_OFF, IT0_OFF)
+        /* t2  = sq^10(t1) */
+        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
+        ".rept 9\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT2_OFF)
+        /* t2  = mul(t2, t1) */
+        INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF)
+        /* t3  = sq^20(t2) */
+        INV_SQ_LOAD(IT2_OFF) INV_SQ_OP
+        ".rept 19\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT3_OFF)
+        /* t3  = mul(t3, t2) */
+        INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF)
+        /* t3  = sq^10(t3) */
+        INV_SQ_LOAD(IT3_OFF) INV_SQ_OP
+        ".rept 9\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT3_OFF)
+        /* t1  = mul(t3, t1) */
+        INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF)
+        /* t2  = sq^50(t1) */
+        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
+        ".rept 49\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT2_OFF)
+        /* t2  = mul(t2, t1) */
+        INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF)
+        /* t3  = sq^100(t2) */
+        INV_SQ_LOAD(IT2_OFF) INV_SQ_OP
+        ".rept 99\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT3_OFF)
+        /* t3  = mul(t3, t2) */
+        INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF)
+        /* t3  = sq^50(t3) */
+        INV_SQ_LOAD(IT3_OFF) INV_SQ_OP
+        ".rept 49\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT3_OFF)
+        /* t1  = mul(t3, t1) */
+        INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF)
+        /* t1  = sq^5(t1) */
+        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
+        ".rept 4\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
+        INV_SQ_STORE(IT1_OFF)
+        /* out = mul(t1, z11)  — final result stored to IT1_OFF slot */
+        INV_MUL(IT1_OFF, IT1_OFF, IZ11_OFF)
+        :
+        : "r"(_st)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+
+    out[0] = st.t1[0]; out[1] = st.t1[1]; out[2] = st.t1[2];
+    out[3] = st.t1[3]; out[4] = st.t1[4];
 }
 
 static void scalar_clamp(uint8_t s[32]) {
@@ -777,7 +867,18 @@ static void x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t poin
     fe_cswap(st.z2, st.z3, swap);
 
     fe_invert(st.z2, st.z2);
-    fe_mul_wrap(st.x2, st.x2, st.z2);
+    /* Final x2 = x2 * z2 — inlined as one FE_MUL on the ladder_state. */
+    {
+        register ladder_state_t *_st asm("rbp") = &st;
+        asm volatile(
+            FE_MUL(X2_OFF, X2_OFF, Z2_OFF)
+            :
+            : "r"(_st)
+            : "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+              "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+              "memory", "cc"
+        );
+    }
     fe_tobytes(out, st.x2);
 }
 

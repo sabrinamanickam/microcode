@@ -133,6 +133,78 @@ EXTRA_OBJS := $(AMD51_OBJS) $(AMD51U_OBJS) $(AMD64_OBJS) cryptopt_mul.o cryptopt
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
+# ---- SUPERCOP Keccak baselines (linked into bench_keccak only) ----
+# Both impls define a function named `KeccakPermutation`; objcopy renames
+# them to unique names so they can coexist in one binary. `keep-global-symbol`
+# hides the other (unused) functions so they don't collide either.
+SC_KECCAK_DIR := supercop-20260330/crypto_hash/keccakc1024
+KECCAK_CFLAGS := $(filter-out -masm=intel,$(CFLAGS)) -masm=att
+
+keccak_x86_64_asm.o: $(SC_KECCAK_DIR)/x86_64_asm/keccak.s
+	$(CC) $(KECCAK_CFLAGS) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakPermutation=keccak_x86_64_asm_perm \
+	        $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_x86_64_asm_perm \
+	        $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
+keccak_opt64lcu6.o: $(SC_KECCAK_DIR)/opt64lcu6/KeccakF-1600-opt64.c
+	$(CC) $(KECCAK_CFLAGS) -I$(SC_KECCAK_DIR)/opt64lcu6 -I$(SC_INC) \
+	      -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakPermutationOnWords=keccak_opt64lcu6_perm \
+	        $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_opt64lcu6_perm \
+	        $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
+ifeq ($(PROG),bench_keccak)
+EXTRA_OBJS := keccak_x86_64_asm.o keccak_opt64lcu6.o
+endif
+
+# ---- asm_op_keccak: needs -no-pie because LDZX_DSZ64_ASZ32 (only ASZ32 form
+# exists in opcode.h) only takes 32-bit addresses. With -fPIE, static globals
+# can land above 4GB; -no-pie forces them low. Pattern follows mac/Makefile.
+ifeq ($(PROG),asm_op_keccak)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# Same -no-pie requirement for the I/O bisect probe.
+ifeq ($(PROG),probe_keccak_io)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# SEG-finder probe — also needs static globals in low 4GB.
+ifeq ($(PROG),probe_seg)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# STLF / RAW probe — memory ops, needs -no-pie.
+ifeq ($(PROG),probe_stlf)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# Intra-triad dependency probe — memory ops, needs -no-pie.
+ifeq ($(PROG),probe_triad)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# load-use latency probe — memory ops, needs -no-pie.
+ifeq ($(PROG),probe_loaduse)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
+# offset-field mapping probe — memory ops, needs -no-pie.
+ifeq ($(PROG),probe_offset)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
 # Build $(PROG)_static from $(PROG).c (+ any extra objs/libs)
 $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $< $(EXTRA_OBJS) $(LIBS) $(EXTRA_LIBS) -o $@
