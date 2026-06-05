@@ -1,24 +1,28 @@
 /*
- * full_curve25519_inline2.c — register-chained 5×51 ladder experiment.
+ * full_curve25519_inline3.c — output-register-resident 5×51 ladder experiment.
  *
- * Forked from full_curve25519_inline.c to test whether chaining consecutive
- * ladder ops through registers (skipping memory reloads at the start of
- * each op) reduces cycles. Prior memory `inline-asm-no-help-5x51` recorded
- * 0 cyc savings from a similar restructure; goal here is to verify or
- * disprove that with a more targeted chain pattern.
+ * Forked from full_curve25519_inline2.c. inline2's FROM_REGS macros chained
+ * only the *input* side of dependent ops: an op still STORED its result to
+ * memory, and a dependent consumer RELOADED it. The per-op profile showed that
+ * store→reload round-trip is what makes a ladder sq cost ~123 cyc, vs ~81 for
+ * fe_invert's squarings which chain output→input purely in registers
+ * (INV_SQ_RENAME). See memory project_inline2_perop_profile.
  *
- * Dataflow chains used in ladder_step:
- *   1→2:   A   = ADD(x2, z2)   →  AA  = SQ(A)     (5 reloads avoided)
- *   3→4:   B   = SUB(x2, z2)   →  BB  = SQ(B)     (5 reloads avoided)
- *   7→8:   D   = SUB(x3, z3)   →  DA  = MUL(D,A)  (5 reloads avoided)
- *  10→11:  t0  = ADD(DA, CB)   →  x3' = SQ(t0)    (5 reloads avoided)
- *  12→13:  t0  = SUB(DA, CB)   →  z3' = SQ(t0)    (5 reloads avoided)
+ * inline3 makes the single-consumer critical chain register-resident on the
+ * OUTPUT side too — no intermediate store, no reload:
  *
- * Upper bound per X25519: 255 × 25 ≈ 6.4k cyc (at 1 cyc/load) vs ~312k
- * baseline. STLF typically hides this; if it does, no gain.
+ *     t0  = DA - CB     (FE_SUB_NOSTORE → regs)
+ *     z3' = sq(t0)       (INV_SQ_OP, no store → regs)
+ *     z3  = z3' * x1     (rename sq-out → mul-a: INV_SQ_RENAME + FE_MUL_FROM_REGS_A)
  *
- * Build: make PROG=full_curve25519_inline2
- * Run:   sudo taskset -c 0 ./full_curve25519_inline2_static
+ * eliminating the z3' store AND the z3' reload that inline2's
+ * FE_MUL(Z3,X1,Z3) paid. The x3' = sq(DA+CB) add is also made NOSTORE (its
+ * t0 has a single consumer). All other ops are unchanged from inline2.
+ *
+ * Expected: ~one store+reload (~40 cyc) off the z3 chain per step → ~10k/X25519.
+ *
+ * Build: make PROG=full_curve25519_inline3
+ * Run:   sudo taskset -c 0 ./full_curve25519_inline3_static
  */
 
 #define _GNU_SOURCE
@@ -442,6 +446,26 @@ static void install_field_patches(void) {
     "mov r11, [rbp + " S(a) " + 24]\n\t" "add r11, rcx\n\t" "sub r11, [rbp + " S(b) " + 24]\n\t" "mov [rbp + " S(out) " + 24], r11\n\t" \
     "mov r14, [rbp + " S(a) " + 32]\n\t" "add r14, rcx\n\t" "sub r14, [rbp + " S(b) " + 32]\n\t" "mov [rbp + " S(out) " + 32], r14\n\t"
 
+/* FE_ADD_NOSTORE(a, b) / FE_SUB_NOSTORE(a, b) — inline3 additions.
+ * Same as FE_ADD / FE_SUB but leave the 5 result limbs ONLY in the registers
+ * {rdi, rsi, r12, r11, r14} (the sq/mul-a input convention) without writing
+ * them to memory. Used when the result feeds a single immediate consumer (a
+ * SQ), so the store would just be reloaded. */
+#define FE_ADD_NOSTORE(a, b) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"   "add rdi, [rbp + " S(b) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"   "add rsi, [rbp + " S(b) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t"  "add r12, [rbp + " S(b) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t"  "add r11, [rbp + " S(b) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t"  "add r14, [rbp + " S(b) " + 32]\n\t"
+
+#define FE_SUB_NOSTORE(a, b) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"  "mov rcx, 0xFFFFFFFFFFFDA\n\t" "add rdi, rcx\n\t" "sub rdi, [rbp + " S(b) " + 0]\n\t"  \
+    "mov rcx, 0xFFFFFFFFFFFFE\n\t" \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  "add rsi, rcx\n\t" "sub rsi, [rbp + " S(b) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" "add r12, rcx\n\t" "sub r12, [rbp + " S(b) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" "add r11, rcx\n\t" "sub r11, [rbp + " S(b) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t" "add r14, rcx\n\t" "sub r14, [rbp + " S(b) " + 32]\n\t"
+
 /* FE_SQ_FROM_REGS(out) — assumes a[0..4] already in {rdi, rsi, r12, r11, r14}.
  * Skips the 5 input loads vs FE_SQ; everything else identical. */
 #define FE_SQ_FROM_REGS(out) \
@@ -620,14 +644,19 @@ static void ladder_step(ladder_state_t *st) {
         FE_MUL_FROM_REGS_A(DA_OFF, A_OFF)
         FE_ADD(C_OFF, X3_OFF, Z3_OFF)
         FE_MUL_FROM_REGS_A(CB_OFF, B_OFF)
-        /* 10→11 chain: FE_ADD leaves t0 in regs; SQ_FROM_REGS picks up. */
-        FE_ADD(T0_OFF, DA_OFF, CB_OFF)
+        /* x3' = sq(DA+CB): add leaves t0 in regs (NO store — single consumer),
+         * SQ_FROM_REGS squares it and stores the final x3. */
+        FE_ADD_NOSTORE(DA_OFF, CB_OFF)
         FE_SQ_FROM_REGS(X3_OFF)
-        /* 12→13 chain: FE_SUB leaves t0 in regs; SQ_FROM_REGS picks up. */
-        FE_SUB(T0_OFF, DA_OFF, CB_OFF)
-        FE_SQ_FROM_REGS(Z3_OFF)
-        /* Step 14: full FE_MUL (sq output regs don't match mul input regs; reload from mem). */
-        FE_MUL(Z3_OFF, X1_OFF, Z3_OFF)
+        /* z3 = x1 * sq(DA-CB): fully output-register-resident (inline3 change).
+         * sub→sq→mul with no intermediate store/reload of z3'. The sq output
+         * {rdi,r9,r10,rbx,rax} is renamed into the mul-a slot {rdi,rsi,r12,r11,r14}
+         * by INV_SQ_RENAME, then x1 is loaded as mul-b. mul commutes so
+         * z3'·x1 = x1·z3' = z3. */
+        FE_SUB_NOSTORE(DA_OFF, CB_OFF)
+        INV_SQ_OP
+        INV_SQ_RENAME
+        FE_MUL_FROM_REGS_A(Z3_OFF, X1_OFF)
         /* Step 15: full FE_MUL. */
         FE_MUL(X2_OFF, AA_OFF, BB_OFF)
         :
@@ -980,7 +1009,7 @@ static int cmp_u64(const void *a, const void *b) {
 
 #ifndef INLINE2_PROFILE
 int main(void) {
-    printf("=== X25519 via inline-asm 5×51 ladder (register-chained) ===\n\n");
+    printf("=== X25519 via inline-asm 5×51 ladder (inline3: output-reg-resident z3 chain) ===\n\n");
 
     assign_to_core(0);
     init_match_and_patch();

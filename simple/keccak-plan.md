@@ -387,6 +387,48 @@ Single Keccak-f[1600] round implemented in microcode and **verified correct on h
 ### Phase 3 deliverables — done
 - [x] Correct single round on hardware (108 triads)
 - [x] Self-verifying generator (`keccak_gen.py`)
-- [x] Per-triad cost measured: **0.49 cyc/triad**
+- [x] Per-triad cost measured: **0.49 cyc/triad** (THROUGHPUT — misleading, see Phase 4)
 - [x] Confirmed π self-resolves → looping needs no 2-body trick
 - [x] Decision: **proceed to Phase 4** (loop the rounds); outlook now favorable
+
+## Phase 4 results (2026-06-02) — CORRECT but a LOSS
+
+Full 24-round Keccak-f[1600] looped inside one vmwrite. **Verified correct** on
+hardware: zero-state (official KAT anchor lane0 = 0xF1258F7940E1DDE7), a
+non-trivial state, and 3 random states all match the C reference. 112 triads.
+
+Loop mechanism (all primitives hardware-verified first — `probe_loop`/`ujmp_test`,
+`probe_index`): count-up counter in the buffer, RC[counter] looked up from an
+in-buffer table via index-register LDZX, ι via that RC, backward `UJMPCC CONDNZ`
+(intra-triad XOR sets ZF — the proven test_q pattern). State stays resident in
+13 GPR + 12 TMP across all 24 rounds; only prologue/epilogue touch state memory.
+
+**Benchmark: 2056 cyc min / 2068 avg per permutation vs 939 baseline = 2.2× LOSS.**
+
+### Why the Phase 3c projection (~740 cyc) was wrong
+
+The 53 cyc single-round number was a **throughput** measurement — 1000 *independent*
+vmwrites that the OoO engine overlaps heavily. The looped permutation is a hard
+**dependency chain** (round N needs round N-1) with a per-round backward branch, so
+it pays true **latency** with no inter-call overlap: ~86 cyc/round (1.34 cyc/triad
+effective, vs the 0.49 throughput figure).
+
+### Structural conclusion
+
+Same ceiling as [[project_x25519_4x64_loses]]: microcode is **latency-bound at
+~1 triad/cyc**; SUPERCOP's `x86_64_asm` does ~3 ops/cyc via BMI/rotate ILP. The
+register-residency advantage (no state spills) does NOT overcome it because
+θ→ρ→π→χ is an inherently sequential chain. Even the best realistic optimization
+(D in registers, removing the 25 D-loads/round → body ~37 triads) projects
+~37×24 + 50 I/O ≈ 940 cyc at 1 cyc/triad — a **tie at best**, and the measured
+1.34 cyc/triad effective rate makes it a likely loss.
+
+**Verdict: Keccak-f[1600] in Goldmont microcode cannot beat hand-tuned scalar asm.**
+A correct, complete implementation exists (`asm_op_keccak_perm.c`) as the evidence.
+
+### Phase 4 deliverables — done
+- [x] Full 24-round permutation, looped, correct (KAT-verified)
+- [x] Loop + indexed-RC + counter mechanism working on hardware
+- [x] Benchmark: 2056 cyc (2.2× loss)
+- [x] Root-caused the projection error (throughput vs latency)
+- [x] Decision: **stop** — structural latency ceiling, documented as a negative result

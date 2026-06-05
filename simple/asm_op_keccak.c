@@ -174,12 +174,39 @@ static void bench_single_round(void) {
     /* The 25 LD prologue + 25 ST epilogue (50 triads) are paid ONCE per
      * permutation in the looped design, not per round. Subtract to estimate
      * per-round compute cost, then project 24-round permutation. */
-    uint64_t per_round = min / BATCH;
-    printf("Projection (rough): if I/O (~50 triads) amortizes over 24 rounds,\n");
-    printf("  per-round compute ~= %" PRIu64 " triads worth; 24-round permutation\n",
-           (uint64_t)(KECCAK_ROUND_TRIADS - 50));
-    printf("  est ~= 24*(compute) + I/O.  Baseline to beat: 939 cyc.\n");
-    (void)per_round;
+    (void)sum;
+}
+
+/* Single ISOLATED C round (GCC -O3): same load-25 + compute + store-25 as the
+ * microcode round. This is the fair per-round comparison — both pay per-round
+ * I/O. SUPERCOP's 39 cyc/round (939/24) avoids that I/O by unrolling all 24
+ * rounds with state resident in registers across them. */
+static uint64_t g_cstate[25];
+static void __attribute__((noinline)) one_c_round(void) {
+    keccak_round_ref(g_cstate, KECCAK_RC[0]);
+    asm volatile("" :: "r"(g_cstate) : "memory");  /* defeat hoisting */
+}
+static void bench_c_round(void) {
+    for (int i = 0; i < 25; i++) g_cstate[i] = 0x0123456789ABCDEFULL * (i+1);
+    uint64_t min = UINT64_MAX;
+    for (int r = 0; r < REPS; r++) {
+        uint64_t t0 = rdtsc_start();
+        for (int i = 0; i < BATCH; i++) one_c_round();
+        uint64_t t1 = rdtsc_end();
+        uint64_t dt = t1 - t0; if (dt < min) min = dt;
+    }
+    printf("--- single-round C reference (GCC -O3, isolated, incl. I/O) ---\n");
+    printf("min/round %4" PRIu64 " cycles\n", min/BATCH);
+}
+
+static void bench_compare(void) {
+    printf("\n=== PER-ROUND COMPARISON ===\n");
+    bench_single_round();
+    bench_c_round();
+    printf("\nSUPERCOP x86_64_asm full perm = 939 cyc = %.1f cyc/round (24 rounds,\n", 939.0/24);
+    printf("  UNROLLED — state stays in registers across all rounds, ZERO per-round I/O).\n");
+    printf("The question: is one isolated round (C or ucode) ~the same? If so, the\n");
+    printf("gap is per-round I/O / lack of cross-round register residency, not raw op speed.\n");
 }
 
 int main(void) {
@@ -197,7 +224,7 @@ int main(void) {
     install_keccak_round_patch();
 
     int fails = verify_round();
-    if (!fails) bench_single_round();
+    if (!fails) bench_compare();
 
     init_match_and_patch();
     do_fix_IN_patch();
