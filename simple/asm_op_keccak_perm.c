@@ -73,7 +73,7 @@ static void install_perm_patch(void) {
 
 /* Reset the per-fire control state: counter=0, RC table. (State set separately.) */
 static void reset_control(void) {
-    g_keccak_buf[KECCAK_COUNTER_LANE] = 0;
+    g_keccak_buf[KECCAK_COUNTER_LANE] = (KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8;
     for (int r = 0; r < 24; r++) g_keccak_buf[KECCAK_RCTAB_LANE + r] = KECCAK_RC[r];
 }
 
@@ -147,7 +147,7 @@ static void bench(void) {
     uint64_t min=UINT64_MAX,sum=0;
     for (int r=0;r<REPS;r++){
         uint64_t t0=rdtsc_start();
-        for (int i=0;i<BATCH;i++){ g_keccak_buf[KECCAK_COUNTER_LANE]=0; keccak_perm_ucode(); }
+        for (int i=0;i<BATCH;i++){ g_keccak_buf[KECCAK_COUNTER_LANE]=(KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8; keccak_perm_ucode(); }
         uint64_t t1=rdtsc_end();
         uint64_t dt=t1-t0; sum+=dt; if(dt<min)min=dt;
     }
@@ -167,7 +167,8 @@ static void bench_sweep(void) {
     int Ns[] = { 1, 2, 4, 8, 12, 24 };
     for (size_t k=0;k<sizeof(Ns)/sizeof(Ns[0]);k++) {
         int N = Ns[k];
-        int c0 = 24 - N;
+        /* counter is now a BYTE-INDEX; to run N rounds start N*8 before the end. */
+        int c0 = (KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8 + (24-N)*8;
         uint64_t min=UINT64_MAX;
         for (int r=0;r<REPS;r++){
             for (int i=0;i<25;i++) g_keccak_buf[i]=0x0123456789ABCDEFULL*(i+1);

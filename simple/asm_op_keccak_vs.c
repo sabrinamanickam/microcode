@@ -24,8 +24,12 @@
 #include "keccak_perm.h"
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];
 
-/* SUPERCOP x86_64_asm permutation (24 rounds, hand-tuned scalar). */
-extern void keccak_x86_64_asm_perm(uint64_t state[25]);
+/* SUPERCOP scalar Keccak permutations — benchmark vs ALL fast x86-64 variants
+ * so we compare against the TRUE fastest (what SUPERCOP's autotuner would pick). */
+extern void keccak_x86_64_asm_perm(uint64_t state[25]);        /* Van Keer, ROL */
+extern void keccak_x86_64_shld_perm(uint64_t state[25]);       /* Van Keer, SHLD */
+extern void keccak_opt64lcu24_perm(uint64_t state[25]);        /* C, 24x unroll, bebigokimisa */
+extern void keccak_opt64lcu24shld_perm(uint64_t state[25]);    /* C, 24x unroll, SHLD */
 
 static const uint64_t KECCAK_RC[24] = {
     0x0000000000000001ULL,0x0000000000008082ULL,0x800000000000808aULL,0x8000000080008000ULL,
@@ -44,7 +48,7 @@ static void install_perm_patch(void){
     patch_ucode(0x7c00, patch, KECCAK_PERM_TRIADS);
 }
 static void reset_control(void){
-    g_keccak_buf[KECCAK_COUNTER_LANE]=0;
+    g_keccak_buf[KECCAK_COUNTER_LANE]=(KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8;
     for(int r=0;r<24;r++) g_keccak_buf[KECCAK_RCTAB_LANE+r]=KECCAK_RC[r];
 }
 static inline void ucode_perm(void){
@@ -86,29 +90,46 @@ int main(void){
     /* warmup to reach steady frequency */
     volatile uint64_t w=0; for(uint64_t i=0;i<200000000ULL;i++) w+=i; (void)w;
 
-    /* interleaved timing: each rep times a SUPERCOP batch then a ucode batch,
-     * close in time so they see the same frequency. */
+    /* interleaved timing: each rep times every SUPERCOP variant + microcode,
+     * all close in time so they see the same frequency. min over reps. */
+    typedef void (*permfn)(uint64_t*);
+    struct { const char *name; permfn fn; uint64_t min; } C[] = {
+        {"x86_64_asm    ", keccak_x86_64_asm_perm,     UINT64_MAX},
+        {"x86_64_shld   ", keccak_x86_64_shld_perm,    UINT64_MAX},
+        {"opt64lcu24    ", keccak_opt64lcu24_perm,     UINT64_MAX},
+        {"opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX},
+    };
+    int NC = sizeof(C)/sizeof(C[0]);
     uint64_t sc_state[25];
-    uint64_t sc_min=UINT64_MAX, uc_min=UINT64_MAX;
+    uint64_t uc_min=UINT64_MAX;
     for(int r=0;r<REPS;r++){
-        for(int i=0;i<25;i++) sc_state[i]=0x0123456789ABCDEFULL*(i+1);
-        uint64_t t0=rdtsc_start();
-        for(int i=0;i<BATCH;i++) keccak_x86_64_asm_perm(sc_state);
-        uint64_t t1=rdtsc_end();
-        uint64_t sc=t1-t0; if(sc<sc_min)sc_min=sc;
-
+        for(int c=0;c<NC;c++){
+            for(int i=0;i<25;i++) sc_state[i]=0x0123456789ABCDEFULL*(i+1);
+            uint64_t t0=rdtsc_start();
+            for(int i=0;i<BATCH;i++) C[c].fn(sc_state);
+            uint64_t t1=rdtsc_end();
+            uint64_t d=t1-t0; if(d<C[c].min)C[c].min=d;
+        }
         for(int i=0;i<25;i++) g_keccak_buf[i]=0x0123456789ABCDEFULL*(i+1);
         uint64_t t2=rdtsc_start();
-        for(int i=0;i<BATCH;i++){ g_keccak_buf[KECCAK_COUNTER_LANE]=0; ucode_perm(); }
+        for(int i=0;i<BATCH;i++){ g_keccak_buf[KECCAK_COUNTER_LANE]=(KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8; ucode_perm(); }
         uint64_t t3=rdtsc_end();
         uint64_t uc=t3-t2; if(uc<uc_min)uc_min=uc;
     }
-    printf("\nSUPERCOP x86_64_asm: %5" PRIu64 " cyc/perm\n", sc_min/BATCH);
-    printf("microcode (looped):  %5" PRIu64 " cyc/perm\n", uc_min/BATCH);
-    printf("ratio ucode/supercop: %.2fx  (%s)\n",
-           (double)uc_min/(double)sc_min,
-           uc_min<sc_min ? "*** microcode WINS ***" : "microcode loses");
-    printf("\n(both measured back-to-back at the same CPU frequency -> ratio is valid)\n");
+    uint64_t best=UINT64_MAX; const char *bestname="";
+    printf("\n--- SUPERCOP scalar Keccak variants (cyc/perm, same freq) ---\n");
+    for(int c=0;c<NC;c++){
+        uint64_t v=C[c].min/BATCH;
+        printf("  %s %5" PRIu64 "\n", C[c].name, v);
+        if(v<best){best=v; bestname=C[c].name;}
+    }
+    uint64_t uc=uc_min/BATCH;
+    printf("  >> fastest SUPERCOP: %s %5" PRIu64 " cyc/perm\n", bestname, best);
+    printf("microcode (looped):    %5" PRIu64 " cyc/perm\n", uc);
+    printf("ratio ucode/FASTEST:   %.3fx  (%s)\n",
+           (double)uc/(double)best,
+           uc<best ? "*** microcode WINS vs the fastest ***" : "microcode loses");
+    printf("\n(all measured back-to-back at the same CPU frequency -> ratios valid)\n");
 
     init_match_and_patch(); do_fix_IN_patch();
     return 0;

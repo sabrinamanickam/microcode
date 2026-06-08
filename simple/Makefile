@@ -216,6 +216,24 @@ keccak_opt64lcu6.o: $(SC_KECCAK_DIR)/opt64lcu6/KeccakF-1600-opt64.c
 	        $@.tmp2.o $@
 	rm -f $@.tmp.o $@.tmp2.o
 
+keccak_x86_64_shld.o: $(SC_KECCAK_DIR)/x86_64_shld/keccak.s
+	$(CC) $(KECCAK_CFLAGS) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakPermutation=keccak_x86_64_shld_perm $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_x86_64_shld_perm $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
+keccak_opt64lcu24.o: $(SC_KECCAK_DIR)/opt64lcu24/KeccakF-1600-opt64.c
+	$(CC) $(KECCAK_CFLAGS) -I$(SC_KECCAK_DIR)/opt64lcu24 -I$(SC_INC) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakPermutationOnWords=keccak_opt64lcu24_perm $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_opt64lcu24_perm $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
+keccak_opt64lcu24shld.o: $(SC_KECCAK_DIR)/opt64lcu24shld/KeccakF-1600-opt64.c
+	$(CC) $(KECCAK_CFLAGS) -I$(SC_KECCAK_DIR)/opt64lcu24shld -I$(SC_INC) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakPermutationOnWords=keccak_opt64lcu24shld_perm $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_opt64lcu24shld_perm $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
 ifeq ($(PROG),bench_keccak)
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_opt64lcu6.o
 endif
@@ -238,11 +256,11 @@ CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
 endif
 
-# head-to-head: links the SUPERCOP x86_64_asm object; -no-pie for ucode buffer.
+# head-to-head: links ALL fast SUPERCOP scalar Keccak variants; -no-pie for ucode buffer.
 ifeq ($(PROG),asm_op_keccak_vs)
 CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
-EXTRA_OBJS := keccak_x86_64_asm.o
+EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o keccak_opt64lcu24.o keccak_opt64lcu24shld.o
 endif
 
 # Same -no-pie requirement for the I/O bisect probe.

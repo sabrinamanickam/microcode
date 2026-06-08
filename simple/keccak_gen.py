@@ -97,6 +97,16 @@ assert BORROW==REG[24]
 T_SAVE="RAX"; T_DTMP="TMP12"; T_N="TMP13"        # apply/chi temps
 def col(i): return i%5
 
+# RIGOROUS TEST (2026-06-02): does fully-resident D (no buffer round-trip) beat
+# the 2056 per-lane-D baseline? Enabled by using RSP as the 32nd register
+# (probe_rsp confirmed it's usable as a data reg when saved/restored). With
+# D_IN_REGS: theta C->buffer, theta D->5 registers (RAX,TMP12-15), apply reads D
+# from registers (NO 25 per-lane loads), save-temp=RSP, RCX stays base (no
+# rebuild). RSP is saved at prologue / restored at epilogue (once per perm).
+D_IN_REGS = True
+D_REG = ["RAX","TMP12","TMP13","TMP14","TMP15"]   # D[0..4] resident across apply
+RSPSAVE = 31                                      # buffer lane holding the saved RSP
+
 # layout
 BASE_LANE=16
 STATE0=0; DSCR=25; COUNTER=30; BORROWSAVE=31; RCTAB=32
@@ -118,30 +128,61 @@ for _l in range(0,32):
 def emit(ops,*o): ops.append(o)
 
 def gen_prologue(ops):
+    if D_IN_REGS:
+        emit(ops,"ST", "RSP", OFF(RSPSAVE))   # save stack pointer (RSP reused as data reg)
     for i in range(25):
         emit(ops,"LD", REG[i], OFF(i))
 
 def gen_body(ops):
     """theta + rho + pi + chi + iota(RC[counter]). State stays in REG[]."""
-    # theta parity C -> C_REG
-    for x in range(5):
+    if D_IN_REGS:
+        # theta-C -> buffer (Cscr = DSCR lanes 25..29). BALANCED XOR TREE (depth 3
+        # not 4): C is at the head of the round's dependency chain, so shortening
+        # its latency shortens every round. RSP is free here (2nd tree accumulator).
+        for x in range(5):
+            emit(ops,"XOR", "RAX", REG[x],    REG[x+5])    # a^b
+            emit(ops,"XOR", "RSP", REG[x+10], REG[x+15])   # c^d (parallel)
+            emit(ops,"XOR", "RAX", "RAX", "RSP")           # (a^b)^(c^d)
+            emit(ops,"XOR", "RAX", "RAX", REG[x+20])       # ^e   -> depth 3
+            emit(ops,"ST",  "RAX", OFF(DSCR+x))
+        # theta-D -> 5 REGISTERS (D_REG), reading C from buffer. RSP = rol temp.
+        # D[x] = C[x-1] ^ rol(C[x+1],1).  No in-place hazard (C is in memory).
+        for x in range(5):
+            emit(ops,"LD",  "RSP", OFF(DSCR+(x+1)%5))   # C[x+1]
+            emit(ops,"ROL", "RSP", "RSP", 1)
+            emit(ops,"LD",  D_REG[x], OFF(DSCR+(x+4)%5)) # C[x-1]
+            emit(ops,"XOR", D_REG[x], D_REG[x], "RSP")   # D[x]
+        # theta-apply + rho + pi, IN PLACE, D read from REGISTERS (no per-lane LD!).
+        # save-temp = RSP (free after theta-D). RCX stays = base (no rebuild).
+        for cyc in pi_cycles():
+            if len(cyc)==1:
+                i=cyc[0]
+                emit(ops,"XOR", REG[i], REG[i], D_REG[col(i)])
+                if RHO[i]: emit(ops,"ROL", REG[i], REG[i], RHO[i])
+                continue
+            L=len(cyc)
+            emit(ops,"MOV", "RSP", REG[cyc[L-1]])
+            for k in range(L-1,0,-1):
+                dst,src=cyc[k],cyc[k-1]
+                emit(ops,"XOR", REG[dst], REG[src], D_REG[col(src)])
+                if RHO[src]: emit(ops,"ROL", REG[dst], REG[dst], RHO[src])
+            src=cyc[L-1]
+            emit(ops,"XOR", REG[cyc[0]], "RSP", D_REG[col(src)])
+            if RHO[src]: emit(ops,"ROL", REG[cyc[0]], REG[cyc[0]], RHO[src])
+    else:
+      # theta parity C -> C_REG
+      for x in range(5):
         emit(ops,"XOR", C_REG[x], REG[x], REG[x+5])
         emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+10])
         emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+15])
         emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+20])
-    # theta D -> buffer 25..29 ; borrow REG[24], save/restore via dedicated scratch lane
-    emit(ops,"ST", BORROW, OFF(BORROWSAVE))            # save lane 24 (this round's value)
-    for x in range(5):
+      emit(ops,"ST", BORROW, OFF(BORROWSAVE))
+      for x in range(5):
         emit(ops,"ROL", BORROW, C_REG[(x+1)%5], 1)
         emit(ops,"XOR", BORROW, C_REG[(x+4)%5], BORROW)
         emit(ops,"ST",  BORROW, OFF(DSCR+x))
-    emit(ops,"LD", BORROW, OFF(BORROWSAVE))            # restore lane 24
-    # theta-apply + rho + pi, in place, backward pi-cycles. D loaded per-lane from
-    # buffer. NOTE: preloading D into registers does NOT help (measured: per-lane
-    # 2056, preload+base-rebuild 2166, preload+save-spill 2074). The D-loads
-    # overlap within the iteration; the round is bound by the ALU dependency chain,
-    # not D memory. Per-lane is the best (RCX stays base, max load parallelism).
-    for cyc in pi_cycles():
+      emit(ops,"LD", BORROW, OFF(BORROWSAVE))
+      for cyc in pi_cycles():
         if len(cyc)==1:
             i=cyc[0]
             emit(ops,"LD", T_DTMP, OFF(DSCR+col(i)))
@@ -160,7 +201,21 @@ def gen_body(ops):
         emit(ops,"XOR", REG[cyc[0]], T_SAVE, T_DTMP)
         if RHO[src]: emit(ops,"ROL", REG[cyc[0]], REG[cyc[0]], RHO[src])
     # chi per row in place
-    for y in range(5):
+    # chi per row. With D_IN_REGS the 5 D regs are dead now -> use them as 5
+    # scratch to compute ALL 5 NOTANDs of the row FIRST (B values still intact),
+    # then 5 in-place XORs. This eliminates the 2 save-MOVs/row (10 MOVs/round)
+    # that native is forced into by register starvation. Native CAN'T do this
+    # (no spare regs); we have the headroom because state is fully register-resident.
+    if D_IN_REGS:
+        SCR5 = ["RAX","TMP12","TMP13","TMP14","TMP15"]
+        for y in range(5):
+            r=[5*y+x for x in range(5)]
+            for x in range(5):
+                emit(ops,"NOTAND", SCR5[x], REG[r[(x+1)%5]], REG[r[(x+2)%5]])
+            for x in range(5):
+                emit(ops,"XOR", REG[r[x]], REG[r[x]], SCR5[x])
+    else:
+      for y in range(5):
         r=[5*y+x for x in range(5)]
         emit(ops,"MOV", T_SAVE, REG[r[0]])
         emit(ops,"MOV", T_DTMP, REG[r[1]])
@@ -169,30 +224,32 @@ def gen_body(ops):
         emit(ops,"NOTAND", T_N, REG[r[3]], REG[r[4]]); emit(ops,"XOR", REG[r[2]], REG[r[2]], T_N)
         emit(ops,"NOTAND", T_N, REG[r[4]], T_SAVE);    emit(ops,"XOR", REG[r[3]], REG[r[3]], T_N)
         emit(ops,"NOTAND", T_N, T_SAVE, T_DTMP);       emit(ops,"XOR", REG[r[4]], REG[r[4]], T_N)
-    # iota: RC[counter] via index addressing. counter in buf[COUNTER].
-    #   TMP15=counter; TMP14=counter<<3 + (RCTAB-BASE_LANE)*8; RC=mem[base+TMP14]; lane0^=RC
-    emit(ops,"LD",   "TMP15", OFF(COUNTER))
-    emit(ops,"SHLI", "TMP14", "TMP15", 3)
-    emit(ops,"ADDI", "TMP14", "TMP14", (RCTAB-BASE_LANE)*8)
-    emit(ops,"LDX",  "TMP13", "TMP14")
+    # iota: RC[counter] via index addressing. The counter lane holds the RC
+    # BYTE-INDEX directly (init = (RCTAB-BASE_LANE)*8, += 8 per round), so iota is
+    # just LD idx; LDX RC; XOR — no SHL/ADD on the iota->RC->lane0 critical path.
+    emit(ops,"LD",   "TMP14", OFF(COUNTER))     # idx (bytes)
+    emit(ops,"LDX",  "TMP13", "TMP14")          # RC = mem[base+idx]
     emit(ops,"XOR",  REG[0], REG[0], "TMP13")
 
+RC_END_IDX = (RCTAB-BASE_LANE)*8 + 24*8         # byte-index just past RC[23]
 def gen_loopctrl(ops):
-    """counter++ ; store ; {XOR sets ZF, UJMPCC CONDNZ -> loop_top}. TMP15=counter."""
-    emit(ops,"ADDI", "TMP15", "TMP15", 1)
-    emit(ops,"ST",   "TMP15", OFF(COUNTER))
+    """idx += 8 ; store ; {XOR sets ZF, UJMPCC CONDNZ -> loop_top}. TMP14=idx."""
+    emit(ops,"ADDI", "TMP14", "TMP14", 8)
+    emit(ops,"ST",   "TMP14", OFF(COUNTER))
     # the XOR + UJMPCC must be the SAME triad -> emitted as a forced triad later.
-    emit(ops,"LOOPTEST", "TMP12", "TMP15", 24)   # XOR TMP12=TMP15^24 ; UJMPCC CONDNZ(TMP12,loop_top)
+    emit(ops,"LOOPTEST", "TMP12", "TMP14", RC_END_IDX)  # XOR TMP12=idx^END ; UJMPCC CONDNZ -> loop_top
 
 def gen_epilogue(ops):
     for i in range(25):
         emit(ops,"ST", REG[i], OFF(i))
+    if D_IN_REGS:
+        emit(ops,"LD", "RSP", OFF(RSPSAVE))   # restore stack pointer before returning
 
 # ---- simulator (models full looped execution + signed/index addressing) ----
 def simulate_perm(init_state):
-    rf={}; buf=[0]*BUFLEN
+    rf={"RSP":0}; buf=[0]*BUFLEN
     buf[0:25]=list(init_state)
-    buf[COUNTER]=0
+    buf[COUNTER]=(RCTAB-BASE_LANE)*8       # RC byte-index init (idx of RC[0])
     for r in range(24): buf[RCTAB+r]=RC[r]
     def at(off):
         assert -128<=off<=127, off
