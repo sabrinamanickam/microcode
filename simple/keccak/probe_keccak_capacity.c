@@ -35,9 +35,9 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <setjmp.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define REGION_START 0x7c00
 #define HOOK_ADDR    0x0cd8    /* vmwrite — same hook the rest of the project uses */

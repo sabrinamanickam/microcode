@@ -22,9 +22,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #include "keccak_perm.h"   /* KECCAK_PERM_TRIADS, BUFLEN, BASE_LANE, COUNTER/RCTAB lanes */
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];

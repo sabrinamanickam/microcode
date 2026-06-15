@@ -21,9 +21,9 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define SEG 0x18
 #define REGION 0x7c00

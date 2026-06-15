@@ -24,9 +24,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 /* keccak_round.h provides KECCAK_ROUND_TRIADS / KECCAK_BUFLEN / KECCAK_BASE_LANE.
  * Buffer: 25 state lanes + 5 D-scratch lanes. Base RCX is CENTERED at lane

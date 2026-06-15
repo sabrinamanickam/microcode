@@ -20,9 +20,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #include "keccak_scround.h"   /* KECCAK_SC_TRIADS, SC_BUFLEN, SC_BASE_LANE, SC_RC_LANE */
 static uint64_t g_keccak_buf[KECCAK_SC_BUFLEN];

@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@media print {
+  body { margin: 0; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; }
+}
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  max-width: 800px;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+  color: #1a1a1a;
+  line-height: 1.7;
+  font-size: 15px;
+  background: #fff;
+}
+h1 { font-size: 24px; font-weight: 700; margin: 0 0 0.4rem; border-bottom: 3px solid #534AB7; padding-bottom: 10px; }
+h2 { font-size: 19px; font-weight: 600; color: #534AB7; margin: 2.2rem 0 0.6rem; }
+h3 { font-size: 16px; font-weight: 600; color: #333; margin: 1.5rem 0 0.4rem; }
+p { margin: 0.55rem 0; }
+ul, ol { margin: 0.5rem 0; padding-left: 1.4rem; }
+li { margin: 0.3rem 0; }
+code { background: #f3f2fa; padding: 1px 5px; border-radius: 3px; font-size: 13.5px; font-family: 'Consolas', 'Fira Code', monospace; }
+.subtitle { color: #666; font-size: 14px; margin-bottom: 1.5rem; }
+.equation-block {
+  background: #f8f7fd;
+  border-left: 3px solid #534AB7;
+  padding: 12px 18px;
+  margin: 1rem 0;
+  font-family: 'Consolas', monospace;
+  font-size: 13.5px;
+  line-height: 2.0;
+  overflow-x: auto;
+}
+.equation-block .label { color: #993C1D; font-weight: 600; }
+.diagram-box {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 1.2rem 0;
+  background: #fafafa;
+}
+.diagram-box svg { width: 100%; height: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 13.5px; }
+th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+th { background: #f3f2fa; font-weight: 600; }
+td.c, th.c { text-align: center; }
+.note {
+  background: #f0f9f4;
+  border: 1px solid #5DCAA5;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 1rem 0;
+}
+.warn {
+  background: #FAEEDA;
+  border: 1px solid #E0B872;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 1rem 0;
+}
+.term { font-weight: 600; color: #3C3489; }
+.btn-print {
+  position: fixed; top: 16px; right: 16px; z-index: 999;
+  background: #534AB7; color: #fff; border: none; padding: 10px 20px;
+  border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500;
+}
+.btn-print:hover { background: #3C3489; }
+.toc { background:#f8f7fd; border:1px solid #CECBF6; border-radius:8px; padding: 12px 20px; font-size:14px;}
+.toc a { color:#534AB7; text-decoration:none; }
+.toc a:hover { text-decoration: underline; }
+.muted { color:#666; font-size:13px; }
+sub, sup { font-size: 75%; }
+</style>
+</head>
+<body>
+
+<button class="btn-print no-print" onclick="window.print()">Save as PDF</button>
+
+<h1>Keccak &amp; SHA-3 — From Zero to the Full Math</h1>
+<p class="subtitle">What the names mean, where it's used, and the complete arithmetic of Keccak‑f[1600] — explained in plain words, with every equation kept in view.</p>
+
+<div class="toc no-print">
+<strong>Contents</strong>
+<ol>
+<li><a href="#names">Untangling the names: Keccak, SHA-3, SHAKE, FIPS 202</a></li>
+<li><a href="#where">Where it is used</a></li>
+<li><a href="#sponge">The sponge: how a hash gets built from a permutation</a></li>
+<li><a href="#state">The state: 1600 bits as a 5×5×64 cube</a></li>
+<li><a href="#perm">The permutation Keccak-f[1600]: 24 rounds</a></li>
+<li><a href="#theta">Step 1 — θ (theta): column mixing</a></li>
+<li><a href="#rho">Step 2 — ρ (rho): lane rotation</a></li>
+<li><a href="#pi">Step 3 — π (pi): lane shuffle</a></li>
+<li><a href="#chi">Step 4 — χ (chi): the nonlinear step</a></li>
+<li><a href="#iota">Step 5 — ι (iota): break symmetry</a></li>
+<li><a href="#padding">Padding &amp; domain separation</a></li>
+<li><a href="#params">Parameter table for the SHA-3 family</a></li>
+<li><a href="#together">Putting it all together</a></li>
+</ol>
+</div>
+
+<h2 id="names">1. Untangling the names</h2>
+
+<p>These four words get used interchangeably in conversation, but they are not the same thing. Here is the clean mental model:</p>
+
+<table>
+<tr><th>Name</th><th>What it actually is</th></tr>
+<tr><td><span class="term">Keccak</span></td><td>The original algorithm (a family), designed by Bertoni, Daemen, Peeters and Van Assche. It defines a permutation and a way to turn that permutation into a hash. This is the <em>invention</em>.</td></tr>
+<tr><td><span class="term">SHA-3</span></td><td>The <em>standard</em>. In 2012 Keccak won NIST's public competition to choose the next hash standard; in 2015 NIST published it as SHA-3 in document <strong>FIPS 202</strong>. SHA-3 <em>is</em> Keccak, with a couple of small tweaks (mainly the padding — see §11).</td></tr>
+<tr><td><span class="term">Keccak-f[1600]</span></td><td>The core engine: a fixed, reversible scrambling function (a <em>permutation</em>) that shuffles a 1600-bit block. Everything in this guide is mostly about this. The "1600" is the block size in bits.</td></tr>
+<tr><td><span class="term">SHAKE</span></td><td>An "extendable-output function" (XOF) built from the same engine. A normal hash gives a fixed number of output bits (256, 512…). SHAKE lets you ask for <em>any</em> number of output bits — useful when you need a stream of pseudorandom bytes.</td></tr>
+</table>
+
+<div class="note">
+<strong>One-line summary:</strong> Keccak is the recipe, SHA-3 is the official version of that recipe, Keccak-f[1600] is the scrambling engine inside it, and SHAKE is the variable-length-output flavor.
+</div>
+
+<p>A historically important footnote: <strong>Keccak-256</strong> (the pre-standardization version, with the original padding) is what <strong>Ethereum</strong> uses everywhere. It is <em>not</em> byte-for-byte identical to NIST's SHA3-256, even though both come from the same engine. The only difference is a few bits of padding. This is a frequent source of confusion.</p>
+
+<h2 id="where">2. Where it is used</h2>
+
+<ul>
+<li><span class="term">General hashing.</span> SHA-3 is a backup/alternative to SHA-2. Its internal design is completely different from SHA-2, so a future break of one is unlikely to affect the other.</li>
+<li><span class="term">Post-quantum cryptography.</span> The new NIST standards built to resist quantum computers — ML-KEM (formerly Kyber), ML-DSA (Dilithium), SLH-DSA (SPHINCS+) — lean heavily on <strong>SHAKE128/256</strong> for hashing and for generating pseudorandom matrices and noise.</li>
+<li><span class="term">Blockchains.</span> Ethereum addresses, transaction hashes, and storage keys are Keccak-256.</li>
+<li><span class="term">Derived functions.</span> NIST SP 800-185 defines <strong>cSHAKE, KMAC</strong> (a message authentication code), <strong>TupleHash</strong> and <strong>ParallelHash</strong>, all on top of the same engine.</li>
+</ul>
+
+<div class="page-break"></div>
+
+<h2 id="sponge">3. The sponge construction</h2>
+
+<p>A hash function takes a message of any length and produces a short fixed digest. Keccak does this with a design called a <span class="term">sponge</span>. The metaphor is literal: you <strong>absorb</strong> the message into a fixed-size internal memory, then <strong>squeeze</strong> the digest back out.</p>
+
+<p>The internal memory is the <span class="term">state</span> — for Keccak-f[1600] that's <strong>b = 1600 bits</strong>. The state is split into two conceptual parts:</p>
+
+<div class="equation-block">
+b = r + c &nbsp;&nbsp;&nbsp;&nbsp;<span class="label">// b = total state, r = rate, c = capacity</span>
+1600 = r + c
+</div>
+
+<ul>
+<li>The <span class="term">rate r</span> is the part that touches the message — how many message bits you mix in per step. Bigger r = faster.</li>
+<li>The <span class="term">capacity c</span> is the secret reserve that the message never directly touches. It is what gives the construction its security. The security level is roughly <code>c / 2</code> bits.</li>
+</ul>
+
+<p>So there is a direct speed-vs-security trade: a fixed 1600-bit budget split between r and c. Each SHA-3 variant just picks a different split (see §12).</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <text x="150" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#085041">ABSORB</text>
+  <text x="560" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="#3C3489">SQUEEZE</text>
+
+  <!-- message blocks -->
+  <rect x="20" y="40" width="60" height="26" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.6"/>
+  <text x="50" y="58" text-anchor="middle" font-size="11" fill="#712B13">M₀ (r bits)</text>
+  <rect x="20" y="74" width="60" height="26" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.6"/>
+  <text x="50" y="92" text-anchor="middle" font-size="11" fill="#712B13">M₁ (r bits)</text>
+  <rect x="20" y="108" width="60" height="26" rx="4" fill="#FAECE7" stroke="#993C1D" stroke-width="0.6"/>
+  <text x="50" y="126" text-anchor="middle" font-size="11" fill="#712B13">M₂ (r bits)</text>
+
+  <!-- XOR nodes -->
+  <circle cx="150" cy="53" r="11" fill="#fff" stroke="#0F6E56"/><text x="150" y="58" text-anchor="middle" font-size="13" fill="#0F6E56">⊕</text>
+  <circle cx="150" cy="120" r="11" fill="#fff" stroke="#0F6E56"/><text x="150" y="125" text-anchor="middle" font-size="13" fill="#0F6E56">⊕</text>
+  <circle cx="150" cy="187" r="11" fill="#fff" stroke="#0F6E56"/><text x="150" y="192" text-anchor="middle" font-size="13" fill="#0F6E56">⊕</text>
+
+  <line x1="80" y1="53" x2="138" y2="53" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="80" y1="87" x2="120" y2="87" stroke="#888"/><line x1="120" y1="87" x2="120" y2="120"/><line x1="120" y1="120" x2="138" y2="120" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="80" y1="121" x2="110" y2="121" stroke="#888"/><line x1="110" y1="121" x2="110" y2="187"/><line x1="110" y1="187" x2="138" y2="187" stroke="#888" marker-end="url(#arr)"/>
+
+  <!-- f boxes -->
+  <rect x="200" y="40" width="56" height="160" rx="6" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="228" y="124" text-anchor="middle" font-size="15" font-weight="700" fill="#3C3489">f</text>
+  <rect x="320" y="40" width="56" height="160" rx="6" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="348" y="124" text-anchor="middle" font-size="15" font-weight="700" fill="#3C3489">f</text>
+  <rect x="440" y="40" width="56" height="160" rx="6" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="468" y="124" text-anchor="middle" font-size="15" font-weight="700" fill="#3C3489">f</text>
+  <rect x="560" y="40" width="56" height="160" rx="6" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="588" y="124" text-anchor="middle" font-size="15" font-weight="700" fill="#3C3489">f</text>
+
+  <!-- state line through -->
+  <line x1="161" y1="53" x2="200" y2="53" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="256" y1="53" x2="320" y2="53" stroke="#888"/>
+  <line x1="256" y1="120" x2="290" y2="120" stroke="#888"/><line x1="290" y1="120" x2="290" y2="53"/>
+  <line x1="376" y1="53" x2="440" y2="53" stroke="#888"/>
+  <line x1="376" y1="120" x2="410" y2="120" stroke="#888"/><line x1="410" y1="120" x2="410" y2="53"/>
+  <line x1="161" y1="120" x2="200" y2="120" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="161" y1="187" x2="200" y2="187" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="256" y1="187" x2="320" y2="187" stroke="#888"/>
+  <line x1="376" y1="187" x2="440" y2="187" stroke="#888"/>
+  <line x1="496" y1="53" x2="560" y2="53" stroke="#888" marker-end="url(#arr)"/>
+  <line x1="496" y1="120" x2="530" y2="120" stroke="#888"/><line x1="530" y1="120" x2="530" y2="53"/>
+  <line x1="496" y1="187" x2="560" y2="187" stroke="#888"/>
+
+  <!-- outputs -->
+  <line x1="616" y1="80" x2="700" y2="80" stroke="#888" marker-end="url(#arr)"/>
+  <rect x="700" y="67" width="50" height="26" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.6"/>
+  <text x="725" y="85" text-anchor="middle" font-size="11" fill="#3C3489">Z₀</text>
+  <line x1="616" y1="160" x2="700" y2="160" stroke="#888" marker-end="url(#arr)"/>
+  <rect x="700" y="147" width="50" height="26" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.6"/>
+  <text x="725" y="165" text-anchor="middle" font-size="11" fill="#3C3489">Z₁</text>
+
+  <text x="380" y="232" text-anchor="middle" font-size="12" fill="#666">Top r bits = rate (message goes in / digest comes out) &nbsp;·&nbsp; bottom c bits = capacity (never touched directly)</text>
+  <text x="380" y="252" text-anchor="middle" font-size="12" fill="#666">f = the Keccak-f[1600] permutation, applied between every block</text>
+
+  <!-- rate/capacity bracket -->
+  <line x1="660" y1="44" x2="660" y2="100" stroke="#0F6E56" stroke-width="1.5"/>
+  <text x="668" y="74" font-size="11" fill="#0F6E56">r</text>
+  <line x1="660" y1="104" x2="660" y2="196" stroke="#888" stroke-width="1.5"/>
+  <text x="668" y="152" font-size="11" fill="#888">c</text>
+</svg>
+</div>
+
+<p>Mechanically:</p>
+<ol>
+<li><span class="term">Absorb.</span> Cut the (padded) message into r-bit blocks. For each block: XOR it into the top r bits of the state, then run the permutation <code>f</code> on the whole 1600-bit state.</li>
+<li><span class="term">Squeeze.</span> Read off the top r bits as output. If you need more, run <code>f</code> again and read another r bits. Repeat until you have enough, then truncate to the requested length.</li>
+</ol>
+
+<p>For a fixed hash like SHA3-256 you only ever read once and truncate. For SHAKE you keep squeezing as long as you like — that's the "extendable output."</p>
+
+<div class="page-break"></div>
+
+<h2 id="state">4. The state: 1600 bits as a 5×5×64 cube</h2>
+
+<p>Inside the permutation, the 1600 bits are <em>not</em> treated as a flat array. They are arranged as a 3-D block of bits with coordinates <code>(x, y, z)</code>:</p>
+
+<div class="equation-block">
+A[x][y][z], &nbsp; with &nbsp; x ∈ {0,1,2,3,4}, &nbsp; y ∈ {0,1,2,3,4}, &nbsp; z ∈ {0,…,63}
+total bits = 5 × 5 × 64 = 1600
+</div>
+
+<p>The <code>z</code> dimension is 64 because <strong>w = 64</strong> is the <span class="term">lane width</span> (one machine word). In general <code>w = 2<sup>ℓ</sup></code>; for the 1600-bit version <code>ℓ = 6</code>, so <code>w = 64</code>. Smaller toy versions of Keccak exist (w = 1, 2, 4, … 32) but 1600 is the one used in practice.</p>
+
+<p>Each named sub-piece of the cube has a term you'll see constantly in the spec:</p>
+
+<table>
+<tr><th>Name</th><th>What is fixed</th><th>Size</th></tr>
+<tr><td><span class="term">Lane</span></td><td>fix x and y, vary z</td><td>64 bits (a full word)</td></tr>
+<tr><td><span class="term">Row</span></td><td>fix y and z, vary x</td><td>5 bits</td></tr>
+<tr><td><span class="term">Column</span></td><td>fix x and z, vary y</td><td>5 bits</td></tr>
+<tr><td><span class="term">Slice</span></td><td>fix z, vary x and y</td><td>25 bits (a 5×5 square)</td></tr>
+<tr><td><span class="term">Sheet</span></td><td>fix x, vary y and z</td><td>320 bits</td></tr>
+<tr><td><span class="term">Plane</span></td><td>fix y, vary x and z</td><td>320 bits</td></tr>
+</table>
+
+<div class="diagram-box">
+<svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+  <text x="350" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#3C3489">One slice (fixed z) = a 5×5 grid of bits; stacking 64 slices gives the full state</text>
+
+  <!-- 5x5 grid -->
+  <g>
+  <!-- draw grid -->
+  <g stroke="#534AB7" stroke-width="0.6" fill="#EEEDFE">
+    <!-- rows y=0..4 bottom to top, just draw squares -->
+  </g>
+  </g>
+
+  <!-- coordinate frame -->
+  <g transform="translate(150,50)">
+    <!-- 5 columns (x) x 5 rows (y) -->
+    <g>
+      <!-- generate squares via explicit rects -->
+      <!-- y=0 (bottom) ... we'll just place 25 squares -->
+    </g>
+    <!-- We'll manually draw a 5x5 grid -->
+    <g fill="#EEEDFE" stroke="#534AB7" stroke-width="0.7">
+      <rect x="0"   y="0"   width="40" height="40"/>
+      <rect x="40"  y="0"   width="40" height="40"/>
+      <rect x="80"  y="0"   width="40" height="40"/>
+      <rect x="120" y="0"   width="40" height="40"/>
+      <rect x="160" y="0"   width="40" height="40"/>
+
+      <rect x="0"   y="40"  width="40" height="40"/>
+      <rect x="40"  y="40"  width="40" height="40"/>
+      <rect x="80"  y="40"  width="40" height="40"/>
+      <rect x="120" y="40"  width="40" height="40"/>
+      <rect x="160" y="40"  width="40" height="40"/>
+
+      <rect x="0"   y="80"  width="40" height="40"/>
+      <rect x="40"  y="80"  width="40" height="40"/>
+      <rect x="80"  y="80"  width="40" height="40"/>
+      <rect x="120" y="80"  width="40" height="40"/>
+      <rect x="160" y="80"  width="40" height="40"/>
+
+      <rect x="0"   y="120" width="40" height="40"/>
+      <rect x="40"  y="120" width="40" height="40"/>
+      <rect x="80"  y="120" width="40" height="40"/>
+      <rect x="120" y="120" width="40" height="40"/>
+      <rect x="160" y="120" width="40" height="40"/>
+
+      <rect x="0"   y="160" width="40" height="40"/>
+      <rect x="40"  y="160" width="40" height="40"/>
+      <rect x="80"  y="160" width="40" height="40"/>
+      <rect x="120" y="160" width="40" height="40"/>
+      <rect x="160" y="160" width="40" height="40"/>
+    </g>
+
+    <!-- highlight a column (x=2) -->
+    <rect x="80" y="0" width="40" height="200" fill="none" stroke="#993C1D" stroke-width="2.4"/>
+    <!-- highlight a row (y bottom, index 4 visual) -->
+    <rect x="0" y="160" width="200" height="40" fill="none" stroke="#0F6E56" stroke-width="2.4"/>
+
+    <!-- axis labels -->
+    <text x="100" y="-10" text-anchor="middle" font-size="11" fill="#993C1D" font-weight="600">column (vary y)</text>
+    <text x="-10" y="185" text-anchor="end" font-size="11" fill="#0F6E56" font-weight="600">row</text>
+    <text x="-10" y="200" text-anchor="end" font-size="11" fill="#0F6E56" font-weight="600">(vary x)</text>
+
+    <text x="20" y="225" text-anchor="middle" font-size="11" fill="#666">x=0</text>
+    <text x="60" y="225" text-anchor="middle" font-size="11" fill="#666">x=1</text>
+    <text x="100" y="225" text-anchor="middle" font-size="11" fill="#666">x=2</text>
+    <text x="140" y="225" text-anchor="middle" font-size="11" fill="#666">x=3</text>
+    <text x="180" y="225" text-anchor="middle" font-size="11" fill="#666">x=4</text>
+  </g>
+
+  <!-- lane illustration -->
+  <g transform="translate(440,55)">
+    <text x="90" y="-8" text-anchor="middle" font-size="11" fill="#085041" font-weight="600">a single lane = 64 bits deep (the z axis)</text>
+    <rect x="0" y="0" width="180" height="22" rx="3" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.7"/>
+    <text x="90" y="15" text-anchor="middle" font-size="10" fill="#085041">z = 0 1 2 … 63 (one 64-bit word)</text>
+
+    <text x="90" y="55" text-anchor="middle" font-size="11" fill="#666">There are 25 lanes (one per (x,y)).</text>
+    <text x="90" y="72" text-anchor="middle" font-size="11" fill="#666">Rotating a lane = a rotate of its 64-bit word.</text>
+
+    <rect x="0" y="95" width="180" height="92" rx="6" fill="#fafafa" stroke="#ccc"/>
+    <text x="90" y="115" text-anchor="middle" font-size="10.5" fill="#333" font-weight="600">Index arithmetic rules</text>
+    <text x="90" y="135" text-anchor="middle" font-size="10.5" fill="#444">x, y always taken mod 5</text>
+    <text x="90" y="153" text-anchor="middle" font-size="10.5" fill="#444">z always taken mod 64</text>
+    <text x="90" y="173" text-anchor="middle" font-size="10.5" fill="#444">so the cube "wraps around"</text>
+  </g>
+</svg>
+</div>
+
+<div class="warn">
+<strong>Keep this in mind for every equation below:</strong> the <code>x</code> and <code>y</code> indices are always reduced <strong>mod 5</strong>, and the bit index <code>z</code> is always reduced <strong>mod 64</strong>. So <code>x+1</code> when <code>x=4</code> means <code>0</code>, and a "rotate" wraps bits around the 64-bit lane.
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="perm">5. The permutation Keccak-f[1600]</h2>
+
+<p>The engine <code>f</code> is just one function applied over and over. It runs for <span class="term">24 rounds</span>. The round count comes from the formula:</p>
+
+<div class="equation-block">
+n<sub>r</sub> = 12 + 2ℓ &nbsp;&nbsp; with ℓ = 6 &nbsp; → &nbsp; n<sub>r</sub> = 12 + 12 = <strong>24 rounds</strong>
+</div>
+
+<p>Each round is the same five steps, applied in this fixed order:</p>
+
+<div class="equation-block">
+Round(A, RC) = ι ∘ χ ∘ π ∘ ρ ∘ θ (A) &nbsp;&nbsp;<span class="label">// read right-to-left: θ first, ι last</span>
+</div>
+
+<p>Each Greek letter is one transformation of the whole 1600-bit state. Their jobs, in one line each:</p>
+
+<ul>
+<li><strong>θ (theta)</strong> — mixes bits between columns, so each bit affects many others (diffusion).</li>
+<li><strong>ρ (rho)</strong> — rotates each lane by a fixed amount (spreads bits along z).</li>
+<li><strong>π (pi)</strong> — moves whole lanes to new positions (spreads bits across the slice).</li>
+<li><strong>χ (chi)</strong> — the only <em>nonlinear</em> step; it's what makes the function hard to invert algebraically.</li>
+<li><strong>ι (iota)</strong> — XORs in a round constant to break the symmetry that the other four steps would otherwise preserve.</li>
+</ul>
+
+<p>θ, ρ, π and ι are all <em>linear</em> over the bits (XOR, rotate, move). χ is the single source of nonlinearity. That separation is deliberate and is the heart of the design.</p>
+
+<h2 id="theta">6. Step 1 — θ (theta): column mixing</h2>
+
+<p><strong>Plain idea:</strong> For each of the 5 columns of bits (a column has 5 bits along y), compute its parity — the XOR of all bits in it. Then add (XOR) into every bit a combination of two neighboring columns' parities. This makes each bit depend on bits in adjacent sheets, so a single bit flip quickly ripples outward.</p>
+
+<p><strong>The equations.</strong> First compute the parity of each column. <code>C[x]</code> is a 64-bit lane (one parity bit per z):</p>
+
+<div class="equation-block">
+C[x] = A[x][0] ⊕ A[x][1] ⊕ A[x][2] ⊕ A[x][3] ⊕ A[x][4]
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="label">// for x = 0..4 ; this XORs the 5 lanes in sheet x</span>
+</div>
+
+<p>Then build the "to be added" lane <code>D[x]</code>. It takes the parity of the column to the left, and the parity of the column to the right rotated up by one bit:</p>
+
+<div class="equation-block">
+D[x] = C[x−1] ⊕ ROT( C[x+1], 1 )
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="label">// x−1, x+1 mod 5 ; ROT(·,1) = rotate the 64-bit lane left by 1</span>
+</div>
+
+<p>Finally XOR <code>D[x]</code> into every lane of sheet x:</p>
+
+<div class="equation-block">
+A′[x][y] = A[x][y] ⊕ D[x] &nbsp;&nbsp;<span class="label">// for all y = 0..4</span>
+</div>
+
+<p>Per bit, written fully:</p>
+
+<div class="equation-block">
+A′[x][y][z] = A[x][y][z]
+&nbsp;&nbsp;⊕ ( C[x−1][z] )
+&nbsp;&nbsp;⊕ ( C[x+1][z−1] )
+</div>
+
+<div class="diagram-box">
+<svg viewBox="0 0 680 170" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="18" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3C3489">θ: each sheet x gets the parity of its left neighbor and the (rotated) parity of its right neighbor</text>
+
+  <g font-size="11">
+  <rect x="60"  y="50" width="90" height="60" rx="6" fill="#FAECE7" stroke="#993C1D"/>
+  <text x="105" y="76" text-anchor="middle" fill="#712B13" font-weight="600">C[x−1]</text>
+  <text x="105" y="95" text-anchor="middle" fill="#712B13">left parity</text>
+
+  <rect x="290" y="50" width="100" height="60" rx="6" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="340" y="76" text-anchor="middle" fill="#3C3489" font-weight="600">sheet x</text>
+  <text x="340" y="95" text-anchor="middle" fill="#3C3489">(5 lanes)</text>
+
+  <rect x="530" y="50" width="90" height="60" rx="6" fill="#FAECE7" stroke="#993C1D"/>
+  <text x="575" y="72" text-anchor="middle" fill="#712B13" font-weight="600">C[x+1]</text>
+  <text x="575" y="90" text-anchor="middle" fill="#712B13">right parity</text>
+  <text x="575" y="105" text-anchor="middle" fill="#712B13">rotated ≪1</text>
+
+  <line x1="150" y1="80" x2="288" y2="80" stroke="#888" stroke-width="1.4"/>
+  <text x="218" y="72" text-anchor="middle" fill="#0F6E56" font-weight="700">⊕</text>
+  <line x1="528" y1="80" x2="392" y2="80" stroke="#888" stroke-width="1.4"/>
+  <text x="462" y="72" text-anchor="middle" fill="#0F6E56" font-weight="700">⊕</text>
+  </g>
+  <text x="340" y="145" text-anchor="middle" font-size="11" fill="#666">The rotate-by-1 on the right neighbor is what stops θ from being undone by a simple column trick.</text>
+</svg>
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="rho">7. Step 2 — ρ (rho): lane rotation</h2>
+
+<p><strong>Plain idea:</strong> Take each of the 25 lanes and rotate its 64 bits by a fixed, per-lane offset. This is the step that mixes bits <em>along</em> the z-axis (within a word). Lane (0,0) is left alone (offset 0).</p>
+
+<div class="equation-block">
+A′[x][y][z] = A[x][y][ (z − r[x][y]) mod 64 ]
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="label">// rotate the lane (x,y) by its offset r[x][y]</span>
+</div>
+
+<p><strong>Where the offsets come from.</strong> They aren't arbitrary — they're generated by walking through the lanes in a fixed pattern and using triangular numbers:</p>
+
+<div class="equation-block">
+offset for the t-th lane = ( (t+1)(t+2) / 2 ) mod 64, &nbsp; t = 0..23
+starting at (x,y) = (1,0), then (x,y) → ( y, (2x+3y) mod 5 )
+</div>
+
+<p>That procedure produces this fixed table (rows = x, columns = y):</p>
+
+<table>
+<tr><th></th><th class="c">y=0</th><th class="c">y=1</th><th class="c">y=2</th><th class="c">y=3</th><th class="c">y=4</th></tr>
+<tr><th>x=0</th><td class="c">0</td><td class="c">36</td><td class="c">3</td><td class="c">41</td><td class="c">18</td></tr>
+<tr><th>x=1</th><td class="c">1</td><td class="c">44</td><td class="c">10</td><td class="c">45</td><td class="c">2</td></tr>
+<tr><th>x=2</th><td class="c">62</td><td class="c">6</td><td class="c">43</td><td class="c">15</td><td class="c">61</td></tr>
+<tr><th>x=3</th><td class="c">28</td><td class="c">55</td><td class="c">25</td><td class="c">21</td><td class="c">56</td></tr>
+<tr><th>x=4</th><td class="c">27</td><td class="c">20</td><td class="c">39</td><td class="c">8</td><td class="c">14</td></tr>
+</table>
+
+<p class="muted">Example: lane (2,3) gets rotated by 15 bits; lane (0,0) stays put.</p>
+
+<h2 id="pi">8. Step 3 — π (pi): lane shuffle</h2>
+
+<p><strong>Plain idea:</strong> Now move entire lanes to new <code>(x,y)</code> positions. ρ moved bits <em>within</em> lanes; π moves the lanes <em>around the slice</em>. The bit values are untouched — only their (x,y) addresses change.</p>
+
+<div class="equation-block">
+A′[x][y][z] = A[ (x + 3y) mod 5 ][ x ][ z ]
+</div>
+
+<p>Equivalently, stated as "where does the lane at <code>(x,y)</code> go": the lane originally at <code>(x,y)</code> lands at position <code>(y, 2x+3y mod 5)</code>. Both phrasings describe the same permutation of the 25 lanes; the first (the one above, the FIPS 202 form) is the one you implement.</p>
+
+<div class="note">
+ρ and π together are sometimes thought of as one "ρπ" move: rotate each lane, then relocate it. After this pair, bits have been thoroughly spread in all three dimensions, but everything so far has been purely <em>linear</em> (just XORs and rearrangements). The next step adds the nonlinearity.
+</div>
+
+<h2 id="chi">9. Step 4 — χ (chi): the nonlinear step</h2>
+
+<p><strong>Plain idea:</strong> This is the only step that uses AND, not just XOR — and AND is what makes the function genuinely hard to invert with algebra. χ works on each <strong>row</strong> (5 bits across the x-direction) independently. Each output bit is its own value, XORed with the AND of its two neighbors to the "right" (one of them inverted).</p>
+
+<div class="equation-block">
+A′[x][y][z] = A[x][y][z]
+&nbsp;&nbsp;⊕ ( ( NOT A[x+1][y][z] ) AND A[x+2][y][z] )
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="label">// x indices mod 5 ; done for every (y,z)</span>
+</div>
+
+<p>In words: "keep my bit, but flip it whenever the next bit is 0 and the bit after that is 1." Because of the AND, you cannot peel this apart with linear algebra — that nonlinearity is the cryptographic muscle of the whole round.</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 680 150" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="18" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3C3489">χ operates on a 5-bit row; each bit uses its two right-hand neighbors</text>
+  <g font-size="12">
+    <rect x="60"  y="50" width="90" height="40" rx="5" fill="#EEEDFE" stroke="#534AB7"/><text x="105" y="75" text-anchor="middle" fill="#3C3489">A[x]</text>
+    <rect x="170" y="50" width="90" height="40" rx="5" fill="#FAECE7" stroke="#993C1D"/><text x="215" y="75" text-anchor="middle" fill="#712B13">A[x+1]</text>
+    <rect x="280" y="50" width="90" height="40" rx="5" fill="#E1F5EE" stroke="#0F6E56"/><text x="325" y="75" text-anchor="middle" fill="#085041">A[x+2]</text>
+  </g>
+  <text x="430" y="74" font-size="13" fill="#444">A′[x] = A[x] ⊕ ( <tspan fill="#993C1D">¬A[x+1]</tspan> ∧ <tspan fill="#085041">A[x+2]</tspan> )</text>
+  <text x="340" y="128" text-anchor="middle" font-size="11" fill="#666">Only AND (∧) appears here — the sole nonlinear operation in the entire algorithm.</text>
+</svg>
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="iota">10. Step 5 — ι (iota): break the symmetry</h2>
+
+<p><strong>Plain idea:</strong> The first four steps treat all the slices and lanes very symmetrically. That symmetry, if left alone, would create weaknesses (the rounds would all "look the same" and certain structured inputs would stay structured). ι fixes this by XORing a <em>different constant</em> into a single lane — lane (0,0) — on each of the 24 rounds.</p>
+
+<div class="equation-block">
+A′[0][0] = A[0][0] ⊕ RC[i] &nbsp;&nbsp;<span class="label">// only lane (0,0) changes; i = round number 0..23</span>
+</div>
+
+<p>The 24 round constants <code>RC[i]</code> are 64-bit values produced by a small LFSR (a linear-feedback shift register). They are fully fixed and public:</p>
+
+<table>
+<tr><th class="c">i</th><th>RC[i]</th><th class="c">i</th><th>RC[i]</th></tr>
+<tr><td class="c">0</td><td><code>0x0000000000000001</code></td><td class="c">12</td><td><code>0x000000008000808B</code></td></tr>
+<tr><td class="c">1</td><td><code>0x0000000000008082</code></td><td class="c">13</td><td><code>0x800000000000008B</code></td></tr>
+<tr><td class="c">2</td><td><code>0x800000000000808A</code></td><td class="c">14</td><td><code>0x8000000000008089</code></td></tr>
+<tr><td class="c">3</td><td><code>0x8000000080008000</code></td><td class="c">15</td><td><code>0x8000000000008003</code></td></tr>
+<tr><td class="c">4</td><td><code>0x000000000000808B</code></td><td class="c">16</td><td><code>0x8000000000008002</code></td></tr>
+<tr><td class="c">5</td><td><code>0x0000000080000001</code></td><td class="c">17</td><td><code>0x8000000000000080</code></td></tr>
+<tr><td class="c">6</td><td><code>0x8000000080008081</code></td><td class="c">18</td><td><code>0x000000000000800A</code></td></tr>
+<tr><td class="c">7</td><td><code>0x8000000000008009</code></td><td class="c">19</td><td><code>0x800000008000000A</code></td></tr>
+<tr><td class="c">8</td><td><code>0x000000000000008A</code></td><td class="c">20</td><td><code>0x8000000080008081</code></td></tr>
+<tr><td class="c">9</td><td><code>0x0000000000000088</code></td><td class="c">21</td><td><code>0x8000000000008080</code></td></tr>
+<tr><td class="c">10</td><td><code>0x0000000080008009</code></td><td class="c">22</td><td><code>0x0000000080000001</code></td></tr>
+<tr><td class="c">11</td><td><code>0x000000008000000A</code></td><td class="c">23</td><td><code>0x8000000080008008</code></td></tr>
+</table>
+
+<h2 id="padding">11. Padding &amp; domain separation</h2>
+
+<p>Before absorbing, the message must be stretched to an exact multiple of r bits. Keccak uses <span class="term">multi-rate padding</span>, written <code>pad10*1</code>: append a <code>1</code>, then as many <code>0</code>s as needed, then a final <code>1</code>. The two end-<code>1</code>s guarantee the padding is never ambiguous and that every block is "full."</p>
+
+<p>SHA-3 adds a few <span class="term">domain-separation</span> bits in front of that padding so that different functions built on the same engine can never collide:</p>
+
+<table>
+<tr><th>Function</th><th>Bits appended before pad10*1</th><th>Resulting first padding byte</th></tr>
+<tr><td>SHA3-224/256/384/512</td><td><code>01</code></td><td><code>0x06</code></td></tr>
+<tr><td>SHAKE128 / SHAKE256</td><td><code>1111</code></td><td><code>0x1F</code></td></tr>
+<tr><td>Original Keccak (e.g. Ethereum's Keccak-256)</td><td>none</td><td><code>0x01</code></td></tr>
+</table>
+
+<p>The closing <code>1</code> of the padding shows up as the high bit <code>0x80</code> of the last byte of the block. This single difference — appended bits <code>01</code> vs nothing — is the <em>entire</em> reason NIST's SHA3-256 and Ethereum's Keccak-256 give different digests for the same input.</p>
+
+<div class="page-break"></div>
+
+<h2 id="params">12. Parameter table for the SHA-3 family</h2>
+
+<p>Every variant uses the <em>same</em> 1600-bit engine. They differ only in how the 1600 bits split into rate vs capacity, how many bits they output, and the domain bits.</p>
+
+<table>
+<tr><th>Function</th><th class="c">Rate r</th><th class="c">Capacity c</th><th class="c">Output bits</th><th class="c">Security ≈ c/2</th></tr>
+<tr><td>SHA3-224</td><td class="c">1152</td><td class="c">448</td><td class="c">224</td><td class="c">112</td></tr>
+<tr><td>SHA3-256</td><td class="c">1088</td><td class="c">512</td><td class="c">256</td><td class="c">128</td></tr>
+<tr><td>SHA3-384</td><td class="c">832</td><td class="c">768</td><td class="c">384</td><td class="c">192</td></tr>
+<tr><td>SHA3-512</td><td class="c">576</td><td class="c">1024</td><td class="c">512</td><td class="c">256</td></tr>
+<tr><td>SHAKE128</td><td class="c">1344</td><td class="c">256</td><td class="c">any length</td><td class="c">128</td></tr>
+<tr><td>SHAKE256</td><td class="c">1088</td><td class="c">512</td><td class="c">any length</td><td class="c">256</td></tr>
+</table>
+
+<p>Notice the pattern: for the fixed-length hashes, <code>c = 2 × (output size)</code>, and as you ask for more security you spend more of the 1600-bit budget on capacity, leaving less rate, which is why SHA3-512 is slower than SHA3-256.</p>
+
+<h2 id="together">13. Putting it all together</h2>
+
+<p>Here is the whole thing, top to bottom, for (say) SHA3-256 hashing a message M:</p>
+
+<ol>
+<li><strong>Pad.</strong> Append the domain bits <code>01</code>, then <code>pad10*1</code>, so the total length is a multiple of r = 1088 bits.</li>
+<li><strong>Initialize.</strong> Set the 1600-bit state to all zeros.</li>
+<li><strong>Absorb.</strong> For each 1088-bit block: XOR it into the top 1088 bits of the state, then run Keccak-f[1600] — that is, run the 24 rounds, each round being
+<div class="equation-block" style="margin:0.6rem 0;">ι ∘ χ ∘ π ∘ ρ ∘ θ</div></li>
+<li><strong>Squeeze.</strong> Read the top 256 bits of the state. (Since 256 ≤ 1088, one squeeze is enough; no further permutation needed.) That's the digest.</li>
+</ol>
+
+<p>And each single round, in full, is just these five lines applied to the cube:</p>
+
+<div class="equation-block">
+<span class="label">θ:</span> C[x] = ⊕<sub>y</sub> A[x][y] ; &nbsp; D[x] = C[x−1] ⊕ ROT(C[x+1],1) ; &nbsp; A[x][y] ⊕= D[x]
+<span class="label">ρ:</span> A[x][y][z] = A[x][y][ z − r[x][y] ]
+<span class="label">π:</span> A[x][y] = A[ x+3y ][ x ]
+<span class="label">χ:</span> A[x][y] ⊕= ( ¬A[x+1][y] ) ∧ A[x+2][y]
+<span class="label">ι:</span> A[0][0] ⊕= RC[round]
+</div>
+
+<div class="note">
+<strong>The mental picture to walk away with.</strong> Keccak takes 1600 bits arranged as a little 5×5×64 cube, and 24 times in a row it: (θ) smears each bit across neighboring columns, (ρ) twists every word, (π) reshuffles the words around the square, (χ) does the one genuinely nonlinear mash on each row, and (ι) stamps in a unique constant so no two rounds are identical. Wrap that engine in the absorb-and-squeeze sponge, choose your rate/capacity split, and you have SHA-3.
+</div>
+
+<p class="muted" style="margin-top:2rem">Authoritative reference for exact bit-ordering and test vectors: NIST FIPS PUB 202, "SHA-3 Standard: Permutation-Based Hash and Extendable-Output Functions" (2015), and the Keccak team's reference at keccak.team.</p>
+
+</body>
+</html>

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@media print {
+  body { margin: 0; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; }
+}
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  max-width: 800px;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+  color: #1a1a1a;
+  line-height: 1.7;
+  font-size: 15px;
+  background: #fff;
+}
+h1 { font-size: 24px; font-weight: 700; margin: 0 0 0.4rem; border-bottom: 3px solid #534AB7; padding-bottom: 10px; }
+h2 { font-size: 19px; font-weight: 600; color: #534AB7; margin: 2.2rem 0 0.6rem; }
+h3 { font-size: 16px; font-weight: 600; color: #333; margin: 1.5rem 0 0.4rem; }
+p { margin: 0.55rem 0; }
+ul, ol { margin: 0.5rem 0; padding-left: 1.4rem; }
+li { margin: 0.3rem 0; }
+code { background: #f3f2fa; padding: 1px 5px; border-radius: 3px; font-size: 13.5px; font-family: 'Consolas', 'Fira Code', monospace; }
+.subtitle { color: #666; font-size: 14px; margin-bottom: 1.5rem; }
+.equation-block {
+  background: #f8f7fd;
+  border-left: 3px solid #534AB7;
+  padding: 12px 18px;
+  margin: 1rem 0;
+  font-family: 'Consolas', monospace;
+  font-size: 13.5px;
+  line-height: 2.0;
+  overflow-x: auto;
+}
+.equation-block .label { color: #993C1D; font-weight: 600; }
+.equation-block .reg { color: #0F6E56; font-weight: 600; }
+.diagram-box {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 1.2rem 0;
+  background: #fafafa;
+}
+.diagram-box svg { width: 100%; height: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 13.5px; }
+th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+th { background: #f3f2fa; font-weight: 600; }
+td.c, th.c { text-align: center; }
+.note {
+  background: #f0f9f4;
+  border: 1px solid #5DCAA5;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 1rem 0;
+}
+.warn {
+  background: #FAEEDA;
+  border: 1px solid #E0B872;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 1rem 0;
+}
+.term { font-weight: 600; color: #3C3489; }
+.btn-print {
+  position: fixed; top: 16px; right: 16px; z-index: 999;
+  background: #534AB7; color: #fff; border: none; padding: 10px 20px;
+  border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500;
+}
+.btn-print:hover { background: #3C3489; }
+.toc { background:#f8f7fd; border:1px solid #CECBF6; border-radius:8px; padding: 12px 20px; font-size:14px;}
+.toc a { color:#534AB7; text-decoration:none; }
+.toc a:hover { text-decoration: underline; }
+.muted { color:#666; font-size:13px; }
+.xref { color:#534AB7; text-decoration:none; font-weight:600; }
+.xref:hover { text-decoration: underline; }
+sub, sup { font-size: 75%; }
+</style>
+</head>
+<body>
+
+<button class="btn-print no-print" onclick="window.print()">Save as PDF</button>
+
+<h1>Keccak‑f[1600] in CPU Microcode — How Our Implementation Works</h1>
+<p class="subtitle">The companion guide explains the <em>math</em> (θ ρ π χ ι on a 5×5×64 cube). This explains how we encode that exact math directly as Intel Goldmont CPU <em>microcode</em>, run all 24 rounds inside one trapped instruction, and beat the fastest hand-tuned SUPERCOP assembly.</p>
+
+<div class="note">
+<strong>Read the math first.</strong> Every section below points back to the companion document <a class="xref" href="keccak-guide.html">keccak-guide.html</a> — e.g. <a class="xref" href="keccak-guide.html#theta">§6 θ</a>. We do not re-derive the algorithm; we show how each Greek-letter step becomes registers and micro-ops. Notation matches the guide: <code>A[x][y]</code> is a 64-bit lane, lane index <code>i = x + 5y</code>, <code>x,y</code> mod 5, <code>z</code> mod 64.
+</div>
+
+<div class="toc no-print">
+<strong>Contents</strong>
+<ol>
+<li><a href="#result">What we built &amp; the headline result</a></li>
+<li><a href="#mechanism">The mechanism: what "microcode" means here</a></li>
+<li><a href="#plan">The plan: the cube must live in registers</a></li>
+<li><a href="#piloop">The problem looping creates — and why π solves it</a></li>
+<li><a href="#budget">The register budget &amp; the 32nd register (RSP)</a></li>
+<li><a href="#theta">θ in microcode — balanced parity tree + D in registers</a></li>
+<li><a href="#rhopi">ρ and π in microcode — one in-place cycle walk</a></li>
+<li><a href="#chi">χ in microcode — the MOV-free nonlinear step</a></li>
+<li><a href="#iota">ι in microcode — byte-indexed round constants</a></li>
+<li><a href="#loop">The 24-round loop inside one vmwrite</a></li>
+<li><a href="#fast">How we made it fast</a></li>
+<li><a href="#measure">Measuring honestly: rdtsc, frequency, the real ratio</a></li>
+<li><a href="#together">The whole round, side by side</a></li>
+</ol>
+</div>
+
+<h2 id="result">1. What we built &amp; the headline result</h2>
+
+<p>The engine from the companion guide's <a class="xref" href="keccak-guide.html#perm">§5</a> — <span class="term">Keccak‑f[1600]</span>, 24 rounds of <code>ι ∘ χ ∘ π ∘ ρ ∘ θ</code> — is implemented here <em>not</em> as compiled C or even hand assembly, but as a patch loaded into the CPU's internal <span class="term">microcode RAM</span>. One ordinary-looking machine instruction is hijacked so that executing it runs the entire 24-round permutation in place.</p>
+
+<div class="note">
+<strong>Result (Intel Celeron N3350, Goldmont).</strong> The microcode permutation is correct — KAT-anchored at lane 0 = <code>0xF1258F7940E1DDE7</code> for the all-zero input — and <strong>~6–7% faster</strong> than the fastest scalar Keccak in SUPERCOP. The win is a <em>ratio</em> (≈ <strong>0.93</strong>, microcode ÷ fastest baseline), measured back-to-back in one process so it is independent of CPU frequency. At base-pinned frequency that is roughly <strong>1900 cyc/perm</strong> for microcode vs <strong>~2045</strong> for the best SUPERCOP variant (see <a class="xref" href="#measure">§12</a> for why the absolute number depends on pinning).
+</div>
+
+<p>Everything in this implementation is generated and software-verified by <code>keccak_gen.py</code> (the <code>D_IN_REGS</code> path), which emits the triad table <code>keccak_perm_body.h</code> and asserts it matches the reference permutation on 64 test vectors before it ever touches hardware.</p>
+
+<h2 id="mechanism">2. The mechanism: what "microcode" means here</h2>
+
+<p>An x86 instruction is itself carried out by a sequence of tiny internal operations — <span class="term">micro-ops</span> — drawn from the CPU's microcode. Goldmont lets us <em>patch</em> that microcode RAM and hook a chosen instruction. We pick the rarely-used <code>vmwrite</code>: after patching, executing <code>vmwrite rcx, rcx</code> runs <strong>our</strong> permutation, with <code>rcx</code> pointing at the state in memory.</p>
+
+<p>A patch is an array of <span class="term">triads</span>. Each triad is three micro-ops plus a <span class="term">seqword</span> that controls flow (continue, branch, or end):</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 700 150" xmlns="http://www.w3.org/2000/svg">
+  <text x="350" y="20" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3C3489">One triad = 3 micro-ops (executed in sequence) + 1 seqword</text>
+  <g font-size="11">
+    <rect x="30"  y="45" width="150" height="44" rx="5" fill="#EEEDFE" stroke="#534AB7"/>
+    <text x="105" y="66" text-anchor="middle" fill="#3C3489" font-weight="600">slot 0</text>
+    <text x="105" y="82" text-anchor="middle" fill="#3C3489">XOR TMP12 = idx ^ 320</text>
+    <rect x="190" y="45" width="120" height="44" rx="5" fill="#EEEDFE" stroke="#534AB7"/>
+    <text x="250" y="66" text-anchor="middle" fill="#3C3489" font-weight="600">slot 1</text>
+    <text x="250" y="82" text-anchor="middle" fill="#3C3489">NOP</text>
+    <rect x="320" y="45" width="190" height="44" rx="5" fill="#EEEDFE" stroke="#534AB7"/>
+    <text x="415" y="66" text-anchor="middle" fill="#3C3489" font-weight="600">slot 2</text>
+    <text x="415" y="82" text-anchor="middle" fill="#3C3489">UJMPCC CONDNZ → loop_top</text>
+    <rect x="520" y="45" width="150" height="44" rx="5" fill="#FAECE7" stroke="#993C1D"/>
+    <text x="595" y="66" text-anchor="middle" fill="#712B13" font-weight="600">seqword</text>
+    <text x="595" y="82" text-anchor="middle" fill="#712B13">NOP_SEQWORD</text>
+  </g>
+  <text x="350" y="118" text-anchor="middle" font-size="11" fill="#666">Example: the loop-control triad. The XOR sets the zero flag and the branch reads it — both in the same triad.</text>
+  <text x="350" y="135" text-anchor="middle" font-size="11" fill="#666">Patch RAM holds at most 128 triads. Our whole permutation is 108.</text>
+</svg>
+</div>
+
+<p>Two facts from this picture drive the entire design: micro-ops within a triad execute <em>in sequence</em> (so a 3-deep dependency chain works inside one triad), and the patch can hold only <strong>128 triads</strong>. The second is why we cannot simply unroll 24 rounds — we must <em>loop</em>.</p>
+
+<h2 id="plan">3. The plan: the cube must live in registers</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#state">§4</a> lays the 1600 bits out as 25 lanes, each a 64-bit word. The naive way to port this is one trapped call per round. That is fatal for two reasons: the trap does <strong>not</strong> preserve our working registers across calls, and each Greek step would then have to reload and re-store all 25 lanes from memory <em>every round</em>. Memory traffic — not arithmetic — would dominate.</p>
+
+<p>So we do what hand-tuned assembly does when it unrolls: keep the whole cube <span class="term">resident in registers</span>. We <strong>load the 25 lanes once</strong> at the top, run all 24 rounds entirely in the register file, and <strong>store once</strong> at the bottom. Because we cannot unroll (128-triad limit), the 24 rounds are a real loop.</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="20" y="80" width="120" height="64" rx="6" fill="#FAECE7" stroke="#993C1D"/>
+  <text x="80" y="108" text-anchor="middle" font-size="11" fill="#712B13" font-weight="600">memory</text>
+  <text x="80" y="125" text-anchor="middle" font-size="11" fill="#712B13">25 lanes</text>
+
+  <line x1="140" y1="112" x2="210" y2="112" stroke="#888" stroke-width="1.4" marker-end="url(#arr)"/>
+  <text x="175" y="104" text-anchor="middle" font-size="10" fill="#085041" font-weight="600">LOAD ×25</text>
+  <text x="175" y="132" text-anchor="middle" font-size="10" fill="#085041">(prologue, once)</text>
+
+  <rect x="210" y="40" width="330" height="150" rx="8" fill="#EEEDFE" stroke="#534AB7"/>
+  <text x="375" y="60" text-anchor="middle" font-size="12" fill="#3C3489" font-weight="700">REGISTER FILE — 25 lanes resident</text>
+  <text x="375" y="76" text-anchor="middle" font-size="10.5" fill="#3C3489">13 GPR + 12 TMP (+ RSP as a 32nd)</text>
+  <rect x="240" y="92" width="270" height="40" rx="5" fill="#fff" stroke="#534AB7" stroke-width="0.8"/>
+  <text x="375" y="117" text-anchor="middle" font-size="11" fill="#3C3489" font-weight="600">round body:  θ → ρ → π → χ → ι</text>
+  <path d="M250 132 q-40 30 30 38 H470 q70 -8 30 -38" fill="none" stroke="#993C1D" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="375" y="182" text-anchor="middle" font-size="10.5" fill="#993C1D" font-weight="600">×24  (backward UJMPCC loop)</text>
+
+  <line x1="540" y1="112" x2="610" y2="112" stroke="#888" stroke-width="1.4" marker-end="url(#arr)"/>
+  <text x="575" y="104" text-anchor="middle" font-size="10" fill="#085041" font-weight="600">STORE ×25</text>
+  <text x="575" y="132" text-anchor="middle" font-size="10" fill="#085041">(epilogue, once)</text>
+
+  <rect x="610" y="80" width="130" height="64" rx="6" fill="#FAECE7" stroke="#993C1D"/>
+  <text x="675" y="108" text-anchor="middle" font-size="11" fill="#712B13" font-weight="600">memory</text>
+  <text x="675" y="125" text-anchor="middle" font-size="11" fill="#712B13">final 25 lanes</text>
+
+  <text x="380" y="218" text-anchor="middle" font-size="11" fill="#666">Memory is touched only twice per <em>permutation</em> — never per round. That is the whole source of the speed.</text>
+</svg>
+</div>
+
+<p>The 25 lanes map to named registers as follows (lane <code>i = x + 5y</code>, from the guide's indexing):</p>
+
+<table>
+<tr><th>lanes</th><th>register(s)</th><th>role</th></tr>
+<tr><td><code>0 – 12</code></td><td><code>RDI RSI RBX RDX RBP R8 R9 R10 R11 R12 R13 R14 R15</code></td><td>13 general-purpose registers</td></tr>
+<tr><td><code>13 – 24</code></td><td><code>TMP0 … TMP11</code></td><td>12 microcode temporaries</td></tr>
+</table>
+
+<p>The other registers do double duty: <code>RCX</code> is the base pointer to the state buffer; <code>RAX</code> and <code>TMP12–TMP15</code> hold θ's <code>D</code> values and then χ's scratch; <code>RSP</code> is borrowed as a 32nd data register (see <a class="xref" href="#budget">§5</a>).</p>
+
+<h2 id="piloop">4. The problem looping creates — and why π solves it</h2>
+
+<p>Looping a single round body has a subtle hazard. The companion guide's <a class="xref" href="keccak-guide.html#pi">§8 π</a> step <em>relocates whole lanes</em> to new <code>(x,y)</code> positions every round. If our lanes sit in fixed registers, then after round 1 the register that held lane <code>(0,0)</code> now holds some other logical lane — and round 2's θ would read the wrong words. A naive loop would be wrong.</p>
+
+<p>The rescue is a property of π itself: as a permutation of the 25 lane positions it is a set of <span class="term">cycles</span>, with lane <code>(0,0)</code> fixed. We apply π <strong>in place along those cycles</strong> (walking each cycle, moving each lane to its destination with a single save-temp for the cycle's head). When the walk finishes, every lane is back in its canonical register slot. So round <code>r+1</code> sees exactly the register layout round <code>r</code> did — and one identical body can loop 24 times correctly.</p>
+
+<div class="note">
+This is the linchpin of the whole approach: <strong>π making the layout self-restoring is what lets us loop instead of unroll</strong>, which is what lets us fit inside 128 triads.
+</div>
+
+<h2 id="budget">5. The register budget &amp; the 32nd register (RSP)</h2>
+
+<p>The integer register file is exactly 32 (16 GPR <code>0x20–0x2f</code> + 16 TMP <code>0x30–0x3f</code>). Twenty-five are spent on lanes. θ needs to keep its five <code>D</code> values resident <em>and</em> a save-temp for the π cycle walk — one register more than is free.</p>
+
+<p>We found the missing register in <code>RSP</code>, the stack pointer. Our microcode never touches the stack, so if we <strong>save RSP</strong> at entry and <strong>restore it</strong> before the trap returns, RSP is a usable 32nd data register for the whole permutation. (An earlier idea — freeing a register by rebuilding the base pointer each round — measured <em>slower</em>: the rebuild cost more than it saved. RSP wins because the base pointer <code>RCX</code> never moves.)</p>
+
+<p>The state buffer carries a little scratch beyond the 25 lanes. Because the load/store offset field is only <strong>8-bit signed</strong> (±127 bytes = ±15 lanes), the base pointer is <em>centered</em> at lane 16, so <code>offset(lane) = (lane − 16) × 8</code> stays in range:</p>
+
+<table>
+<tr><th>buffer lanes</th><th>contents</th><th>offset from base (lane 16)</th></tr>
+<tr><td><code>0 – 24</code></td><td>the 25 state lanes</td><td><code>−128 … +64</code></td></tr>
+<tr><td><code>25 – 29</code></td><td>θ column-parity scratch (<code>C[x]</code>)</td><td><code>+72 … +104</code></td></tr>
+<tr><td><code>30</code></td><td>round counter (an RC <em>byte-index</em>)</td><td><code>+112</code></td></tr>
+<tr><td><code>31</code></td><td>saved <code>RSP</code></td><td><code>+120</code></td></tr>
+<tr><td><code>32 – 55</code></td><td>the 24 round constants <code>RC[0..23]</code></td><td><code>+128 …</code> (out of range → indexed load)</td></tr>
+</table>
+
+<p>The RC table sits beyond the signed-8 reach on purpose; ι reaches it with an index register instead (see <a class="xref" href="#iota">§9</a>).</p>
+
+<div class="page-break"></div>
+
+<h2 id="theta">6. θ in microcode — balanced parity tree + D in registers</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#theta">§6</a> gives θ in three equations: column parities <code>C[x]</code>, the mixing lane <code>D[x]</code>, then XOR <code>D[x]</code> into the sheet. We realize them in two moves.</p>
+
+<p><strong>(a) Column parities, as a balanced XOR tree.</strong> <code>C[x]</code> is the XOR of the five lanes in sheet <code>x</code>. The obvious encoding is a 4-deep chain; instead we compute it as a depth-3 <em>balanced tree</em>, because <code>C</code> sits at the <em>head</em> of the round's dependency chain — every later step waits on it, so shortening its latency shortens every round. <code>RSP</code> (free here) is the second accumulator:</p>
+
+<div class="equation-block">
+<span class="label">// companion §6:  C[x] = A[x][0]⊕A[x][1]⊕A[x][2]⊕A[x][3]⊕A[x][4]</span>
+<span class="reg">RAX</span> = REG[x]   ⊕ REG[x+5]        <span class="label">// a ⊕ b</span>
+<span class="reg">RSP</span> = REG[x+10] ⊕ REG[x+15]      <span class="label">// c ⊕ d   (independent — runs in parallel)</span>
+<span class="reg">RAX</span> = RAX ⊕ RSP                  <span class="label">// (a⊕b) ⊕ (c⊕d)</span>
+<span class="reg">RAX</span> = RAX ⊕ REG[x+20]            <span class="label">// ⊕ e        → depth 3, not 4</span>
+store RAX → C[x] scratch lane          <span class="label">// for x = 0..4</span>
+</div>
+
+<p><strong>(b) The mixing lane <code>D[x]</code>, computed straight into registers.</strong> The guide's <code>D[x] = C[x−1] ⊕ ROT(C[x+1], 1)</code> would normally be written to memory and re-read once per lane during the apply — 25 extra loads per round. With our 32nd register we keep all five <code>D</code> values <em>live in registers</em> (<code>D_REG = RAX, TMP12, TMP13, TMP14, TMP15</code>), using <code>RSP</code> as the rotate temp:</p>
+
+<div class="equation-block">
+<span class="label">// companion §6:  D[x] = C[x−1] ⊕ ROT(C[x+1], 1)</span>
+<span class="reg">RSP</span>      = C[x+1] scratch           <span class="label">// load right neighbor parity</span>
+<span class="reg">RSP</span>      = ROL(RSP, 1)               <span class="label">// ROT(·,1)</span>
+D_REG[x] = C[x−1] scratch           <span class="label">// load left neighbor parity</span>
+D_REG[x] = D_REG[x] ⊕ RSP           <span class="label">// D[x], now resident in a register</span>
+</div>
+
+<div class="note">
+Keeping <code>D</code> in registers removes ~25 memory loads <em>per round</em>. It is only affordable because <code>RSP</code> gave us the 32nd register (<a class="xref" href="#budget">§5</a>). This single change is what unlocked the win.
+</div>
+
+<h2 id="rhopi">7. ρ and π in microcode — one in-place cycle walk</h2>
+
+<p>The companion guide treats <a class="xref" href="keccak-guide.html#rho">§7 ρ</a> (rotate each lane by a fixed per-lane offset) and <a class="xref" href="keccak-guide.html#pi">§8 π</a> (relocate lanes) as separate steps, and notes they're often fused into one "ρπ" move. We fuse all three of θ-apply + ρ + π into a <strong>single in-place pass over π's cycles</strong>. For each cycle we save its head lane in <code>RSP</code>, then shift each lane to its π destination while folding in θ's <code>D</code> (an XOR) and ρ's rotation (a ROL by the offset table):</p>
+
+<div class="equation-block">
+<span class="label">// for each π cycle (lane (0,0) is a fixed point):</span>
+<span class="reg">RSP</span> = REG[head]                              <span class="label">// save the lane that would be overwritten</span>
+for each step src → dst along the cycle:
+    REG[dst] = REG[src] ⊕ D_REG[src mod 5]      <span class="label">// θ-apply: A[x][y] ⊕ D[x]</span>
+    REG[dst] = ROL(REG[dst], RHO[src])          <span class="label">// ρ: rotate by the per-lane offset</span>
+close the cycle using RSP for the head lane
+</div>
+
+<p>Two things make this fast. <code>D</code> is read straight from <code>D_REG[...]</code> — <strong>no per-lane memory load</strong> (the payoff of <a class="xref" href="#theta">§6b</a>). And because the moves follow π's cycles, every lane lands back in its canonical register slot, preserving the layout for the next round (<a class="xref" href="#piloop">§4</a>). The rotation amounts <code>RHO[i]</code> are exactly the offset table in the companion guide's <a class="xref" href="keccak-guide.html#rho">§7</a>, indexed by <code>i = x + 5y</code>.</p>
+
+<div class="page-break"></div>
+
+<h2 id="chi">8. χ in microcode — the MOV-free nonlinear step</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#chi">§9 χ</a> is the only nonlinear step: per 5-bit row, <code>A[x] ⊕= (¬A[x+1]) ∧ A[x+2]</code>. Done in place, the early lanes you overwrite are still needed by later lanes in the same row — so register-starved native code is forced into save-copies (≈2 <code>MOV</code>s per row, ~10 per round).</p>
+
+<p>We have spare registers (the five <code>D_REG</code> are dead after θ), so we sidestep the copies entirely: compute all five row <code>NOTAND</code>s into the freed registers <em>first</em>, while the original row values are still intact, then do five in-place XORs:</p>
+
+<div class="equation-block">
+<span class="label">// per row y = 0..4 ; SCR5 = the now-dead D registers (RAX, TMP12..TMP15)</span>
+for x = 0..4:  SCR5[x] = (¬REG[row(x+1)]) ∧ REG[row(x+2)]   <span class="label">// companion §9, all 5 first</span>
+for x = 0..4:  REG[row(x)] = REG[row(x)] ⊕ SCR5[x]          <span class="label">// then 5 in-place XORs</span>
+</div>
+
+<div class="note">
+This is a concrete example of our register advantage: native assembly <em>cannot</em> do this on Goldmont because it has no spare registers — it must spend MOVs. We don't, because the cube is fully register-resident.
+</div>
+
+<h2 id="iota">9. ι in microcode — byte-indexed round constants</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#iota">§10 ι</a> XORs a round-specific constant into lane <code>(0,0)</code>: <code>A[0][0] ⊕= RC[round]</code>. The 24 constants live in a table in the state buffer (lanes 32–55). The trick is in <em>addressing</em> it: the counter lane holds the constant's <strong>byte offset directly</strong> (initialized to 128, advanced by 8 each round), so fetching the constant costs nothing extra on the critical path:</p>
+
+<div class="equation-block">
+<span class="reg">TMP14</span> = counter lane               <span class="label">// the RC byte-index (not a round number)</span>
+<span class="reg">TMP13</span> = mem[ base + TMP14 ]         <span class="label">// indexed load: RC[round], reaches the far table</span>
+REG[0] = REG[0] ⊕ TMP13              <span class="label">// companion §10: A[0][0] ⊕= RC[round]</span>
+</div>
+
+<p>There is no shift or add on the <code>ι → RC → lane 0</code> path; the <code>+8</code> increment is paid later, in the loop-control step (<a class="xref" href="#loop">§10</a>), off the critical path. The indexed load is also how we reach the RC table at all — it lies beyond the 8-bit signed offset window (<a class="xref" href="#budget">§5</a>).</p>
+
+<h2 id="loop">10. The 24-round loop inside one vmwrite</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#perm">§5</a> says the engine is 24 identical rounds. We close the loop with a single control triad: advance the RC byte-index, store it, then test-and-branch. The compare-and-branch share one triad — the <code>XOR</code> sets the zero flag and the conditional branch reads it in the same triad:</p>
+
+<div class="equation-block">
+<span class="reg">TMP14</span> = TMP14 + 8                        <span class="label">// advance RC byte-index</span>
+store TMP14 → counter lane
+<span class="reg">TMP12</span> = TMP14 ⊕ 320 ; UJMPCC CONDNZ → loop_top  <span class="label">// 320 = byte-index past RC[23]</span>
+</div>
+
+<p>We count <em>up</em> to 320 (the hardware's subtract-immediate is awkward, so counting up is cheapest). When the index reaches 320 the XOR yields zero, the zero flag is set, the branch is not taken, and control falls through to the epilogue. That is exactly 24 iterations.</p>
+
+<p>The full patch is <strong>108 triads</strong>, comfortably under the 128 cap:</p>
+
+<table>
+<tr><th>section</th><th>triads</th><th>what it does</th></tr>
+<tr><td>prologue</td><td>26</td><td>save RSP, load the 25 lanes (once per permutation)</td></tr>
+<tr><td>round body + loop control</td><td>56</td><td>θ ρ π χ ι + the backward branch (runs 24×)</td></tr>
+<tr><td>epilogue</td><td>26</td><td>store the 25 lanes, restore RSP (once per permutation)</td></tr>
+</table>
+
+<div class="warn">
+We <em>loop</em> rather than unroll for one hard reason: 24 copies of the body would need far more than 128 triads. Looping trades a tiny per-round branch cost for fitting in patch RAM at all.
+</div>
+
+<div class="page-break"></div>
+
+<h2 id="fast">11. How we made it fast</h2>
+
+<p>Keccak is dependency-chain bound (θ → ρ → π → χ in sequence), so no single trick is dramatic; the win is the sum of several, each shaving the critical path. We measured each step as a same-process ratio against the fastest SUPERCOP baseline:</p>
+
+<table>
+<tr><th>change</th><th class="c">ratio<br>(µcode ÷ fastest)</th><th>idea</th></tr>
+<tr><td>per-lane <code>D</code> via memory, naive χ with save-MOVs</td><td class="c">1.00×</td><td>correct, but a tie</td></tr>
+<tr><td><code>D</code> resident in registers (the RSP 32nd register)</td><td class="c">0.99×</td><td>removes ~25 loads/round (<a class="xref" href="#theta">§6</a>)</td></tr>
+<tr><td>MOV-free χ using the freed <code>D</code> registers</td><td class="c">0.95×</td><td>kills ~10 MOVs/round (<a class="xref" href="#chi">§8</a>)</td></tr>
+<tr><td>θ balanced parity tree + RC byte-index</td><td class="c">0.93×</td><td>shortens the round's head and the ι path (<a class="xref" href="#theta">§6</a>, <a class="xref" href="#iota">§9</a>)</td></tr>
+</table>
+
+<p>Every one of these exploits the same structural advantage: the cube is fully register-resident, so we have headroom for work that register-starved native assembly cannot do.</p>
+
+<h2 id="measure">12. Measuring honestly: rdtsc, frequency, the real ratio</h2>
+
+<p>We compare against <em>all</em> the scalar Keccak variants SUPERCOP ships (<code>x86_64_asm</code>, <code>x86_64_shld</code>, <code>opt64lcu24</code>, <code>opt64lcu24shld</code>) under the same compiler-flag sweep SUPERCOP's autotuner uses, and take the genuinely fastest as the baseline — then time it and the microcode <strong>back-to-back in one process</strong>.</p>
+
+<div class="warn">
+<strong>Why absolute cycle counts can mislead.</strong> The timer (<code>rdtsc</code>) counts at a fixed reference rate (~1.1 GHz), <em>not</em> the core's actual clock. When the core bursts to 2.4 GHz the same work reads as ~2.2× fewer ticks. So an absolute "cycles per permutation" is only meaningful when the core is pinned to base frequency. The <strong>ratio</strong> of two implementations measured in the same process is immune to this — both scale together — which is why we report the ratio as the result.
+</div>
+
+<p>Concretely: pinned to base frequency, the microcode runs at roughly <strong>1900 cyc/perm</strong> and the fastest SUPERCOP variant at <strong>~2045</strong>, a ratio of ≈ 0.93. An earlier unpinned measurement reading "874 vs 942" was the very same work timed during a 2.4 GHz burst (the timer undercounting by ~2.18×); the ratio was identical, only the absolute numbers differed. The honest, reproducible statement is the ratio: <strong>microcode is ~6–7% faster than the best hand-tuned scalar Keccak on this CPU.</strong></p>
+
+<h2 id="together">13. The whole round, side by side</h2>
+
+<p>The companion guide's <a class="xref" href="keccak-guide.html#together">§13</a> states the round as five lines of math. Here is each line and its microcode realization:</p>
+
+<table>
+<tr><th>companion §13 (the math)</th><th>our microcode (this guide)</th></tr>
+<tr><td><code>θ:</code> C[x]=⊕<sub>y</sub>A[x][y]; D[x]=C[x−1]⊕ROT(C[x+1],1); A[x][y]⊕=D[x]</td><td>balanced XOR tree → <code>C</code> in scratch; <code>D</code> into 5 registers via <code>RSP</code> rotate-temp (<a class="xref" href="#theta">§6</a>)</td></tr>
+<tr><td><code>ρ:</code> A[x][y][z] = A[x][y][z − r[x][y]]</td><td><code>ROL</code> by <code>RHO[i]</code>, fused into the apply pass (<a class="xref" href="#rhopi">§7</a>)</td></tr>
+<tr><td><code>π:</code> A[x][y] = A[x+3y][x]</td><td>in-place walk along π's cycles, head saved in <code>RSP</code>; layout self-restores (<a class="xref" href="#rhopi">§7</a>, <a class="xref" href="#piloop">§4</a>)</td></tr>
+<tr><td><code>χ:</code> A[x][y]⊕=(¬A[x+1][y])∧A[x+2][y]</td><td>5 <code>NOTAND</code>s into freed regs, then 5 in-place XORs — MOV-free (<a class="xref" href="#chi">§8</a>)</td></tr>
+<tr><td><code>ι:</code> A[0][0]⊕=RC[round]</td><td>indexed load of <code>RC</code> via byte-counter, XOR into lane 0 (<a class="xref" href="#iota">§9</a>)</td></tr>
+</table>
+
+<div class="note">
+<strong>The mental picture to walk away with.</strong> The companion guide's 5×5×64 cube is loaded once into 32 CPU registers (the 25 lanes plus borrowed scratch, including <code>RSP</code>). A single trapped <code>vmwrite</code> then runs all 24 rounds in place — θ smears each lane across its neighbors, ρ twists every word, π reshuffles the words (and conveniently lands them back where they started), χ does the one nonlinear mash, ι stamps in the round constant — looping with a backward branch. Memory is read once and written once. Every speed trick is something native code can't do because it has no spare registers; we do, because the whole cube lives in the register file.
+</div>
+
+<p class="muted" style="margin-top:2rem">Source of truth: <code>keccak_gen.py</code> (the <code>D_IN_REGS</code> path) generates and software-verifies the triad table <code>keccak_perm_body.h</code> (64/64 vectors) before it is installed; on hardware it is KAT-anchored at lane 0 = <code>0xF1258F7940E1DDE7</code>. Companion math: <a class="xref" href="keccak-guide.html">keccak-guide.html</a>.</p>
+
+</body>
+</html>

@@ -43,9 +43,9 @@
 #include <fcntl.h>
 #include <time.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define SENTINEL 0xDEADBEEFCAFE1234ULL
 #define LOGPATH  "probe_seg.log"

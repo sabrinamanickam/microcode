@@ -9,9 +9,9 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define SEG 0x18
 static uint64_t g_buf[40];

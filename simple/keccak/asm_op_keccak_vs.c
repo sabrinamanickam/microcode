@@ -14,12 +14,34 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
+
+/* median over a sample of per-rep batch totals (sorts in place). */
+static int cmp_u64(const void *a, const void *b){
+    uint64_t x=*(const uint64_t*)a, y=*(const uint64_t*)b;
+    return (x>y)-(x<y);
+}
+static uint64_t median_u64(uint64_t *v, int n){
+    qsort(v, n, sizeof(uint64_t), cmp_u64);
+    return (n&1) ? v[n/2] : (v[n/2-1]+v[n/2])/2;
+}
+/* Robust min: the smallest sample that ISN'T an implausible downward glitch.
+ * Cycle counts only grow under noise (interrupts, contention add time) — a
+ * sample below half the median means the work was mis-measured for that batch
+ * (e.g. a CPU P-state transition straddling the rdtsc bracket, which can make a
+ * batch read near-zero). Skip those so one bad batch can't poison the min.
+ * `sorted` must be ascending (median_u64 sorts it in place). */
+static uint64_t robust_min(const uint64_t *sorted, int n, uint64_t med){
+    uint64_t floor = med/2;
+    for(int i=0;i<n;i++) if(sorted[i]>=floor) return sorted[i];
+    return sorted[n-1];
+}
 
 #include "keccak_perm.h"
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];
@@ -93,29 +115,42 @@ int main(void){
     /* interleaved timing: each rep times every SUPERCOP variant + microcode,
      * all close in time so they see the same frequency. min over reps. */
     typedef void (*permfn)(uint64_t*);
-    struct { const char *name; permfn fn; uint64_t min; } C[] = {
-        {"x86_64_asm    ", keccak_x86_64_asm_perm,     UINT64_MAX},
-        {"x86_64_shld   ", keccak_x86_64_shld_perm,    UINT64_MAX},
-        {"opt64lcu24    ", keccak_opt64lcu24_perm,     UINT64_MAX},
-        {"opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX},
+    #define NCONT 4
+    struct { const char *name; const char *key; permfn fn; uint64_t min; uint64_t med; } C[NCONT] = {
+        {"x86_64_asm    ", "x86_64_asm",     keccak_x86_64_asm_perm,     UINT64_MAX, 0},
+        {"x86_64_shld   ", "x86_64_shld",    keccak_x86_64_shld_perm,    UINT64_MAX, 0},
+        {"opt64lcu24    ", "opt64lcu24",     keccak_opt64lcu24_perm,     UINT64_MAX, 0},
+        {"opt64lcu24shld", "opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX, 0},
     };
-    int NC = sizeof(C)/sizeof(C[0]);
+    int NC = NCONT;
     uint64_t sc_state[25];
-    uint64_t uc_min=UINT64_MAX;
+    uint64_t uc_min=UINT64_MAX, uc_med=0;
+    /* per-rep batch totals, kept so we can compute median + a robust min. */
+    static uint64_t cval[NCONT][REPS];
+    static uint64_t ucval[REPS];
     for(int r=0;r<REPS;r++){
         for(int c=0;c<NC;c++){
             for(int i=0;i<25;i++) sc_state[i]=0x0123456789ABCDEFULL*(i+1);
             uint64_t t0=rdtsc_start();
             for(int i=0;i<BATCH;i++) C[c].fn(sc_state);
             uint64_t t1=rdtsc_end();
-            uint64_t d=t1-t0; if(d<C[c].min)C[c].min=d;
+            cval[c][r]=t1-t0;
         }
         for(int i=0;i<25;i++) g_keccak_buf[i]=0x0123456789ABCDEFULL*(i+1);
         uint64_t t2=rdtsc_start();
         for(int i=0;i<BATCH;i++){ g_keccak_buf[KECCAK_COUNTER_LANE]=(KECCAK_RCTAB_LANE-KECCAK_BASE_LANE)*8; ucode_perm(); }
         uint64_t t3=rdtsc_end();
-        uint64_t uc=t3-t2; if(uc<uc_min)uc_min=uc;
+        ucval[r]=t3-t2;
     }
+    /* median sorts each sample array in place; robust_min then reads the sorted
+     * array, skipping implausible near-zero batches (see robust_min above). */
+    for(int c=0;c<NC;c++){
+        C[c].med=median_u64(cval[c],REPS);
+        C[c].min=robust_min(cval[c],REPS,C[c].med);
+    }
+    uc_med=median_u64(ucval,REPS);
+    uc_min=robust_min(ucval,REPS,uc_med);
+
     uint64_t best=UINT64_MAX; const char *bestname="";
     printf("\n--- SUPERCOP scalar Keccak variants (cyc/perm, same freq) ---\n");
     for(int c=0;c<NC;c++){
@@ -130,6 +165,16 @@ int main(void){
            (double)uc/(double)best,
            uc<best ? "*** microcode WINS vs the fastest ***" : "microcode loses");
     printf("\n(all measured back-to-back at the same CPU frequency -> ratios valid)\n");
+
+    /* Machine-readable block scraped by bench_keccak_matrix.sh. One line per
+     * contender: "keccak/<key>: ... min N median M" in cyc/perm. The matrix
+     * driver greps "^keccak/<key>:" and records min/median per (config,key). */
+    printf("\n=== matrix-parse ===\n");
+    for(int c=0;c<NC;c++)
+        printf("keccak/%s: min %" PRIu64 " median %" PRIu64 "\n",
+               C[c].key, C[c].min/BATCH, C[c].med/BATCH);
+    printf("keccak/microcode: min %" PRIu64 " median %" PRIu64 "\n",
+           uc_min/BATCH, uc_med/BATCH);
 
     init_match_and_patch(); do_fix_IN_patch();
     return 0;

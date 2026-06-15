@@ -21,9 +21,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 /* The two permutation entry points provided by the SUPERCOP sources. Symbol
  * renames are done at link time (see Makefile) so the two implementations can
