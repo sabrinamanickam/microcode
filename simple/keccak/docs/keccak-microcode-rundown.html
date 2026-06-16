@@ -6,9 +6,9 @@
 <title>Keccak-f[1600] in Goldmont Microcode — Complete Implementation Rundown</title>
 <style>
   :root{
-    --bg:#0f1419; --panel:#161b22; --panel2:#1c2330; --ink:#d6dde6; --muted:#8b97a7;
-    --accent:#6cb6ff; --accent2:#7ee787; --warn:#f0a64a; --bad:#ff7b72; --good:#56d364;
-    --line:#2a3340; --code:#0c1117; --kw:#ff9e64; --reg:#7ee787; --mem:#6cb6ff; --com:#6b7785;
+    --bg:#ffffff; --panel:#f4f6f9; --panel2:#eaeef3; --ink:#1c2530; --muted:#5a6675;
+    --accent:#0969da; --accent2:#1a7f37; --warn:#9a6700; --bad:#cf222e; --good:#1a7f37;
+    --line:#d6dce3; --code:#f3f5f8; --kw:#cf222e; --reg:#116329; --mem:#0550ae; --com:#6e7781;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
@@ -31,14 +31,14 @@
   nav.toc .brandsub{color:var(--muted); font-size:12px; margin-bottom:8px;}
   /* main */
   main{flex:1 1 auto; padding:42px 56px 120px; min-width:0; max-width:1100px;}
-  h1{font-size:33px; line-height:1.2; margin:0 0 6px; color:#fff; letter-spacing:-.01em;}
-  h2{font-size:25px; margin:54px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#fff; scroll-margin-top:20px;}
+  h1{font-size:33px; line-height:1.2; margin:0 0 6px; color:#0d1117; letter-spacing:-.01em;}
+  h2{font-size:25px; margin:54px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#0d1117; scroll-margin-top:20px;}
   h3{font-size:19px; margin:34px 0 10px; color:var(--accent); scroll-margin-top:20px;}
   h4{font-size:16px; margin:22px 0 8px; color:var(--accent2);}
   p{margin:12px 0;}
   a{color:var(--accent);}
   code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13.5px;
-    background:var(--code); padding:1.5px 6px; border-radius:5px; color:#e6c07b; border:1px solid var(--line);}
+    background:var(--code); padding:1.5px 6px; border-radius:5px; color:#0a3069; border:1px solid var(--line);}
   pre{background:var(--code); border:1px solid var(--line); border-radius:10px; padding:16px 18px; overflow-x:auto;
     font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13px; line-height:1.55; margin:16px 0;}
   pre code{background:none; border:none; padding:0; color:var(--ink);}
@@ -46,16 +46,16 @@
   .kw{color:var(--kw);}
   .reg{color:var(--reg);}
   .mem{color:var(--mem);}
-  .lit{color:#d2a8ff;}
+  .lit{color:#8250df;}
   ul,ol{margin:12px 0; padding-left:24px;}
   li{margin:5px 0;}
   table{border-collapse:collapse; width:100%; margin:18px 0; font-size:13.8px;}
   th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top;}
-  th{background:var(--panel2); color:#fff; font-weight:600;}
-  tr:nth-child(even) td{background:rgba(255,255,255,.015);}
+  th{background:var(--panel2); color:#0d1117; font-weight:600;}
+  tr:nth-child(even) td{background:rgba(0,0,0,.025);}
   td.num,th.num{text-align:right; font-variant-numeric:tabular-nums;}
   .lead{font-size:18px; color:var(--muted); margin:14px 0 8px;}
-  .headline{background:linear-gradient(135deg,#16241c,#13202b); border:1px solid #2c4a3a; border-radius:14px;
+  .headline{background:linear-gradient(135deg,#eaf6ee,#e7f0fb); border:1px solid #bfe3cc; border-radius:14px;
     padding:22px 26px; margin:26px 0; display:flex; gap:30px; flex-wrap:wrap; align-items:center;}
   .headline .big{font-size:46px; font-weight:800; color:var(--good); line-height:1; letter-spacing:-.02em;}
   .headline .lbl{color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.08em;}
@@ -69,8 +69,8 @@
   .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 20px;}
   .card h4{margin-top:0;}
   .pill{display:inline-block; font-size:11.5px; padding:2px 9px; border-radius:20px; background:var(--panel2); border:1px solid var(--line); color:var(--muted); margin:2px 3px 2px 0;}
-  .pill.ok{color:var(--good); border-color:#2c4a3a;}
-  .pill.no{color:var(--bad); border-color:#5a2d2d;}
+  .pill.ok{color:var(--good); border-color:#bfe3cc;}
+  .pill.no{color:var(--bad); border-color:#f1c0c4;}
   .staterow{font-family:"SF Mono",ui-monospace,monospace; font-size:12.5px;}
   .win{color:var(--good); font-weight:700;}
   .loss{color:var(--bad); font-weight:700;}
@@ -85,8 +85,8 @@
   .lanegrid .cell{background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:7px 6px; text-align:center; font-family:"SF Mono",monospace; font-size:12px;}
   .lanegrid .cell .lane{color:var(--muted); font-size:10.5px;}
   .lanegrid .cell .rg{color:var(--reg); font-weight:700; font-size:13px;}
-  .lanegrid .cell.gpr{border-color:#2c4a3a;}
-  .lanegrid .cell.tmp{border-color:#2b3a52;}
+  .lanegrid .cell.gpr{border-color:#bcdcc7;}
+  .lanegrid .cell.tmp{border-color:#c2d4ee;}
   .lanegrid .cell.tmp .rg{color:var(--mem);}
   .tag-gpr{color:var(--reg);} .tag-tmp{color:var(--mem);}
   details{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px 16px; margin:14px 0;}
