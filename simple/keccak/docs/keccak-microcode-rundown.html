@@ -81,6 +81,16 @@
   .flow{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:16px 0; font-size:13px;}
   .flow .step{background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:7px 13px; font-family:"SF Mono",monospace; font-size:12.5px;}
   .flow .arr{color:var(--muted);}
+  .spec{border-left:4px solid #8250df; background:#f7f3fe; border-radius:0 10px 10px 0; padding:10px 16px 4px; margin:16px 0;}
+  .spec .tag{font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; color:#8250df; display:block; margin-bottom:2px;}
+  .spec pre{background:#fcfaff; border-color:#e7dbfb; margin:8px 0; color:#3b2c5e;}
+  .spec pre .v{color:#8250df;} .spec pre .o{color:#0550ae;} .spec pre .c{color:var(--com);}
+  .srcptr{display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; font-size:12.6px;
+    background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:8px 13px; margin:12px 0;}
+  .srcptr .k{color:#fff; background:var(--accent); border-radius:4px; padding:1px 7px; font-size:10px; letter-spacing:.06em; text-transform:uppercase; font-weight:700;}
+  .srcptr .k.ref{background:var(--accent2);} .srcptr .k.ir{background:#8250df;} .srcptr .k.tri{background:var(--warn);}
+  .srcptr code{font-size:12.3px; background:var(--bg);}
+  .srcptr .sep{color:var(--line);}
   .lanegrid{display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin:14px 0; max-width:620px;}
   .lanegrid .cell{background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:7px 6px; text-align:center; font-family:"SF Mono",monospace; font-size:12px;}
   .lanegrid .cell .lane{color:var(--muted); font-size:10.5px;}
@@ -399,7 +409,23 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 </div>
 <p class="small">Total triads <em>issued</em> per permutation: 26 + 56×24 + 26 = <b>1396</b>. At the measured base-frequency cost that is ≈ 1.37 true cyc/triad (see §9.2).</p>
 
+<div class="callout"><span class="tag">How to read §5 — three layers, three files</span>
+Every step of Keccak exists in three forms below, and each subsection points at all three. The <b>Keccak spec pseudocode</b> says <em>what</em> to compute; <code>keccak_round_ref</code> is a literal transcription of that spec (the oracle the generator and harness check against); <code>gen_body</code> &amp; friends in <code>keccak_gen.py</code> emit an op-list that computes the same result but <em>reshaped for the hardware</em> (Decisions 1–5); and <code>keccak_perm_body.h</code> is that op-list mechanically packed into triads. The mapping is exact and traceable line-by-line.</div>
+<table>
+<tr><th>Layer</th><th>Where it lives</th><th>Role</th></tr>
+<tr><td>Keccak spec</td><td>FIPS&nbsp;202 §3.2 — the θ ρ π χ ι round function</td><td>defines what each step computes</td></tr>
+<tr><td>Reference (C)</td><td><code>asm_op_keccak_perm.c</code> → <code>keccak_round_ref</code> (lines&nbsp;50–59)</td><td>on-hardware oracle — the microcode must match it lane-for-lane</td></tr>
+<tr><td>Reference (Python)</td><td><code>keccak_gen.py</code> → <code>keccak_round_ref</code> (lines&nbsp;57–69)</td><td>generator oracle — 64/64 random + published KAT checked against it</td></tr>
+<tr><td>IR emitter</td><td><code>keccak_gen.py</code> → <code>gen_prologue</code> / <code>gen_body</code> / <code>gen_loopctrl</code> / <code>gen_epilogue</code> (lines&nbsp;127–197)</td><td>reshapes the spec into a hardware op-list (the realization)</td></tr>
+<tr><td>Lowered patch</td><td><code>keccak_perm_body.h</code> — the 108 <code>ucode_t</code> triads</td><td>the op-list packed into the actual microcode image</td></tr>
+</table>
+<p class="legend">In each subsection, the badges mean: <span style="background:var(--accent2);color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700;">REF</span> the spec transcription · <span style="background:#8250df;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700;">IR</span> the op-list emitter in <code>keccak_gen.py</code> · <span style="background:var(--warn);color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700;">TRIADS</span> the lowered lines in <code>keccak_perm_body.h</code>.</p>
+
 <h3 id="w-prologue">5.2 Prologue — load state into registers (26 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — no analog</span>
+The spec assumes the 25 lanes <code>A[x,y]</code> already live in variables; it has no load step. The prologue is microcode-specific — the <b>register-residency setup forced by Decision 1</b> (load the whole state once, not once per round).</div>
+<div class="srcptr"><span class="k ir">IR</span> <code>keccak_gen.py:127</code> <code>gen_prologue()</code> <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:1–26</code></div>
+<p>How it maps: <code>gen_prologue</code> emits one <code>ST RSP→buf[31]</code> (the Decision-5 save) followed by a loop <code>for i in range(25): emit("LD", REG[i], OFF(i))</code>. Because the hardware allows <b>≤1 memory op per triad</b>, the packer can't combine loads — so the 26 ops become 26 single-op triads, one lane per triad.</p>
 <p>One store to save <code>RSP</code>, then 25 single-load triads (one per lane, because ≤1 mem op/triad). The first and last triads of <code>keccak_perm_body.h</code>:</p>
 <pre><code>{ <span class="kw">STAD_DSZ64_ASZ32_SC1_RRI</span>(<span class="reg">RSP</span>, <span class="reg">RCX</span>, <span class="lit">120</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// save RSP → buf[31]</span>
 { <span class="kw">LDZX_DSZ64_ASZ32_SC1_DRI</span>(<span class="reg">RDI</span>, <span class="reg">RCX</span>, <span class="lit">-128</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// lane0 → RDI</span>
@@ -409,6 +435,12 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 <p>After this, lanes 0..24 in memory are not touched again until the epilogue. <code>loop_top = U7c68 = 0x7c00 + 26·4</code> — the address right after the prologue is the branch target.</p>
 
 <h3 id="w-theta-c">5.3 θ-C — balanced XOR tree → buffer (9 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — θ, part 1 (column parities)</span>
+<pre><code><span class="c"># the parity of each of the 5 columns</span>
+<span class="o">for</span> x <span class="o">in</span> 0..4:
+    <span class="v">C[x]</span> = A[x,0] ⊕ A[x,1] ⊕ A[x,2] ⊕ A[x,3] ⊕ A[x,4]</code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:58</code> <span class="sep">|</span> <code>asm_op_keccak_perm.c:52</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:137–142</code> (<code>gen_body</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:27–35</code></div>
+<p>How it maps: the reference is a single 4-XOR chain per column (<code>A[x]^A[x+5]^A[x+10]^A[x+15]^A[x+20]</code>). The IR reshapes that <b>4-deep left chain into a depth-3 balanced tree</b> — <code>gen_body</code> emits <code>RAX=a^b</code> and (in parallel) <code>RSP=c^d</code>, then <code>RAX=(a^b)^(c^d)</code>, then <code>^e</code> — and spills each <code>C[x]</code> to the <code>DSCR</code> buffer with <code>ST</code>. Same value as the spec, one less level of latency on the chain head.</p>
 <p>For each column x, <code>C[x] = a^b^c^d^e</code> of its five lanes. Instead of a depth-4 left chain, the generator emits a <b>balanced tree of depth 3</b>, using <code>RSP</code> as a second accumulator so the two halves compute in parallel:</p>
 <pre><code><span class="kw">XOR</span> <span class="reg">RAX</span> = REG[x]    ^ REG[x+5]    <span class="com">// a^b</span>
 <span class="kw">XOR</span> <span class="reg">RSP</span> = REG[x+10] ^ REG[x+15]   <span class="com">// c^d   (independent — parallel)</span>
@@ -422,6 +454,11 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 <span class="com">… columns 2,3,4 …</span></code></pre>
 
 <h3 id="w-theta-d">5.4 θ-D — into 5 registers, not the buffer (10 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — θ, part 2 (mixing lanes)</span>
+<pre><code><span class="o">for</span> x <span class="o">in</span> 0..4:
+    <span class="v">D[x]</span> = C[x−1] ⊕ ROT(C[x+1], 1)     <span class="c"># indices mod 5</span></code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:59</code> <span class="sep">|</span> <code>asm_op_keccak_perm.c:53</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:145–149</code> (<code>gen_body</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:36–45</code></div>
+<p>How it maps: the spec line is transcribed almost verbatim — <code>gen_body</code> loads <code>C[(x+1)%5]</code> into <code>RSP</code>, rotates it left by 1, loads <code>C[(x+4)%5]</code> (= <code>C[x−1]</code>) into <code>D_REG[x]</code>, and XORs. The only realization choice is the <b>destination</b>: the five results go to registers <code>D_REG = [RAX,TMP12..TMP15]</code>, not back to the buffer (Decision 5), so the apply phase reads D with zero loads.</p>
 <p><code>D[x] = C[x−1] ⊕ rol(C[x+1], 1)</code>. The five D-values land in registers <code>D_REG = [RAX, TMP12, TMP13, TMP14, TMP15]</code> and <b>stay resident for the rest of the round</b>. <code>RSP</code> is the rotate temp. No in-place hazard, because C is read from memory while D is written to registers:</p>
 <pre><code><span class="kw">LD</span>  <span class="reg">RSP</span>      ← C[(x+1)%5]    <span class="com">// from DSCR buffer</span>
 <span class="kw">ROL</span> <span class="reg">RSP</span>, 1
@@ -430,6 +467,13 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 <p>This is the part Decision 5 made affordable: without the borrowed <code>RSP</code> register, D had to go back to the buffer and be re-loaded <b>per lane</b> — the +25 memory-triads/round that earlier versions paid.</p>
 
 <h3 id="w-apply">5.5 θ-apply + ρ + π — in place, D read from registers (17 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — θ apply, then ρ + π (fused)</span>
+<pre><code><span class="c"># θ apply: fold the mixing lane into every cell of the column</span>
+<span class="o">for</span> (x,y):  A[x,y] = A[x,y] ⊕ <span class="v">D[x]</span>
+<span class="c"># ρ (rotate by per-lane offset) + π (move to new position), together:</span>
+<span class="o">for</span> (x,y):  <span class="v">B[y, (2x+3y) mod 5]</span> = ROT(A[x,y], r[x,y])</code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:61–63</code> <span class="sep">|</span> <code>asm_op_keccak_perm.c:54–55</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:152–166</code> + <code>pi_cycles()</code>&nbsp;80–88 <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:46–62</code></div>
+<p>How it maps: the reference computes the π destination index <code>y+5·((2x+3y)%5)</code> and writes a fresh array <code>B</code>. The IR can't afford a second 25-register array, so it does the move <b>in place along π's cycles</b>: <code>pi_cycles()</code> (which calls <code>pi_dest</code>, lines 77–79) enumerates π as one fixed point (lane 0) plus a single 24-cycle; <code>gen_body</code> walks that cycle, and each step computes the spec's <code>ROT(A[src]⊕D[col(src)], r[src])</code> straight into the destination register. θ-apply, ρ, and π thus collapse into one XOR+ROL per lane — and because the walk follows π's own cycle, lanes land back in canonical slots (Decision 2).</p>
 <p>This is the heart of the round, and where Decision 2 pays off. Walk π's single 24-cycle (lane 0 is the fixed point, handled inline). For the cycle, save the head into <code>RSP</code>, then shift each element to its π-destination, <b>folding in θ</b> (<code>^ D_REG[col(src)]</code>) and <b>ρ</b> (<code>ROL</code> by <code>RHO[src]</code>) as we go:</p>
 <pre><code><span class="kw">MOV</span> <span class="reg">RSP</span> = REG[cyc[L-1]]                         <span class="com">// save cycle head (lowers to ZEROEXT)</span>
 <span class="kw">for</span> k = L-1 … 1:
@@ -444,6 +488,10 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 <span class="com">… the full 24-cycle, two lanes per triad …</span></code></pre>
 
 <h3 id="w-chi">5.6 χ — MOV-free, using the dead D-registers as scratch (17 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — χ (the only nonlinear step)</span>
+<pre><code><span class="o">for</span> (x,y):  A[x,y] = B[x,y] ⊕ ((¬B[x+1,y]) ∧ B[x+2,y])   <span class="c"># x indices mod 5, per row</span></code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:65–67</code> <span class="sep">|</span> <code>asm_op_keccak_perm.c:56–57</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:172–178</code> (<code>gen_body</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:63–79</code></div>
+<p>How it maps: the spec's <code>(¬B[x+1])∧B[x+2]</code> is exactly the <code>NOTAND(d,a,b)=(¬a)∧b</code> primitive. The realization detail is <b>ordering to avoid clobbering</b>: in place, <code>A[x]</code> is overwritten while later lanes still need its old value. <code>gen_body</code> first computes all five <code>NOTAND</code>s of a row into the now-dead D-registers <code>SCR5=[RAX,TMP12..TMP15]</code> (the B values are still intact), then does five in-place XORs — <b>no save-MOVs</b>, which only the register headroom from residency makes possible.</p>
 <p>χ is <code>s[x] ^= ¬s[x+1] &amp; s[x+2]</code> across each row of 5. Done naïvely in place, the first lane you overwrite is still needed by later lanes, forcing save-MOVs — register-starved native code pays ~2 MOVs/row = 10/round. We have headroom (the five D-registers are dead now), so the generator <b>computes all 5 NOTANDs of the row first</b> into the freed registers, then does 5 in-place XORs:</p>
 <pre><code>SCR5 = [<span class="reg">RAX, TMP12, TMP13, TMP14, TMP15</span>]   <span class="com">// the now-dead D regs</span>
 <span class="kw">for</span> x in 0..4:  <span class="kw">NOTAND</span> SCR5[x] = (¬REG[r[x+1]]) ∧ REG[r[x+2]]   <span class="com">// B still intact</span>
@@ -455,6 +503,10 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 <p><b>No save-MOVs at all.</b> This is something native cannot do — it has no spare registers. Our register residency directly buys it; it was the single biggest measured jump (~5%, §9.1).</p>
 
 <h3 id="w-iota">5.7 ι — round constant via byte-indexed table</h3>
+<div class="spec"><span class="tag">Keccak spec — ι (break symmetry)</span>
+<pre><code>A[0,0] = A[0,0] ⊕ <span class="v">RC[round]</span></code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:68</code> <span class="sep">|</span> <code>asm_op_keccak_perm.c:58</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:182–184</code> (<code>gen_body</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:79–81</code></div>
+<p>How it maps: the reference indexes a constant array <code>RC[round]</code>. In microcode there is no <code>round</code> counter on the critical path — instead the <code>COUNTER</code> lane holds the <b>byte offset of the current RC directly</b>, and <code>gen_body</code> emits <code>LD idx; LDX RC=mem[base+idx]; XOR A[0,0]</code>. The lane-0 XOR is slot 0 of triad line 81 (its other slots belong to loop-control, §5.8).</p>
 <p>The subtle optimization: the <code>COUNTER</code> lane stores the <b>byte offset of the current RC directly</b> (init 128, += 8/round), so fetching RC is just load-index, indexed-load, XOR — <b>no SHL/ADD on the ι→RC→lane0 critical path</b>. The RC table at lanes 32..55 is past the immediate range, so ι uses the index-register <code>LDX</code> form:</p>
 <pre><code><span class="kw">LD</span>  <span class="reg">TMP14</span> ← COUNTER          <span class="com">// the RC byte-index</span>
 <span class="kw">LDX</span> <span class="reg">TMP13</span> ← mem[RCX + TMP14]  <span class="com">// index-register form: RC = table[idx]</span>
@@ -464,12 +516,20 @@ Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b>
 { <span class="kw">XOR</span>(<span class="reg">RDI</span>,RDI,TMP13), <span class="kw">ADD</span>(TMP14,TMP14,<span class="lit">8</span>), <span class="kw">STAD</span>(TMP14,RCX,<span class="lit">112</span>,SEG_DS), NOP_SEQWORD },        <span class="com">// ι + advance idx + persist</span></code></pre>
 
 <h3 id="w-loop">5.8 Loop control — the backward branch</h3>
+<div class="spec"><span class="tag">Keccak spec — the 24-round driver</span>
+<pre><code><span class="o">for</span> round <span class="o">in</span> 0..23:
+    A = round_function(A, <span class="v">RC[round]</span>)   <span class="c"># θ ρ π χ ι</span></code></pre></div>
+<div class="srcptr"><span class="k ref">REF</span> <code>keccak_gen.py:71–75</code> (<code>keccak_perm_ref</code>) <span class="sep">|</span> <code>asm_op_keccak_perm.c:60–62</code> <span class="sep">|</span> <span class="k ir">IR</span> <code>keccak_gen.py:187–192</code> (<code>gen_loopctrl</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:81</code> (advance) + <code>:82</code> (branch)</div>
+<p>How it maps: the reference's Python/C <code>for</code> loop becomes a real backward branch in microcode. <code>gen_loopctrl</code> emits <code>ADDI idx+=8</code> and <code>ST idx</code> (packed into the spare slots of line 81), then a <code>LOOPTEST</code> that lowers to the line-82 triad <code>{ XOR idx^320 ; UJMPCC CONDNZ → 0x7c68 }</code>. Counting <b>up</b> to 320 (= just past <code>RC[23]</code>) gives exactly the spec's 24 iterations.</p>
 <p>The <code>+=8</code> arithmetic is paid here (off the ι critical path). Then a single forced triad does the branch: an <code>XOR</code> sets ZF in the same triad as the <code>UJMPCC</code>:</p>
 <pre><code>{ <span class="kw">XOR_DSZ64_DRI</span>(<span class="reg">TMP12</span>, <span class="reg">TMP14</span>, <span class="lit">320</span>), NOP,
   <span class="kw">UJMPCC_DIRECT_NOTTAKEN_CONDNZ_RI</span>(<span class="reg">TMP12</span>, <span class="lit">0x7c68</span>), NOP_SEQWORD },</code></pre>
 <p><code>320 = RC_END_IDX</code> = the byte-index just past <code>RC[23]</code>. The <code>XOR</code> computes <code>idx ^ 320</code>; while <code>idx ≠ 320</code> the result is non-zero, ZF is clear, and the <code>UJMPCC...CONDNZ</code> branches back to <code>loop_top = 0x7c68</code>. When <code>idx == 320</code>, the XOR yields 0, ZF is set, the branch is not taken, and control falls through to the epilogue — <b>exactly 24 iterations</b>. We count <em>up</em> because decrement-style ops don't work on this microcode (§3.2).</p>
 
 <h3 id="w-epilogue">5.9 Epilogue — store state, restore RSP (26 triads)</h3>
+<div class="spec"><span class="tag">Keccak spec — no analog</span>
+Like the prologue, the spec has no store step. The epilogue is the other half of Decision 1: write the resident state back to memory <b>once</b>, after all 24 rounds, and restore the borrowed <code>RSP</code> (Decision 5) so the firing returns cleanly.</div>
+<div class="srcptr"><span class="k ir">IR</span> <code>keccak_gen.py:194–197</code> (<code>gen_epilogue</code>) <span class="sep">|</span> <span class="k tri">triads</span> <code>keccak_perm_body.h:83–108</code></div>
 <pre><code><span class="kw">for</span> i in 0..24:  <span class="kw">ST</span> REG[i] → OFF(i)     <span class="com">// write the 25 lanes back to the buffer</span>
 <span class="kw">LD</span> <span class="reg">RSP</span> ← RSPSAVE                    <span class="com">// restore the stack pointer before returning</span></code></pre>
 <p>The final <code>LD RSP</code> ends with <code>END_SEQWORD</code>, returning control to the C side cleanly — which is exactly what <code>probe_rsp</code> verified is safe.</p>

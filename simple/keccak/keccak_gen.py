@@ -326,10 +326,47 @@ def verify_perm(n=64):
             if fails>1: break
     return fails
 
+# Independent published KAT (Keccak team's KeccakF-1600-IntermediateValues.txt).
+# Full 25-lane vectors, NOT recomputed from keccak_perm_ref -> the SIMULATOR (which
+# is what lowers to the actual patch) is asserted against fixed published constants.
+#   KAT_F0   = f(0)     (zero input; lane0 is the canonical 0xf1258f7940e1dde7)
+#   KAT_F0F0 = f(f(0))  (its INPUT, KAT_F0, is fully non-zero -> a non-trivial KAT)
+KAT_F0 = [
+    0xF1258F7940E1DDE7, 0x84D5CCF933C0478A, 0xD598261EA65AA9EE, 0xBD1547306F80494D, 0x8B284E056253D057,
+    0xFF97A42D7F8E6FD4, 0x90FEE5A0A44647C4, 0x8C5BDA0CD6192E76, 0xAD30A6F71B19059C, 0x30935AB7D08FFC64,
+    0xEB5AA93F2317D635, 0xA9A6E6260D712103, 0x81A57C16DBCF555F, 0x43B831CD0347C826, 0x01F22F1A11A5569F,
+    0x05E5635A21D9AE61, 0x64BEFEF28CC970F2, 0x613670957BC46611, 0xB87C5A554FD00ECB, 0x8C3EE88A1CCF32C8,
+    0x940C7922AE3A2614, 0x1841F924A2C509E4, 0x16F53526E70465C2, 0x75F644E97F30A13B, 0xEAF1FF7B5CECA249,
+]
+KAT_F0F0 = [
+    0x2D5C954DF96ECB3C, 0x6A332CD07057B56D, 0x093D8D1270D76B6C, 0x8A20D9B25569D094, 0x4F9C4F99E5E7F156,
+    0xF957B9A2DA65FB38, 0x85773DAE1275AF0D, 0xFAF4F247C3D810F7, 0x1F1B9EE6F79A8759, 0xE4FECC0FEE98B425,
+    0x68CE61B6B9CE68A1, 0xDEEA66C4BA8F974F, 0x33C43D836EAFB1F5, 0xE00654042719DBD9, 0x7CF8A9F009831265,
+    0xFD5449A6BF174743, 0x97DDAD33D8994B40, 0x48EAD5FC5D0BE774, 0xE3B8C8EE55B7B03C, 0x91A0226E649E42E9,
+    0x900E3129E7BADD7B, 0x202A9EC5FAA3CCE8, 0x5B3402464E1C3DB6, 0x609F4E62A44C1059, 0x20D06CD26A8FBF5C,
+]
+
+def verify_kat():
+    """Assert the simulator reproduces the published f(0) and f(f(0)) vectors.
+    The second feeds the NON-ZERO state f(0) as input. Returns # of bad lanes."""
+    fails=0
+    for label,inp,exp in (("f(0)      [zero in]   ", [0]*25, KAT_F0),
+                          ("f(f(0))   [nonzero in]", KAT_F0,  KAT_F0F0)):
+        got=simulate_perm(inp)
+        bad=[i for i in range(25) if got[i]!=exp[i]]
+        for i in bad[:4]:
+            print(f"  KAT {label} lane[{i}] got={got[i]:016x} exp={exp[i]:016x}")
+        print(f"KAT {label}: {'FAIL' if bad else 'OK'} ({25-len(bad)}/25)")
+        fails+=len(bad)
+    return fails
+
 if __name__=="__main__":
     nf=verify_perm(64)
     if nf: print("PERM SIM FAILED"); sys.exit(1)
     print("PERM SIM OK: 64/64 random permutations match 24-round reference.")
+    nk=verify_kat()
+    if nk: print("KAT SIM FAILED"); sys.exit(1)
+    print("KAT SIM OK: simulator matches published f(0) + f(f(0)) vectors.")
     nt,npro,nbody,nepi=emit_perm_c("keccak_perm.h")
     print(f"perm triads={nt}  (prologue {npro} + body+loop {nbody} + epilogue {nepi})  cap 128")
     print("Wrote keccak_perm.h + keccak_perm_body.h")
