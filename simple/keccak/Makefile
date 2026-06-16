@@ -67,20 +67,10 @@ ifeq ($(PROG),bench_keccak)
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_opt64lcu6.o
 endif
 
-# ---- asm_op_keccak*: need -no-pie because LDZX_DSZ64_ASZ32 (only ASZ32 form
-# exists in opcode.h) only takes 32-bit addresses. With -fPIE, static globals
-# can land above 4GB; -no-pie forces them low.
-ifeq ($(PROG),asm_op_keccak)
-CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
-LDFLAGS := -static -no-pie
-endif
-
+# ---- asm_op_keccak_perm: needs -no-pie because LDZX_DSZ64_ASZ32 (only ASZ32
+# form exists in opcode.h) only takes 32-bit addresses. With -fPIE, static
+# globals can land above 4GB; -no-pie forces them low.
 ifeq ($(PROG),asm_op_keccak_perm)
-CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
-LDFLAGS := -static -no-pie
-endif
-
-ifeq ($(PROG),asm_op_keccak_scall)
 CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
 endif

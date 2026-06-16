@@ -4,3 +4,4 @@ full_curve25519.c:704:13: warning: ‘fe_sub_sq_ucode’ defined but not used [-
 full_curve25519.c:638:13: warning: ‘fe_add_sq_ucode’ defined but not used [-Wunused-function]
   638 | static void fe_add_sq_ucode(const uint64_t *x, const uint64_t *y,
       |             ^~~~~~~~~~~~~~~
+make: *** [Makefile:204: full_curve25519_static] Hangup

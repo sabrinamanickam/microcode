@@ -2,17 +2,19 @@
 """
 keccak_gen.py — Generate + software-verify Keccak-f[1600] in microcode.
 
-Two products:
-  * single round  (keccak_round.h / _body.h)  — Phase 3b, kept for reference
-  * full 24-round permutation, LOOPED inside one vmwrite (keccak_perm.h / _body.h)
+One product: the full 24-round permutation, LOOPED inside a single vmwrite
+(keccak_perm.h / keccak_perm_body.h). The 25 state lanes stay resident in
+registers across all 24 rounds — 13 GPR + 12 TMP hold the lanes, and RSP is
+borrowed as a 32nd data register (saved at the prologue, restored at the
+epilogue) so theta's 5 D mixing lanes can stay in registers too.
 
 The full permutation:
-  - prologue: load 25 state lanes into 13 GPR + 12 TMP            (once)
-  - loop_top: theta + rho + pi + chi + iota (RC[counter] lookup)  (x24)
+  - prologue: save RSP; load 25 state lanes into 13 GPR + 12 TMP    (once)
+  - loop_top: theta + rho + pi + chi + iota (RC[counter] lookup)    (x24)
               counter++ ; {XOR sets ZF, UJMPCC CONDNZ -> loop_top}
-  - epilogue: store 25 state lanes back                           (once)
-  State stays resident in registers across all 24 rounds; only the prologue and
-  epilogue touch the 25 state lanes in memory. theta still spills C->regs / D->buf.
+  - epilogue: store 25 state lanes back; restore RSP                (once)
+  Only the prologue and epilogue touch the 25 state lanes in memory. theta
+  spills the column parities C to the buffer, but keeps D in registers.
 
 Hardware facts (all verified on this Goldmont — see memory keccak-io-harness-seg
 and microcode-control-flow):
@@ -29,7 +31,7 @@ Buffer g_keccak_buf[56], base RCX = &buf[16] (centered):
     0..24  state   (offset (i-16)*8 = -128..+64, immediate)
     25..29 D scratch                              (+72..+104, immediate)
     30     loop counter                           (+112, immediate)
-    31     theta-D borrow-save scratch            (+120, immediate)
+    31     saved RSP (RSP reused as 32nd data reg) (+120, immediate)
     32..55 RC[0..23] table          (index-register addressing only)
 The C wrapper fills state[0..24], counter(30)=0, RC table(32..55) before firing.
 
@@ -91,25 +93,20 @@ TMPS=[f"TMP{i}" for i in range(12)]
 REG=GPRS+TMPS
 assert len(REG)==25
 BASE="RCX"
-C_REG=["RAX","TMP12","TMP13","TMP14","TMP15"]   # theta C[0..4]
-BORROW="TMP11"                                   # =REG[24], theta-D rol temp (save/restore)
-assert BORROW==REG[24]
-T_SAVE="RAX"; T_DTMP="TMP12"; T_N="TMP13"        # apply/chi temps
-def col(i): return i%5
+def col(i): return i%5    # lane index -> column x  (i = x + 5y, so i%5 = x)
 
-# RIGOROUS TEST (2026-06-02): does fully-resident D (no buffer round-trip) beat
-# the 2056 per-lane-D baseline? Enabled by using RSP as the 32nd register
-# (probe_rsp confirmed it's usable as a data reg when saved/restored). With
-# D_IN_REGS: theta C->buffer, theta D->5 registers (RAX,TMP12-15), apply reads D
-# from registers (NO 25 per-lane loads), save-temp=RSP, RCX stays base (no
-# rebuild). RSP is saved at prologue / restored at epilogue (once per perm).
-D_IN_REGS = True
-D_REG = ["RAX","TMP12","TMP13","TMP14","TMP15"]   # D[0..4] resident across apply
+# Fully-resident D: theta writes the 5 column parities C to the buffer, but keeps
+# the 5 D mixing lanes in registers (D_REG), so the apply reads D from registers
+# with NO per-lane loads. This needs a 32nd register — RSP, borrowed as a data
+# reg (probe_rsp confirmed it works when saved/restored). The pi cycle-walk's
+# save-temp is also RSP, and the base RCX is never rebuilt. RSP is saved at the
+# prologue and restored at the epilogue (once per permutation).
+D_REG = ["RAX","TMP12","TMP13","TMP14","TMP15"]   # D[0..4], resident across the apply
 RSPSAVE = 31                                      # buffer lane holding the saved RSP
 
 # layout
 BASE_LANE=16
-STATE0=0; DSCR=25; COUNTER=30; BORROWSAVE=31; RCTAB=32
+DSCR=25; COUNTER=30; RCTAB=32
 BUFLEN=56
 def OFF(lane): return (lane-BASE_LANE)*8
 for _l in range(0,32):
@@ -128,102 +125,57 @@ for _l in range(0,32):
 def emit(ops,*o): ops.append(o)
 
 def gen_prologue(ops):
-    if D_IN_REGS:
-        emit(ops,"ST", "RSP", OFF(RSPSAVE))   # save stack pointer (RSP reused as data reg)
+    emit(ops,"ST", "RSP", OFF(RSPSAVE))   # save stack pointer (RSP reused as 32nd data reg)
     for i in range(25):
         emit(ops,"LD", REG[i], OFF(i))
 
 def gen_body(ops):
     """theta + rho + pi + chi + iota(RC[counter]). State stays in REG[]."""
-    if D_IN_REGS:
-        # theta-C -> buffer (Cscr = DSCR lanes 25..29). BALANCED XOR TREE (depth 3
-        # not 4): C is at the head of the round's dependency chain, so shortening
-        # its latency shortens every round. RSP is free here (2nd tree accumulator).
-        for x in range(5):
-            emit(ops,"XOR", "RAX", REG[x],    REG[x+5])    # a^b
-            emit(ops,"XOR", "RSP", REG[x+10], REG[x+15])   # c^d (parallel)
-            emit(ops,"XOR", "RAX", "RAX", "RSP")           # (a^b)^(c^d)
-            emit(ops,"XOR", "RAX", "RAX", REG[x+20])       # ^e   -> depth 3
-            emit(ops,"ST",  "RAX", OFF(DSCR+x))
-        # theta-D -> 5 REGISTERS (D_REG), reading C from buffer. RSP = rol temp.
-        # D[x] = C[x-1] ^ rol(C[x+1],1).  No in-place hazard (C is in memory).
-        for x in range(5):
-            emit(ops,"LD",  "RSP", OFF(DSCR+(x+1)%5))   # C[x+1]
-            emit(ops,"ROL", "RSP", "RSP", 1)
-            emit(ops,"LD",  D_REG[x], OFF(DSCR+(x+4)%5)) # C[x-1]
-            emit(ops,"XOR", D_REG[x], D_REG[x], "RSP")   # D[x]
-        # theta-apply + rho + pi, IN PLACE, D read from REGISTERS (no per-lane LD!).
-        # save-temp = RSP (free after theta-D). RCX stays = base (no rebuild).
-        for cyc in pi_cycles():
-            if len(cyc)==1:
-                i=cyc[0]
-                emit(ops,"XOR", REG[i], REG[i], D_REG[col(i)])
-                if RHO[i]: emit(ops,"ROL", REG[i], REG[i], RHO[i])
-                continue
-            L=len(cyc)
-            emit(ops,"MOV", "RSP", REG[cyc[L-1]])
-            for k in range(L-1,0,-1):
-                dst,src=cyc[k],cyc[k-1]
-                emit(ops,"XOR", REG[dst], REG[src], D_REG[col(src)])
-                if RHO[src]: emit(ops,"ROL", REG[dst], REG[dst], RHO[src])
-            src=cyc[L-1]
-            emit(ops,"XOR", REG[cyc[0]], "RSP", D_REG[col(src)])
-            if RHO[src]: emit(ops,"ROL", REG[cyc[0]], REG[cyc[0]], RHO[src])
-    else:
-      # theta parity C -> C_REG
-      for x in range(5):
-        emit(ops,"XOR", C_REG[x], REG[x], REG[x+5])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+10])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+15])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+20])
-      emit(ops,"ST", BORROW, OFF(BORROWSAVE))
-      for x in range(5):
-        emit(ops,"ROL", BORROW, C_REG[(x+1)%5], 1)
-        emit(ops,"XOR", BORROW, C_REG[(x+4)%5], BORROW)
-        emit(ops,"ST",  BORROW, OFF(DSCR+x))
-      emit(ops,"LD", BORROW, OFF(BORROWSAVE))
-      for cyc in pi_cycles():
+    # theta-C -> buffer (Cscr = DSCR lanes 25..29). BALANCED XOR TREE (depth 3
+    # not 4): C is at the head of the round's dependency chain, so shortening
+    # its latency shortens every round. RSP is free here (2nd tree accumulator).
+    for x in range(5):
+        emit(ops,"XOR", "RAX", REG[x],    REG[x+5])    # a^b
+        emit(ops,"XOR", "RSP", REG[x+10], REG[x+15])   # c^d (parallel)
+        emit(ops,"XOR", "RAX", "RAX", "RSP")           # (a^b)^(c^d)
+        emit(ops,"XOR", "RAX", "RAX", REG[x+20])       # ^e   -> depth 3
+        emit(ops,"ST",  "RAX", OFF(DSCR+x))
+    # theta-D -> 5 REGISTERS (D_REG), reading C from buffer. RSP = rol temp.
+    # D[x] = C[x-1] ^ rol(C[x+1],1).  No in-place hazard (C is in memory).
+    for x in range(5):
+        emit(ops,"LD",  "RSP", OFF(DSCR+(x+1)%5))   # C[x+1]
+        emit(ops,"ROL", "RSP", "RSP", 1)
+        emit(ops,"LD",  D_REG[x], OFF(DSCR+(x+4)%5)) # C[x-1]
+        emit(ops,"XOR", D_REG[x], D_REG[x], "RSP")   # D[x]
+    # theta-apply + rho + pi, IN PLACE, D read from REGISTERS (no per-lane LD!).
+    # save-temp = RSP (free after theta-D). RCX stays = base (no rebuild).
+    for cyc in pi_cycles():
         if len(cyc)==1:
             i=cyc[0]
-            emit(ops,"LD", T_DTMP, OFF(DSCR+col(i)))
-            emit(ops,"XOR", REG[i], REG[i], T_DTMP)
+            emit(ops,"XOR", REG[i], REG[i], D_REG[col(i)])
             if RHO[i]: emit(ops,"ROL", REG[i], REG[i], RHO[i])
             continue
         L=len(cyc)
-        emit(ops,"MOV", T_SAVE, REG[cyc[L-1]])
+        emit(ops,"MOV", "RSP", REG[cyc[L-1]])
         for k in range(L-1,0,-1):
             dst,src=cyc[k],cyc[k-1]
-            emit(ops,"LD", T_DTMP, OFF(DSCR+col(src)))
-            emit(ops,"XOR", REG[dst], REG[src], T_DTMP)
+            emit(ops,"XOR", REG[dst], REG[src], D_REG[col(src)])
             if RHO[src]: emit(ops,"ROL", REG[dst], REG[dst], RHO[src])
         src=cyc[L-1]
-        emit(ops,"LD", T_DTMP, OFF(DSCR+col(src)))
-        emit(ops,"XOR", REG[cyc[0]], T_SAVE, T_DTMP)
+        emit(ops,"XOR", REG[cyc[0]], "RSP", D_REG[col(src)])
         if RHO[src]: emit(ops,"ROL", REG[cyc[0]], REG[cyc[0]], RHO[src])
-    # chi per row in place
-    # chi per row. With D_IN_REGS the 5 D regs are dead now -> use them as 5
-    # scratch to compute ALL 5 NOTANDs of the row FIRST (B values still intact),
-    # then 5 in-place XORs. This eliminates the 2 save-MOVs/row (10 MOVs/round)
-    # that native is forced into by register starvation. Native CAN'T do this
-    # (no spare regs); we have the headroom because state is fully register-resident.
-    if D_IN_REGS:
-        SCR5 = ["RAX","TMP12","TMP13","TMP14","TMP15"]
-        for y in range(5):
-            r=[5*y+x for x in range(5)]
-            for x in range(5):
-                emit(ops,"NOTAND", SCR5[x], REG[r[(x+1)%5]], REG[r[(x+2)%5]])
-            for x in range(5):
-                emit(ops,"XOR", REG[r[x]], REG[r[x]], SCR5[x])
-    else:
-      for y in range(5):
+    # chi per row, in place. The 5 D registers are dead now, so use them as
+    # scratch: compute ALL 5 NOTANDs of the row FIRST (the B values are still
+    # intact), then do 5 in-place XORs. This avoids the 2 save-MOVs/row (10
+    # MOVs/round) that register-starved native code is forced into — we have the
+    # headroom because the whole state is register-resident.
+    SCR5 = ["RAX","TMP12","TMP13","TMP14","TMP15"]
+    for y in range(5):
         r=[5*y+x for x in range(5)]
-        emit(ops,"MOV", T_SAVE, REG[r[0]])
-        emit(ops,"MOV", T_DTMP, REG[r[1]])
-        emit(ops,"NOTAND", T_N, REG[r[1]], REG[r[2]]); emit(ops,"XOR", REG[r[0]], REG[r[0]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[2]], REG[r[3]]); emit(ops,"XOR", REG[r[1]], REG[r[1]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[3]], REG[r[4]]); emit(ops,"XOR", REG[r[2]], REG[r[2]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[4]], T_SAVE);    emit(ops,"XOR", REG[r[3]], REG[r[3]], T_N)
-        emit(ops,"NOTAND", T_N, T_SAVE, T_DTMP);       emit(ops,"XOR", REG[r[4]], REG[r[4]], T_N)
+        for x in range(5):
+            emit(ops,"NOTAND", SCR5[x], REG[r[(x+1)%5]], REG[r[(x+2)%5]])
+        for x in range(5):
+            emit(ops,"XOR", REG[r[x]], REG[r[x]], SCR5[x])
     # iota: RC[counter] via index addressing. The counter lane holds the RC
     # BYTE-INDEX directly (init = (RCTAB-BASE_LANE)*8, += 8 per round), so iota is
     # just LD idx; LDX RC; XOR — no SHL/ADD on the iota->RC->lane0 critical path.
@@ -242,8 +194,7 @@ def gen_loopctrl(ops):
 def gen_epilogue(ops):
     for i in range(25):
         emit(ops,"ST", REG[i], OFF(i))
-    if D_IN_REGS:
-        emit(ops,"LD", "RSP", OFF(RSPSAVE))   # restore stack pointer before returning
+    emit(ops,"LD", "RSP", OFF(RSPSAVE))   # restore stack pointer before returning
 
 # ---- simulator (models full looped execution + signed/index addressing) ----
 def simulate_perm(init_state):
@@ -269,7 +220,6 @@ def simulate_perm(init_state):
             elif k=="ADDI": rf[op[1]]=(rf[op[2]]+op[3])&MASK
             elif k=="SHLI": rf[op[1]]=(rf[op[2]]<<op[3])&MASK
             elif k=="LOOPTEST": pass     # XOR sets flags + branch; Python drives the loop
-            elif k in ("BASEHI","BASESHL","BASELO"): pass   # rebuild RCX=base; sim addresses by offset
             else: raise ValueError(k)
     pro=[]; gen_prologue(pro); run(pro)
     body=[]; gen_body(body)
@@ -318,9 +268,6 @@ def op_to_c(op, loop_top=None):
     elif k=="NOTAND": return f"NOTAND_DSZ64_DRR({op[1]}, {op[2]}, {op[3]})"
     elif k=="MOV":  return f"ZEROEXT_DSZ64_DR({op[1]}, {op[2]})"
     elif k=="LDI_IDX": return f"ZEROEXT_DSZ32_DI({op[1]}, {op[2]})"
-    elif k=="BASEHI":  return f"ZEROEXT_DSZ32_DI({op[1]}, (((uintptr_t)(g_keccak_buf+{BASE_LANE}))>>16)&0xffff)"
-    elif k=="BASESHL": return f"SHL_DSZ32_DRI({op[1]}, {op[1]}, 16)"
-    elif k=="BASELO":  return f"XOR_DSZ64_DRI({op[1]}, {op[1]}, ((uintptr_t)(g_keccak_buf+{BASE_LANE}))&0xffff)"
     elif k=="ADDI": return f"ADD_DSZ64_DRI({op[1]}, {op[2]}, {op[3]})"
     elif k=="SHLI": return f"SHL_DSZ64_DRI({op[1]}, {op[2]}, {op[3]})"
     raise ValueError(k)
@@ -379,117 +326,6 @@ def verify_perm(n=64):
             if fails>1: break
     return fails
 
-# ====================================================================
-# Separate-call round (Phase 4 fix): one round per vmwrite, RC from a buffer
-# slot (C supplies RC[round]). 24 separate vmwrites OVERLAP in the OoO engine
-# (~0.49 cyc/triad), unlike the in-microcode loop which serializes (~1.3).
-# Layout: base RCX=&buf[15]; 0..24 state, 25..29 D scratch, 30 RC slot. BUFLEN 31.
-# ====================================================================
-SC_BASE=15; SC_DSCR=25
-# RC slot on a SEPARATE PAGE from the state (lane 600 = +4680 B from base, > 4KB
-# past the state region) so the RC store can't alias the state loads/stores and
-# serialize consecutive vmwrites. Addressed via index register (full width).
-SC_RC=600; SC_BUFLEN=608
-SC_RC_BYTES=(SC_RC-SC_BASE)*8     # index value (bytes) for the far RC slot
-def SCOFF(lane): return (lane-SC_BASE)*8
-for _l in range(0,31): assert -128 <= SCOFF(_l) <= 127, _l
-
-def gen_scround_ops():
-    ops=[]
-    # RC arrives in RDX (=REG[3]) from C. Save it to the FAR RC slot (separate
-    # page, index-addressed) via a microcode store, BEFORE the prologue overwrites
-    # RDX with state lane 3. RAX is free here (theta-C hasn't started).
-    emit(ops,"LDI_IDX", "RAX", SC_RC_BYTES)     # RAX = byte offset of far RC slot
-    emit(ops,"STX", "RDX", "RAX")               # mem[base+RAX] = RC
-    for i in range(25): emit(ops,"LD", REG[i], SCOFF(i))            # prologue (LD RDX<-lane3)
-    for x in range(5):                                              # theta C -> C_REG
-        emit(ops,"XOR", C_REG[x], REG[x], REG[x+5])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+10])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+15])
-        emit(ops,"XOR", C_REG[x], C_REG[x], REG[x+20])
-    for x in range(5):                                              # theta D -> buf, borrow REG[24]
-        emit(ops,"ROL", BORROW, C_REG[(x+1)%5], 1)
-        emit(ops,"XOR", BORROW, C_REG[(x+4)%5], BORROW)
-        emit(ops,"ST",  BORROW, SCOFF(SC_DSCR+x))
-    emit(ops,"LD", BORROW, SCOFF(24))                               # restore lane 24 from input
-    for cyc in pi_cycles():                                         # apply in place
-        if len(cyc)==1:
-            i=cyc[0]
-            emit(ops,"LD", T_DTMP, SCOFF(SC_DSCR+col(i)))
-            emit(ops,"XOR", REG[i], REG[i], T_DTMP)
-            if RHO[i]: emit(ops,"ROL", REG[i], REG[i], RHO[i])
-            continue
-        L=len(cyc)
-        emit(ops,"MOV", T_SAVE, REG[cyc[L-1]])
-        for k in range(L-1,0,-1):
-            dst,src=cyc[k],cyc[k-1]
-            emit(ops,"LD", T_DTMP, SCOFF(SC_DSCR+col(src)))
-            emit(ops,"XOR", REG[dst], REG[src], T_DTMP)
-            if RHO[src]: emit(ops,"ROL", REG[dst], REG[dst], RHO[src])
-        src=cyc[L-1]
-        emit(ops,"LD", T_DTMP, SCOFF(SC_DSCR+col(src)))
-        emit(ops,"XOR", REG[cyc[0]], T_SAVE, T_DTMP)
-        if RHO[src]: emit(ops,"ROL", REG[cyc[0]], REG[cyc[0]], RHO[src])
-    for y in range(5):                                              # chi in place
-        r=[5*y+x for x in range(5)]
-        emit(ops,"MOV", T_SAVE, REG[r[0]]); emit(ops,"MOV", T_DTMP, REG[r[1]])
-        emit(ops,"NOTAND", T_N, REG[r[1]], REG[r[2]]); emit(ops,"XOR", REG[r[0]], REG[r[0]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[2]], REG[r[3]]); emit(ops,"XOR", REG[r[1]], REG[r[1]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[3]], REG[r[4]]); emit(ops,"XOR", REG[r[2]], REG[r[2]], T_N)
-        emit(ops,"NOTAND", T_N, REG[r[4]], T_SAVE);    emit(ops,"XOR", REG[r[3]], REG[r[3]], T_N)
-        emit(ops,"NOTAND", T_N, T_SAVE, T_DTMP);       emit(ops,"XOR", REG[r[4]], REG[r[4]], T_N)
-    # iota: load RC from the far slot (index-addressed). RAX free here (post-chi).
-    emit(ops,"LDI_IDX", "RAX", SC_RC_BYTES)
-    emit(ops,"LDX", T_N, "RAX"); emit(ops,"XOR", REG[0], REG[0], T_N)
-    for i in range(25): emit(ops,"ST", REG[i], SCOFF(i))            # epilogue
-    return ops
-
-def simulate_scround(state, rc):
-    rf={"RDX":rc}; buf=[0]*SC_BUFLEN; buf[0:25]=list(state)   # RC arrives in RDX
-    def at(off): assert -128<=off<=127,off; return SC_BASE+off//8
-    for op in gen_scround_ops():
-        k=op[0]
-        if   k=="LD":  rf[op[1]]=buf[at(op[2])]
-        elif k=="ST":  buf[at(op[2])]=rf[op[1]]&MASK
-        elif k=="LDI_IDX": rf[op[1]]=op[2]                      # load byte-offset immediate
-        elif k=="LDX": rf[op[1]]=buf[SC_BASE + rf[op[2]]//8]    # mem[base+idxreg]
-        elif k=="STX": buf[SC_BASE + rf[op[2]]//8]=rf[op[1]]&MASK
-        elif k=="XOR": rf[op[1]]=(rf[op[2]]^rf[op[3]])&MASK
-        elif k=="ROL": rf[op[1]]=rol(rf[op[2]],op[3])
-        elif k=="NOTAND": rf[op[1]]=((~rf[op[2]])&rf[op[3]])&MASK
-        elif k=="MOV": rf[op[1]]=rf[op[2]]&MASK
-        else: raise ValueError(k)
-    return buf[0:25]
-
-def verify_scround(n=64):
-    import random; random.seed(7); fails=0
-    for t in range(n):
-        st=[random.getrandbits(64) for _ in range(25)]
-        # full 24-round chain via 24 separate scround calls
-        s=list(st)
-        for r in range(24): s=simulate_scround(s, RC[r])
-        if s!=keccak_perm_ref(st):
-            fails+=1; print(f"SCROUND chain trial {t} MISMATCH"); break
-    return fails
-
-def emit_scround_c(path):
-    triads=pack(gen_scround_ops())
-    head=[f"/* AUTO-GENERATED by keccak_gen.py — do not edit. */",
-          f"/* Separate-call Keccak round, RC from buf slot. {len(triads)} triads. */",
-          f"#define KECCAK_SC_TRIADS {len(triads)}",
-          f"#define KECCAK_SC_BUFLEN {SC_BUFLEN}",
-          f"#define KECCAK_SC_BASE_LANE {SC_BASE}",
-          f"#define KECCAK_SC_RC_LANE {SC_RC}"]
-    body=[]
-    for ti,t in enumerate(triads):
-        s=[op_to_c(o) for o in t]
-        while len(s)<3: s.append("NOP")
-        seqw="END_SEQWORD" if ti==len(triads)-1 else "NOP_SEQWORD"
-        body.append(f"    {{ {s[0]}, {s[1]}, {s[2]}, {seqw} }},")
-    open(path,"w").write("\n".join(head)+"\n")
-    open(path.replace(".h","_body.h"),"w").write("\n".join(body)+"\n")
-    return len(triads)
-
 if __name__=="__main__":
     nf=verify_perm(64)
     if nf: print("PERM SIM FAILED"); sys.exit(1)
@@ -497,9 +333,3 @@ if __name__=="__main__":
     nt,npro,nbody,nepi=emit_perm_c("keccak_perm.h")
     print(f"perm triads={nt}  (prologue {npro} + body+loop {nbody} + epilogue {nepi})  cap 128")
     print("Wrote keccak_perm.h + keccak_perm_body.h")
-    nf=verify_scround(64)
-    if nf: print("SCROUND SIM FAILED"); sys.exit(1)
-    print("SCROUND SIM OK: 64/64 random 24-round chains match reference.")
-    nsc=emit_scround_c("keccak_scround.h")
-    print(f"scround triads={nsc}  (one round, separate-call)")
-    print("Wrote keccak_scround.h + keccak_scround_body.h")
