@@ -33,8 +33,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Generic helpers shared with the curve matrix (no curve-specific state in them).
-source ../lib/freq_guard.sh    # check_cpu_frequency()
-source ../lib/parse.sh         # record_result()
+source ../../lib/freq_guard.sh    # check_cpu_frequency()
+source ../../lib/parse.sh         # record_result()
 
 # ── Result tables (read by record_result in lib/parse.sh) ──
 declare -A cell          # "cfg|label" -> min cyc/perm

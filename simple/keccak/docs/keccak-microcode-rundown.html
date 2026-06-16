@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keccak-f[1600] in Goldmont Microcode — Complete Implementation Rundown</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --panel2:#1c2330; --ink:#d6dde6; --muted:#8b97a7;
+    --accent:#6cb6ff; --accent2:#7ee787; --warn:#f0a64a; --bad:#ff7b72; --good:#56d364;
+    --line:#2a3340; --code:#0c1117; --kw:#ff9e64; --reg:#7ee787; --mem:#6cb6ff; --com:#6b7785;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{display:flex; max-width:1500px; margin:0 auto;}
+  /* sidebar */
+  nav.toc{
+    position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto;
+    width:300px; flex:0 0 300px; padding:24px 18px; background:var(--panel);
+    border-right:1px solid var(--line); font-size:13.5px;
+  }
+  nav.toc h2{font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:18px 0 8px;}
+  nav.toc a{display:block; color:var(--muted); text-decoration:none; padding:3px 8px; border-radius:6px; border-left:2px solid transparent;}
+  nav.toc a:hover{color:var(--ink); background:var(--panel2);}
+  nav.toc a.sub{padding-left:20px; font-size:12.8px;}
+  nav.toc .brand{font-weight:700; color:var(--accent); font-size:15px; margin-bottom:4px;}
+  nav.toc .brandsub{color:var(--muted); font-size:12px; margin-bottom:8px;}
+  /* main */
+  main{flex:1 1 auto; padding:42px 56px 120px; min-width:0; max-width:1100px;}
+  h1{font-size:33px; line-height:1.2; margin:0 0 6px; color:#fff; letter-spacing:-.01em;}
+  h2{font-size:25px; margin:54px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#fff; scroll-margin-top:20px;}
+  h3{font-size:19px; margin:34px 0 10px; color:var(--accent); scroll-margin-top:20px;}
+  h4{font-size:16px; margin:22px 0 8px; color:var(--accent2);}
+  p{margin:12px 0;}
+  a{color:var(--accent);}
+  code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13.5px;
+    background:var(--code); padding:1.5px 6px; border-radius:5px; color:#e6c07b; border:1px solid var(--line);}
+  pre{background:var(--code); border:1px solid var(--line); border-radius:10px; padding:16px 18px; overflow-x:auto;
+    font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13px; line-height:1.55; margin:16px 0;}
+  pre code{background:none; border:none; padding:0; color:var(--ink);}
+  .com{color:var(--com); font-style:italic;}
+  .kw{color:var(--kw);}
+  .reg{color:var(--reg);}
+  .mem{color:var(--mem);}
+  .lit{color:#d2a8ff;}
+  ul,ol{margin:12px 0; padding-left:24px;}
+  li{margin:5px 0;}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:13.8px;}
+  th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top;}
+  th{background:var(--panel2); color:#fff; font-weight:600;}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015);}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums;}
+  .lead{font-size:18px; color:var(--muted); margin:14px 0 8px;}
+  .headline{background:linear-gradient(135deg,#16241c,#13202b); border:1px solid #2c4a3a; border-radius:14px;
+    padding:22px 26px; margin:26px 0; display:flex; gap:30px; flex-wrap:wrap; align-items:center;}
+  .headline .big{font-size:46px; font-weight:800; color:var(--good); line-height:1; letter-spacing:-.02em;}
+  .headline .lbl{color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.08em;}
+  .callout{border-left:4px solid var(--accent); background:var(--panel2); border-radius:0 10px 10px 0; padding:12px 18px; margin:18px 0;}
+  .callout.warn{border-color:var(--warn);}
+  .callout.bad{border-color:var(--bad);}
+  .callout.good{border-color:var(--good);}
+  .callout .tag{font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; color:var(--accent); display:block; margin-bottom:4px;}
+  .callout.warn .tag{color:var(--warn);} .callout.bad .tag{color:var(--bad);} .callout.good .tag{color:var(--good);}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:18px 0;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 20px;}
+  .card h4{margin-top:0;}
+  .pill{display:inline-block; font-size:11.5px; padding:2px 9px; border-radius:20px; background:var(--panel2); border:1px solid var(--line); color:var(--muted); margin:2px 3px 2px 0;}
+  .pill.ok{color:var(--good); border-color:#2c4a3a;}
+  .pill.no{color:var(--bad); border-color:#5a2d2d;}
+  .staterow{font-family:"SF Mono",ui-monospace,monospace; font-size:12.5px;}
+  .win{color:var(--good); font-weight:700;}
+  .loss{color:var(--bad); font-weight:700;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+  .small{font-size:13px; color:var(--muted);}
+  .footer{margin-top:60px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;}
+  .kbd{font-family:"SF Mono",monospace; background:var(--panel2); border:1px solid var(--line); border-bottom-width:2px; border-radius:5px; padding:1px 7px; font-size:12.5px;}
+  .flow{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:16px 0; font-size:13px;}
+  .flow .step{background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:7px 13px; font-family:"SF Mono",monospace; font-size:12.5px;}
+  .flow .arr{color:var(--muted);}
+  .lanegrid{display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin:14px 0; max-width:620px;}
+  .lanegrid .cell{background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:7px 6px; text-align:center; font-family:"SF Mono",monospace; font-size:12px;}
+  .lanegrid .cell .lane{color:var(--muted); font-size:10.5px;}
+  .lanegrid .cell .rg{color:var(--reg); font-weight:700; font-size:13px;}
+  .lanegrid .cell.gpr{border-color:#2c4a3a;}
+  .lanegrid .cell.tmp{border-color:#2b3a52;}
+  .lanegrid .cell.tmp .rg{color:var(--mem);}
+  .tag-gpr{color:var(--reg);} .tag-tmp{color:var(--mem);}
+  details{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px 16px; margin:14px 0;}
+  summary{cursor:pointer; font-weight:600; color:var(--accent); padding:8px 0;}
+  .legend{font-size:12px; color:var(--muted); margin:8px 0;}
+  @media(max-width:980px){ nav.toc{display:none;} main{padding:28px 20px 80px;} .grid2{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="toc">
+  <div class="brand">Keccak-f[1600] in Microcode</div>
+  <div class="brandsub">Goldmont · Celeron N3350 · patch RAM</div>
+  <a href="#abstract">Abstract &amp; headline result</a>
+
+  <h2>Background</h2>
+  <a href="#bg-microcode" class="sub">1.1 Microcode patching</a>
+  <a href="#bg-hook" class="sub">1.2 The vmwrite hook</a>
+  <a href="#bg-keccak" class="sub">1.3 Keccak-f[1600] recap</a>
+  <a href="#bg-bet" class="sub">1.4 The bet</a>
+
+  <h2>Repository</h2>
+  <a href="#repo-tree" class="sub">2.1 File structure</a>
+  <a href="#repo-roles" class="sub">2.2 What each file does</a>
+  <a href="#repo-genfirst" class="sub">2.3 Generator-first</a>
+
+  <h2>Hardware facts</h2>
+  <a href="#hw-probes" class="sub">3.1 The probes</a>
+  <a href="#hw-constraints" class="sub">3.2 Constraints → code</a>
+
+  <h2>The design</h2>
+  <a href="#d-decisions" class="sub">4.1 Five decisions</a>
+  <a href="#d-buffer" class="sub">4.2 Buffer layout</a>
+  <a href="#d-regs" class="sub">4.3 Register allocation</a>
+
+  <h2>The permutation</h2>
+  <a href="#w-overview" class="sub">5.1 Triad map</a>
+  <a href="#w-prologue" class="sub">5.2 Prologue</a>
+  <a href="#w-theta-c" class="sub">5.3 θ-C parity tree</a>
+  <a href="#w-theta-d" class="sub">5.4 θ-D into registers</a>
+  <a href="#w-apply" class="sub">5.5 θ-apply + ρ + π</a>
+  <a href="#w-chi" class="sub">5.6 χ (MOV-free)</a>
+  <a href="#w-iota" class="sub">5.7 ι (byte-indexed RC)</a>
+  <a href="#w-loop" class="sub">5.8 Loop control</a>
+  <a href="#w-epilogue" class="sub">5.9 Epilogue</a>
+
+  <h2>The generator</h2>
+  <a href="#g-pipeline" class="sub">6.1 IR → sim → pack → C</a>
+  <a href="#g-sim" class="sub">6.2 Self-verification</a>
+
+  <h2>Build &amp; run</h2>
+  <a href="#build" class="sub">7.1 Makefiles &amp; flags</a>
+
+  <h2>Benchmarking</h2>
+  <a href="#bench-trap" class="sub">8.1 The frequency trap</a>
+  <a href="#bench-vs" class="sub">8.2 Head-to-head harness</a>
+  <a href="#bench-matrix" class="sub">8.3 The compiler matrix</a>
+  <a href="#bench-results" class="sub">8.4 Results</a>
+
+  <h2>Analysis</h2>
+  <a href="#a-journey" class="sub">9.1 Optimization journey</a>
+  <a href="#a-latency" class="sub">9.2 Latency model</a>
+  <a href="#a-phases" class="sub">9.3 Phase history</a>
+  <a href="#a-verdict" class="sub">9.4 Verdict</a>
+</nav>
+
+<main>
+
+<h1>Keccak-f[1600] in Goldmont Microcode</h1>
+<p class="lead">A complete technical rundown — from file structure to the last triad — of a full 24-round Keccak permutation encoded directly in Intel Goldmont microcode patch RAM, and benchmarked against the fastest hand-tuned scalar assembly.</p>
+
+<section id="abstract">
+<div class="headline">
+  <div>
+    <div class="big">0.934×</div>
+    <div class="lbl">microcode / fastest SUPERCOP scalar</div>
+  </div>
+  <div style="flex:1; min-width:280px;">
+    <p style="margin:0;">The looped 24-round permutation runs in <b>1910 cyc/perm</b> versus <b>2045 cyc/perm</b> for the fastest SUPERCOP scalar baseline (<code>opt64lcu24</code>), measured back-to-back in one process — a <span class="win">~7% win</span>. KAT-anchored at <code>lane0 = 0xF1258F7940E1DDE7</code>. 108 triads, inside the 128-triad patch-RAM cap.</p>
+  </div>
+</div>
+
+<p>This document explains the implementation in the directory <code>simple/keccak/</code>. The single source of truth is <code>keccak_gen.py</code>, a self-verifying generator that emits the microcode patch (<code>keccak_perm_body.h</code>) after proving it correct against a reference Keccak in a software simulator. Everything else — the harness, the benchmarks, the probes — exists to install, verify, and time that patch on real hardware.</p>
+
+<p>The narrative has three threads, woven together below:</p>
+<ol>
+  <li><b>Why the architecture is shaped the way it is</b> — each decision and the hardware fact that forced it.</li>
+  <li><b>A line-by-line read of the generated permutation</b> in execution order, with the actual triads.</li>
+  <li><b>How the win was actually built</b> — the measured optimization deltas, the methodology, and the honest ceiling.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<h2 id="bg-microcode">1. Background</h2>
+
+<h3 id="bg-microcode-h">1.1 What microcode patching is on this CPU</h3>
+<p>On this Goldmont CPU (Intel Atom family, Celeron N3350), <b>microcode is patchable</b>. Each x86 instruction is internally cracked into <em>micro-ops</em> (uops); some instructions execute a sequence of uops fetched from a small on-die <b>patch RAM</b>. The <code>lib-micro</code> infrastructure exposes two primitives:</p>
+<ul>
+  <li><code>patch_ucode(addr, patch, n)</code> — write our own uops into patch RAM at <code>U7c00</code>…</li>
+  <li><code>hook_match_and_patch(slot, opcode, addr)</code> — redirect an x86 instruction so executing it jumps into our uops.</li>
+</ul>
+<p>Microcode is organized as <b>triads</b>: a unit of <b>3 micro-ops + 1 sequence word</b> (the seqword controls flow — <code>NOP_SEQWORD</code> falls through, <code>END_SEQWORD</code> returns). One triad occupies 4 address units, hence the <code>×4</code> in address arithmetic. The usable region <code>U7c00–U7dfc</code> holds exactly <b>128 triads</b> — the hard size cap for the entire permutation.</p>
+
+<h3 id="bg-hook">1.2 The vmwrite hook — the C↔microcode bridge</h3>
+<p>We hijack the <code>vmwrite</code> instruction (opcode <code>0x0cd8</code>), which is meaningless in ordinary user code. Once hooked, every <code>vmwrite rcx, rcx</code> runs <em>our</em> microcode, with full access to the physical register file and memory. The bridge in C:</p>
+<pre><code><span class="kw">register</span> uint64_t *_buf <span class="kw">asm</span>(<span class="lit">"rcx"</span>) = &amp;g_keccak_buf[KECCAK_BASE_LANE];
+<span class="kw">asm volatile</span>(<span class="lit">"vmwrite rcx, rcx\n\t"</span>
+    : <span class="lit">"+r"</span>(_buf) :
+    : <span class="com">/* clobbers: every GPR the microcode trashes */</span>
+      <span class="lit">"rax","rbx","rdx","rdi","rsi","rbp","r8"</span>…<span class="lit">"r15","memory","cc"</span>);</code></pre>
+<p>It pins the buffer pointer into <code>RCX</code>, fires the hooked <code>vmwrite</code>, and declares every GPR clobbered (the microcode trashes them all). The microcode reads and writes the state buffer through <code>RCX</code>.</p>
+
+<h3 id="bg-keccak">1.3 Keccak-f[1600], in one round</h3>
+<p>Keccak-f[1600] is the permutation inside SHA-3. Its state is <b>25 lanes of 64 bits</b>, indexed <code>s[5·y + x]</code> for <code>x,y ∈ 0..4</code>. A full permutation is <b>24 rounds</b>; each round is five steps:</p>
+<table>
+<tr><th>Step</th><th>Name</th><th>What it does</th></tr>
+<tr><td>θ (theta)</td><td>column parity</td><td><code>C[x] = ⊕</code> of column x's 5 lanes; <code>D[x] = C[x-1] ⊕ rol(C[x+1],1)</code>; XOR <code>D[x]</code> into every lane of column x.</td></tr>
+<tr><td>ρ (rho)</td><td>lane rotation</td><td>rotate each lane left by a fixed per-lane amount <code>RHO[i]</code>.</td></tr>
+<tr><td>π (pi)</td><td>lane permutation</td><td>move lane <code>(x,y)</code> to position <code>(y, 2x+3y mod 5)</code> — a renaming, no arithmetic.</td></tr>
+<tr><td>χ (chi)</td><td>nonlinear mix</td><td>per row: <code>out[x] = B[x] ⊕ ((¬B[x+1]) ∧ B[x+2])</code> — the only nonlinear step.</td></tr>
+<tr><td>ι (iota)</td><td>round constant</td><td>XOR a round-specific constant <code>RC[r]</code> into lane (0,0).</td></tr>
+</table>
+<p>The C reference (<code>keccak_round_ref</code> / <code>keccak_perm_ref</code> in both the harness and the generator) is the <b>ground truth</b>: the microcode must reproduce it bit-for-bit. The canonical self-test is the all-zero input, whose output lane 0 is the famous <code>0xF1258F7940E1DDE7</code>.</p>
+
+<h3 id="bg-bet">1.4 The bet: register residency</h3>
+<p>Native x86-64 has ~14 usable GPRs, but Keccak's state is 25 lanes — so hand-written assembly spills to L1 constantly. Microcode exposes a register file of <b>32 entries</b>: GPRs <code>0x20–0x2f</code> and TMP registers <code>0x30–0x3f</code>. That is enough to hold the entire 25-lane state <b>resident across an entire round</b> — even across all 24 rounds. This is a structural advantage native code cannot access, and the entire premise of the project.</p>
+<div class="callout"><span class="tag">The thesis in one line</span>
+Load the 25 lanes <b>once</b>, run 24 rounds with the whole state living in registers, store <b>once</b>. Native asm achieves residency only by fully unrolling; we achieve it without unrolling — and use the freed register headroom for tricks (MOV-free χ, D-in-registers) that register-starved native code simply cannot do.</div>
+
+<!-- ============================================================ -->
+<h2 id="repo-tree">2. The repository</h2>
+
+<h3 id="repo-tree-h">2.1 File structure</h3>
+<pre><code>simple/keccak/
+├── <span class="reg">keccak_gen.py</span>            <span class="com"># THE source of truth: generator + simulator + verifier</span>
+├── <span class="reg">keccak_perm.h</span>            <span class="com"># generated: triad count, buffer geometry #defines</span>
+├── <span class="reg">keccak_perm_body.h</span>       <span class="com"># generated: the 108 ucode_t triads (the actual patch)</span>
+├── asm_op_keccak_perm.c     <span class="com"># harness: install patch, KAT-verify, standalone timing</span>
+├── asm_op_keccak_perm_static<span class="com"># built binary</span>
+├── Makefile                 <span class="com"># builds the implementation harness</span>
+│
+├── docs/
+│   ├── keccak-plan.md           <span class="com"># the phased plan + Phase 0–4 results (the full journey)</span>
+│   ├── keccak_understand.md     <span class="com"># design walkthrough (5 decisions + line-by-line)</span>
+│   ├── keccak-explained.md      <span class="com"># gentler narrative, basics → lessons</span>
+│   ├── keccak-guide.html        <span class="com"># earlier HTML guides</span>
+│   ├── keccak-implementation-guide.html
+│   └── keccak-microcode-rundown.html  <span class="com"># ← this document</span>
+│
+├── bench/
+│   ├── <span class="reg">asm_op_keccak_vs.c</span>      <span class="com"># THE valid benchmark: same-process head-to-head</span>
+│   ├── bench_keccak.c          <span class="com"># Phase-0 standalone baseline harness</span>
+│   ├── bench_keccak_matrix.sh  <span class="com"># compiler×-O sweep driver (SUPERCOP-style)</span>
+│   ├── KECCAK_RESULTS.md       <span class="com"># the recorded matrix scoreboard</span>
+│   ├── keccak_x86_64_asm.o     <span class="com"># SUPERCOP scalar baselines (linked objects)</span>
+│   ├── keccak_opt64lcu24.o  …
+│   └── Makefile
+│
+└── probes/                  <span class="com"># one C probe per hardware fact (each established a constraint)</span>
+    ├── probe_seg.c          probe_rsp.c        probe_offset.c
+    ├── probe_triad.c        probe_loop.c       probe_index.c
+    ├── probe_stlf.c         probe_loaduse.c
+    ├── probe_keccak_io.c    probe_keccak_capacity.c
+    └── Makefile</code></pre>
+
+<h3 id="repo-roles">2.2 What each file does</h3>
+<table>
+<tr><th>File</th><th>Role</th></tr>
+<tr><td><code>keccak_gen.py</code></td><td><b>The only thing a human edits.</b> Holds the reference Keccak, the op-list emitters (prologue / body / loop-control / epilogue), a hardware-faithful simulator, the triad packer, and the C emitter. Running it verifies 64/64 random permutations against the reference, then writes the two generated headers.</td></tr>
+<tr><td><code>keccak_perm.h</code></td><td>Generated <code>#define</code>s: <code>KECCAK_PERM_TRIADS 108</code>, <code>KECCAK_BUFLEN 56</code>, <code>KECCAK_BASE_LANE 16</code>, <code>KECCAK_COUNTER_LANE 30</code>, <code>KECCAK_RCTAB_LANE 32</code>, and the comment recording <code>loop_top = U7c68</code>.</td></tr>
+<tr><td><code>keccak_perm_body.h</code></td><td>Generated array of 108 <code>ucode_t</code> triads — the actual patch image, <code>#include</code>d inside the patch array initializer.</td></tr>
+<tr><td><code>asm_op_keccak_perm.c</code></td><td>Production harness. Installs the patch, fires the hook, KAT-verifies (zero-state + non-trivial + 3 random), and runs a standalone timing loop and a round-count sweep. <em>Its built-in bench uses a cross-run comparison that is not frequency-valid — see §8.</em></td></tr>
+<tr><td><code>bench/asm_op_keccak_vs.c</code></td><td><b>The only valid benchmark.</b> Times the microcode and all four SUPERCOP scalar variants back-to-back in one process at one frequency, so the ratio is frequency-invariant.</td></tr>
+<tr><td><code>bench/bench_keccak_matrix.sh</code></td><td>Rebuilds the head-to-head under every (compiler, -O) config SUPERCOP tries, keeps the best per contender, and writes <code>KECCAK_RESULTS.md</code>.</td></tr>
+<tr><td><code>probes/*.c</code></td><td>One small patch per hardware question. Each established a fact that constrains the generator (see §3).</td></tr>
+</table>
+
+<h3 id="repo-genfirst">2.3 Generator-first, not hand-written</h3>
+<p>Nobody hand-writes 108 dense triads where a single mis-placed lane is a silent wrong answer and every hardware test risks hanging the box. Instead, <code>keccak_gen.py</code> emits an <b>op-list IR</b>, <b>simulates</b> it on a model that <em>also models the hardware constraints</em> (notably the 8-bit signed memory offset), asserts it matches the reference, and only then <b>lowers</b> it to triads. Correctness debugging happens in software — instant and safe — instead of on the fragile NUC.</p>
+
+<!-- ============================================================ -->
+<h2 id="hw-probes">3. Hardware facts (established by probes)</h2>
+<p>Every constraint below cost a crash, a segfault, or a misdiagnosis to discover, and is now hard-coded into the generator. Each was isolated by a dedicated probe in <code>probes/</code>.</p>
+
+<h3 id="hw-probes-h">3.1 The probes and what they found</h3>
+<table>
+<tr><th>Probe</th><th>Question</th><th>Finding</th></tr>
+<tr><td><code>probe_seg.c</code></td><td>Which microcode segment lets <code>LDZX</code>/<code>STAD</code> touch memory without hanging?</td><td><b><code>SEG_DS</code> (0x18)</b> works. Other segment values hang the core so hard the watchdog can't fire — they crashed the whole NUC.</td></tr>
+<tr><td><code>probe_offset.c</code></td><td>How does the 8-bit offset field in load/store behave — signed or unsigned?</td><td>Offset is <b>8-bit signed</b> (−128..+127 bytes = ±16 lanes). Beyond that it wraps/fails. → the base must be <b>centered</b>.</td></tr>
+<tr><td><code>probe_index.c</code></td><td>Can <code>[base + index_reg]</code> addressing reach beyond the immediate range?</td><td><b>Yes</b> — index-register form is full-width, no offset limit. Used for the RC table at lanes 32..55.</td></tr>
+<tr><td><code>probe_rsp.c</code></td><td>Can <code>RSP</code> be borrowed as a 32nd data register?</td><td><b>Yes</b>, if saved at entry and restored before the firing returns. (The microcode never touches the stack.)</td></tr>
+<tr><td><code>probe_triad.c</code></td><td>Which intra-triad dependency patterns execute correctly?</td><td>Intra-triad execution is <b>fully sequential</b>, including 3-deep RAW chains — dense 3-op packing is valid.</td></tr>
+<tr><td><code>probe_stlf.c</code></td><td>Does store-to-load forwarding work within a patch?</td><td><b>Yes</b> (STLF works). Spilling C to the buffer and reloading is safe. Also re-confirmed the 3-deep RAW chain.</td></tr>
+<tr><td><code>probe_loaduse.c</code></td><td>Is there a load-use latency gap that returns zeros?</td><td>No — the earlier "loads return 0" failures were <b>offset-range violations</b>, not latency. All load→use patterns pass.</td></tr>
+<tr><td><code>probe_loop.c</code></td><td>Do conditional/backward branches and indexed loads work for a counted loop?</td><td>Forward <code>CONDZ</code>, indexed <code>LDZX</code>, and a <b>backward counted loop</b> all pass (accumulate 7×10 = 70). The <code>XOR</code> that sets ZF must share the triad with the <code>UJMPCC</code>.</td></tr>
+<tr><td><code>probe_keccak_io.c</code></td><td>How many lanes can one patch load+store without hanging?</td><td>Established the all-lanes I/O ceiling — full 25-lane load + store works. (≤1 memory op per triad throughout.)</td></tr>
+<tr><td><code>probe_keccak_capacity.c</code></td><td>How many consecutive triads execute at <code>U7c00</code> after init?</td><td><b>128 triads</b> — the full bank-0 region. (v1 hit a false wall at 120 by re-invoking the bootstrap each iteration; install the hook <b>once</b> up front and <code>U7de0–U7dfc</code> is reclaimable.)</td></tr>
+</table>
+
+<h3 id="hw-constraints">3.2 How each constraint shapes the code</h3>
+<div class="grid2">
+  <div class="card"><h4>8-bit signed offset → centered base</h4>
+  <p>Because offsets are −128..+127 bytes, the base register <code>RCX</code> points at the <b>middle</b> of the buffer: <code>BASE_LANE = 16</code>, so <code>OFF(lane) = (lane−16)·8</code>. Lane 0 → −128, lane 24 → +64, counter (lane 30) → +112, saved-RSP (lane 31) → +120 — all inside ±127. The RC table at lanes 32+ is out of immediate reach, so ι uses the index-register form instead.</p></div>
+
+  <div class="card"><h4>≤1 memory op per triad</h4>
+  <p>Two loads/stores in one triad hang the core (single L1 port). So the packer never places two memory ops in the same triad — the prologue and epilogue are therefore 25 separate single-load/single-store triads each.</p></div>
+
+  <div class="card"><h4><code>MOVE_DSZ64</code> traps → use <code>ZEROEXT</code></h4>
+  <p>The generic <code>MOVE</code> form traps to a ~800k-cycle slow path. Register-to-register moves use <code>ZEROEXT_DSZ64_DR</code>; immediates use <code>ZEROEXT_DSZ32_DI</code>. The χ-cycle save-temp <code>MOV</code> lowers to <code>ZEROEXT</code>.</p></div>
+
+  <div class="card"><h4>Fully-sequential triads → dense packing</h4>
+  <p>A 3-deep RAW chain inside one triad is valid, and later slots see earlier slots' writes. This lets the packer fill all three slots even with dependent ops — crucial for the χ and apply phases.</p></div>
+
+  <div class="card"><h4>Loop primitive → count <em>up</em></h4>
+  <p><code>UJMPCC...CONDNZ</code> reads arch RFLAGS (ignoring its register operand), and an <code>XOR</code> in the <b>same triad</b> sets ZF. SUB-immediate is argument-reversed and ADD(−1) won't decrement on this microcode, so the counter <b>counts up</b> and compares via <code>XOR idx, END</code>.</p></div>
+
+  <div class="card"><h4>32-register file → residency + RSP trick</h4>
+  <p>25 lanes consume nearly all of GPR+TMP. The 5 resident D-values and the χ scratch need one more register, supplied by borrowing <code>RSP</code> (probe_rsp). This is the move that unlocked the win.</p></div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="d-decisions">4. The design</h2>
+
+<h3 id="d-decisions-h">4.1 The five decisions that define the implementation</h3>
+
+<h4>Decision 1 — Loop all 24 rounds inside a single <code>vmwrite</code></h4>
+<p>Each hook firing pays a fixed dispatch tax, and — critically — <b>TMP registers do not persist across <code>vmwrite</code> calls</b>. A per-round firing would be forced to round-trip all 25 lanes through memory <em>every round</em>; that memory traffic, not the arithmetic, would sink the design. So the entire permutation runs in <b>one firing</b>: 25 loads at the top, 24 rounds resident in registers, 25 stores at the bottom. The 50 I/O triads are paid <b>once per permutation</b>, not once per round. The loop is real (a backward branch), because 24× unrolling won't fit 128 triads.</p>
+
+<h4>Decision 2 — π is a permutation, so one looped body suffices</h4>
+<p>The worry with looping: π relabels lane positions every round, so "the lane in <code>RDI</code>" would drift. The resolution: π on the 25 lanes is a set of <b>cycles</b> — lane (0,0) is a fixed point, and the other 24 form a single 24-cycle. By applying π <b>in place along its cycles</b> (walk the cycle, move <code>cyc[k-1] → cyc[k]</code>, with one save-temp for the head), every lane lands back in its <b>canonical register slot</b> at the end of each round. So round <em>r+1</em> sees exactly the layout round <em>r</em> did, and one identical body loops 24× — no per-round renaming, no two-body trick.</p>
+
+<h4>Decision 3 — Generator-first (§2.3, §6)</h4>
+<p>Emit IR → simulate against the reference (with hardware constraints modeled) → lower to triads. Correctness is proven in software before hardware ever runs.</p>
+
+<h4>Decision 4 — Obey the hardware facts (§3)</h4>
+<p>Centered base, ≤1 mem/triad, <code>SEG_DS</code>, <code>ZEROEXT</code> not <code>MOVE</code>, count-up loop. These are not style choices; violating any one hangs or corrupts the machine.</p>
+
+<h4>Decision 5 — <code>RSP</code> as a 32nd register — the move that unlocked the win</h4>
+<p>The biggest structural lever was getting θ's five <b>D-values to live in registers</b> instead of being written to the buffer and re-read once per lane during the apply (25 extra memory triads per round). But 25 lanes already consume nearly all of GPR+TMP. <code>probe_rsp</code> proved <code>RSP</code> is usable as a 32nd data register if saved/restored once per perm. That freed the room for resident D <em>and</em> the χ scratch.</p>
+<div class="callout warn"><span class="tag">Why not rebuild the base instead?</span>
+Earlier attempts freed a register by <b>rebuilding the base <code>RCX</code></b> each round — and <b>lost</b> (2166, 2074 cyc): the rebuild cost more than the D-memory it saved. <code>RSP</code> wins precisely because <code>RCX</code> stays permanently pointed at the base — <b>no rebuild</b>.</div>
+
+<h3 id="d-buffer">4.2 Buffer layout</h3>
+<p>One contiguous array <code>g_keccak_buf[56]</code>; the base register <code>RCX = &amp;buf[16]</code> is centered so every immediate offset fits the signed-8 field.</p>
+<pre><code>lane   offset(RCX)   contents
+0..24   −128..+64    <span class="reg">state</span>      (resident in 13 GPR + 12 TMP during the round)
+25..29  +72..+104    <span class="mem">DSCR</span>       θ-C parity scratch (5 lanes, spilled then re-read)
+30      +112         <span class="mem">COUNTER</span>    RC <b>byte-index</b> (not a round number): init 128, += 8/round
+31      +120         <span class="mem">RSPSAVE</span>    saved stack pointer (RSP borrowed as data reg)
+32..55   far         <span class="mem">RC[0..23]</span>  round-constant table — index-register addressing only</code></pre>
+<p class="small">The C wrapper fills <code>state[0..24]</code>, sets <code>COUNTER = (32−16)·8 = 128</code>, and writes the RC table before each fire (<code>reset_control</code>). The loop end-marker is <code>RC_END_IDX = 128 + 24·8 = 320</code>.</p>
+
+<h3 id="d-regs">4.3 Register allocation</h3>
+<p>The 25 lanes map to <code>REG = [RDI, RSI, RBX, RDX, RBP, R8…R15] + [TMP0…TMP11]</code> — exactly 25 names — laid out by lane index <code>i = 5y + x</code>:</p>
+<div class="lanegrid">
+  <div class="cell gpr"><div class="lane">(0,0) · l0</div><div class="rg">RDI</div></div>
+  <div class="cell gpr"><div class="lane">(1,0) · l1</div><div class="rg">RSI</div></div>
+  <div class="cell gpr"><div class="lane">(2,0) · l2</div><div class="rg">RBX</div></div>
+  <div class="cell gpr"><div class="lane">(3,0) · l3</div><div class="rg">RDX</div></div>
+  <div class="cell gpr"><div class="lane">(4,0) · l4</div><div class="rg">RBP</div></div>
+
+  <div class="cell gpr"><div class="lane">(0,1) · l5</div><div class="rg">R8</div></div>
+  <div class="cell gpr"><div class="lane">(1,1) · l6</div><div class="rg">R9</div></div>
+  <div class="cell gpr"><div class="lane">(2,1) · l7</div><div class="rg">R10</div></div>
+  <div class="cell gpr"><div class="lane">(3,1) · l8</div><div class="rg">R11</div></div>
+  <div class="cell gpr"><div class="lane">(4,1) · l9</div><div class="rg">R12</div></div>
+
+  <div class="cell gpr"><div class="lane">(0,2) · l10</div><div class="rg">R13</div></div>
+  <div class="cell gpr"><div class="lane">(1,2) · l11</div><div class="rg">R14</div></div>
+  <div class="cell gpr"><div class="lane">(2,2) · l12</div><div class="rg">R15</div></div>
+  <div class="cell tmp"><div class="lane">(3,2) · l13</div><div class="rg">TMP0</div></div>
+  <div class="cell tmp"><div class="lane">(4,2) · l14</div><div class="rg">TMP1</div></div>
+
+  <div class="cell tmp"><div class="lane">(0,3) · l15</div><div class="rg">TMP2</div></div>
+  <div class="cell tmp"><div class="lane">(1,3) · l16</div><div class="rg">TMP3</div></div>
+  <div class="cell tmp"><div class="lane">(2,3) · l17</div><div class="rg">TMP4</div></div>
+  <div class="cell tmp"><div class="lane">(3,3) · l18</div><div class="rg">TMP5</div></div>
+  <div class="cell tmp"><div class="lane">(4,3) · l19</div><div class="rg">TMP6</div></div>
+
+  <div class="cell tmp"><div class="lane">(0,4) · l20</div><div class="rg">TMP7</div></div>
+  <div class="cell tmp"><div class="lane">(1,4) · l21</div><div class="rg">TMP8</div></div>
+  <div class="cell tmp"><div class="lane">(2,4) · l22</div><div class="rg">TMP9</div></div>
+  <div class="cell tmp"><div class="lane">(3,4) · l23</div><div class="rg">TMP10</div></div>
+  <div class="cell tmp"><div class="lane">(4,4) · l24</div><div class="rg">TMP11</div></div>
+</div>
+<p class="legend">Rows are y=0..4 (top→bottom); columns are x=0..4 (left→right). <span class="tag-gpr">green = GPR</span>, <span class="tag-tmp">blue = TMP</span>.</p>
+<p><b>Non-lane registers:</b> <code>RCX</code> = buffer base (never rebuilt). <code>RAX, TMP12, TMP13, TMP14, TMP15</code> = the five resident <code>D[0..4]</code> values (and, after the apply, χ's NOTAND scratch — they're dead by then). <code>RSP</code> = borrowed temp: the second θ-tree accumulator, the ρ rotate temp, and the π cycle-head save.</p>
+
+<!-- ============================================================ -->
+<h2 id="w-overview">5. The generated permutation, in execution order</h2>
+
+<h3 id="w-overview-h">5.1 Triad map</h3>
+<p>108 triads total, in three regions. The body is looped 24×; prologue and epilogue run once.</p>
+<table>
+<tr><th>Region</th><th class="num">Triads</th><th>Address</th><th>Runs</th><th>Work</th></tr>
+<tr><td>Prologue</td><td class="num">26</td><td><code>U7c00</code>…</td><td>once</td><td>save RSP + 25 lane loads</td></tr>
+<tr><td>Body + loop-control</td><td class="num">56</td><td><code>U7c68</code> (= loop_top)</td><td>×24</td><td>θ → ρ → π → χ → ι, then advance + branch</td></tr>
+<tr><td>Epilogue</td><td class="num">26</td><td>…</td><td>once</td><td>25 lane stores + restore RSP</td></tr>
+</table>
+<div class="flow">
+  <span class="step">load 25 lanes</span><span class="arr">→</span>
+  <span class="step">θ-C tree → buf</span><span class="arr">→</span>
+  <span class="step">θ-D → 5 regs</span><span class="arr">→</span>
+  <span class="step">θ-apply+ρ+π (in-place cycle)</span><span class="arr">→</span>
+  <span class="step">χ (MOV-free)</span><span class="arr">→</span>
+  <span class="step">ι (RC[idx])</span><span class="arr">→</span>
+  <span class="step">idx+=8; XOR/UJMPCC ↺</span><span class="arr">→</span>
+  <span class="step">store 25 lanes</span>
+</div>
+<p class="small">Total triads <em>issued</em> per permutation: 26 + 56×24 + 26 = <b>1396</b>. At the measured base-frequency cost that is ≈ 1.37 true cyc/triad (see §9.2).</p>
+
+<h3 id="w-prologue">5.2 Prologue — load state into registers (26 triads)</h3>
+<p>One store to save <code>RSP</code>, then 25 single-load triads (one per lane, because ≤1 mem op/triad). The first and last triads of <code>keccak_perm_body.h</code>:</p>
+<pre><code>{ <span class="kw">STAD_DSZ64_ASZ32_SC1_RRI</span>(<span class="reg">RSP</span>, <span class="reg">RCX</span>, <span class="lit">120</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// save RSP → buf[31]</span>
+{ <span class="kw">LDZX_DSZ64_ASZ32_SC1_DRI</span>(<span class="reg">RDI</span>, <span class="reg">RCX</span>, <span class="lit">-128</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// lane0 → RDI</span>
+{ <span class="kw">LDZX_DSZ64_ASZ32_SC1_DRI</span>(<span class="reg">RSI</span>, <span class="reg">RCX</span>, <span class="lit">-120</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// lane1 → RSI</span>
+<span class="com">… 25 loads, lane i → REG[i] …</span>
+{ <span class="kw">LDZX_DSZ64_ASZ32_SC1_DRI</span>(<span class="reg">TMP11</span>, <span class="reg">RCX</span>, <span class="lit">64</span>, SEG_DS), NOP, NOP, NOP_SEQWORD }, <span class="com">// lane24 → TMP11</span></code></pre>
+<p>After this, lanes 0..24 in memory are not touched again until the epilogue. <code>loop_top = U7c68 = 0x7c00 + 26·4</code> — the address right after the prologue is the branch target.</p>
+
+<h3 id="w-theta-c">5.3 θ-C — balanced XOR tree → buffer (9 triads)</h3>
+<p>For each column x, <code>C[x] = a^b^c^d^e</code> of its five lanes. Instead of a depth-4 left chain, the generator emits a <b>balanced tree of depth 3</b>, using <code>RSP</code> as a second accumulator so the two halves compute in parallel:</p>
+<pre><code><span class="kw">XOR</span> <span class="reg">RAX</span> = REG[x]    ^ REG[x+5]    <span class="com">// a^b</span>
+<span class="kw">XOR</span> <span class="reg">RSP</span> = REG[x+10] ^ REG[x+15]   <span class="com">// c^d   (independent — parallel)</span>
+<span class="kw">XOR</span> <span class="reg">RAX</span> = RAX ^ RSP               <span class="com">// (a^b)^(c^d)</span>
+<span class="kw">XOR</span> <span class="reg">RAX</span> = RAX ^ REG[x+20]         <span class="com">// ^e  → depth 3</span>
+<span class="kw">ST</span>  <span class="reg">RAX</span> → DSCR[x]                 <span class="com">// spill C[x] to buffer lane 25+x</span></code></pre>
+<p><b>Why this matters:</b> <code>C</code> is the <b>head of the round's dependency chain</b> — every later phase waits on it. Shaving one level of latency off <code>C</code> shortens <em>every</em> round. C is written to the buffer (not kept in registers) because the registers are needed for resident D next, and C is read only a few times immediately after. Real lowered triads (note how the packer interleaves the store of one column with the start of the next):</p>
+<pre><code>{ XOR(<span class="reg">RAX</span>,RDI,R8), XOR(<span class="reg">RSP</span>,R13,TMP2), XOR(<span class="reg">RAX</span>,RAX,RSP), NOP_SEQWORD },
+{ XOR(<span class="reg">RAX</span>,RAX,TMP7), <span class="kw">STAD</span>(RAX,RCX,<span class="lit">72</span>,SEG_DS), XOR(<span class="reg">RAX</span>,RSI,R9), NOP_SEQWORD },
+{ XOR(<span class="reg">RSP</span>,R14,TMP3), XOR(<span class="reg">RAX</span>,RAX,RSP), XOR(<span class="reg">RAX</span>,RAX,TMP8), NOP_SEQWORD },
+<span class="com">… columns 2,3,4 …</span></code></pre>
+
+<h3 id="w-theta-d">5.4 θ-D — into 5 registers, not the buffer (10 triads)</h3>
+<p><code>D[x] = C[x−1] ⊕ rol(C[x+1], 1)</code>. The five D-values land in registers <code>D_REG = [RAX, TMP12, TMP13, TMP14, TMP15]</code> and <b>stay resident for the rest of the round</b>. <code>RSP</code> is the rotate temp. No in-place hazard, because C is read from memory while D is written to registers:</p>
+<pre><code><span class="kw">LD</span>  <span class="reg">RSP</span>      ← C[(x+1)%5]    <span class="com">// from DSCR buffer</span>
+<span class="kw">ROL</span> <span class="reg">RSP</span>, 1
+<span class="kw">LD</span>  <span class="reg">D_REG[x]</span> ← C[(x+4)%5]    <span class="com">// = C[x−1]</span>
+<span class="kw">XOR</span> <span class="reg">D_REG[x]</span> = D_REG[x] ^ RSP</code></pre>
+<p>This is the part Decision 5 made affordable: without the borrowed <code>RSP</code> register, D had to go back to the buffer and be re-loaded <b>per lane</b> — the +25 memory-triads/round that earlier versions paid.</p>
+
+<h3 id="w-apply">5.5 θ-apply + ρ + π — in place, D read from registers (17 triads)</h3>
+<p>This is the heart of the round, and where Decision 2 pays off. Walk π's single 24-cycle (lane 0 is the fixed point, handled inline). For the cycle, save the head into <code>RSP</code>, then shift each element to its π-destination, <b>folding in θ</b> (<code>^ D_REG[col(src)]</code>) and <b>ρ</b> (<code>ROL</code> by <code>RHO[src]</code>) as we go:</p>
+<pre><code><span class="kw">MOV</span> <span class="reg">RSP</span> = REG[cyc[L-1]]                         <span class="com">// save cycle head (lowers to ZEROEXT)</span>
+<span class="kw">for</span> k = L-1 … 1:
+    <span class="kw">XOR</span> REG[cyc[k]] = REG[cyc[k-1]] ^ <span class="reg">D_REG[col(cyc[k-1])]</span>
+    <span class="kw">ROL</span> REG[cyc[k]] <span class="kw">by</span> RHO[cyc[k-1]]
+<span class="kw">XOR</span> REG[cyc[0]] = RSP ^ <span class="reg">D_REG[col(cyc[L-1])]</span>      <span class="com">// close the cycle from the saved head</span>
+<span class="kw">ROL</span> REG[cyc[0]] <span class="kw">by</span> RHO[cyc[L-1]]</code></pre>
+<p>Two things to notice. First, <b>D is read straight from registers</b> — there is <em>no per-lane load</em>, which is exactly the win. Second, because we move along the cycle, every lane lands in its <b>canonical register slot</b>, so the layout is preserved for the next round. The lowered triads pack a θ-XOR and a ρ-ROL together (the fixed point + cycle head start on the same triad):</p>
+<pre><code>{ XOR(TMP15,TMP15,RSP), <span class="kw">XOR</span>(<span class="reg">RDI</span>,RDI,RAX), <span class="kw">ZEROEXT</span>(<span class="reg">RSP</span>,R9), NOP_SEQWORD },  <span class="com">// lane0 apply (RHO=0) + save head</span>
+{ XOR(<span class="reg">R9</span>,R12,TMP15), <span class="kw">ROL</span>(R9,R9,<span class="lit">20</span>), XOR(<span class="reg">R12</span>,TMP9,TMP13), NOP_SEQWORD },
+{ ROL(<span class="reg">R12</span>,R12,<span class="lit">61</span>), XOR(<span class="reg">TMP9</span>,TMP1,TMP15), ROL(TMP9,TMP9,<span class="lit">39</span>), NOP_SEQWORD },
+<span class="com">… the full 24-cycle, two lanes per triad …</span></code></pre>
+
+<h3 id="w-chi">5.6 χ — MOV-free, using the dead D-registers as scratch (17 triads)</h3>
+<p>χ is <code>s[x] ^= ¬s[x+1] &amp; s[x+2]</code> across each row of 5. Done naïvely in place, the first lane you overwrite is still needed by later lanes, forcing save-MOVs — register-starved native code pays ~2 MOVs/row = 10/round. We have headroom (the five D-registers are dead now), so the generator <b>computes all 5 NOTANDs of the row first</b> into the freed registers, then does 5 in-place XORs:</p>
+<pre><code>SCR5 = [<span class="reg">RAX, TMP12, TMP13, TMP14, TMP15</span>]   <span class="com">// the now-dead D regs</span>
+<span class="kw">for</span> x in 0..4:  <span class="kw">NOTAND</span> SCR5[x] = (¬REG[r[x+1]]) ∧ REG[r[x+2]]   <span class="com">// B still intact</span>
+<span class="kw">for</span> x in 0..4:  <span class="kw">XOR</span>    REG[r[x]] = REG[r[x]] ^ SCR5[x]</code></pre>
+<pre><code>{ <span class="kw">NOTAND</span>(<span class="reg">RAX</span>,RSI,RBX), NOTAND(<span class="reg">TMP12</span>,RBX,RDX), NOTAND(<span class="reg">TMP13</span>,RDX,RBP), NOP_SEQWORD },
+{ NOTAND(<span class="reg">TMP14</span>,RBP,RDI), NOTAND(<span class="reg">TMP15</span>,RDI,RSI), <span class="kw">XOR</span>(<span class="reg">RDI</span>,RDI,RAX), NOP_SEQWORD },
+{ XOR(<span class="reg">RSI</span>,RSI,TMP12), XOR(<span class="reg">RBX</span>,RBX,TMP13), XOR(<span class="reg">RDX</span>,RDX,TMP14), NOP_SEQWORD },
+<span class="com">… 5 rows …</span></code></pre>
+<p><b>No save-MOVs at all.</b> This is something native cannot do — it has no spare registers. Our register residency directly buys it; it was the single biggest measured jump (~5%, §9.1).</p>
+
+<h3 id="w-iota">5.7 ι — round constant via byte-indexed table</h3>
+<p>The subtle optimization: the <code>COUNTER</code> lane stores the <b>byte offset of the current RC directly</b> (init 128, += 8/round), so fetching RC is just load-index, indexed-load, XOR — <b>no SHL/ADD on the ι→RC→lane0 critical path</b>. The RC table at lanes 32..55 is past the immediate range, so ι uses the index-register <code>LDX</code> form:</p>
+<pre><code><span class="kw">LD</span>  <span class="reg">TMP14</span> ← COUNTER          <span class="com">// the RC byte-index</span>
+<span class="kw">LDX</span> <span class="reg">TMP13</span> ← mem[RCX + TMP14]  <span class="com">// index-register form: RC = table[idx]</span>
+<span class="kw">XOR</span> <span class="reg">REG[0]</span> = REG[0] ^ TMP13   <span class="com">// ι into lane 0</span></code></pre>
+<pre><code>{ XOR(TMP10,TMP10,TMP14), XOR(TMP11,TMP11,TMP15), <span class="kw">LDZX</span>(<span class="reg">TMP14</span>,RCX,<span class="lit">112</span>,SEG_DS), NOP_SEQWORD }, <span class="com">// load idx (folded into χ tail)</span>
+{ <span class="kw">LDZX_…_DRR</span>(<span class="reg">TMP13</span>, RCX, <span class="reg">TMP14</span>, SEG_DS), NOP, NOP, NOP_SEQWORD },                       <span class="com">// indexed RC fetch</span>
+{ <span class="kw">XOR</span>(<span class="reg">RDI</span>,RDI,TMP13), <span class="kw">ADD</span>(TMP14,TMP14,<span class="lit">8</span>), <span class="kw">STAD</span>(TMP14,RCX,<span class="lit">112</span>,SEG_DS), NOP_SEQWORD },        <span class="com">// ι + advance idx + persist</span></code></pre>
+
+<h3 id="w-loop">5.8 Loop control — the backward branch</h3>
+<p>The <code>+=8</code> arithmetic is paid here (off the ι critical path). Then a single forced triad does the branch: an <code>XOR</code> sets ZF in the same triad as the <code>UJMPCC</code>:</p>
+<pre><code>{ <span class="kw">XOR_DSZ64_DRI</span>(<span class="reg">TMP12</span>, <span class="reg">TMP14</span>, <span class="lit">320</span>), NOP,
+  <span class="kw">UJMPCC_DIRECT_NOTTAKEN_CONDNZ_RI</span>(<span class="reg">TMP12</span>, <span class="lit">0x7c68</span>), NOP_SEQWORD },</code></pre>
+<p><code>320 = RC_END_IDX</code> = the byte-index just past <code>RC[23]</code>. The <code>XOR</code> computes <code>idx ^ 320</code>; while <code>idx ≠ 320</code> the result is non-zero, ZF is clear, and the <code>UJMPCC...CONDNZ</code> branches back to <code>loop_top = 0x7c68</code>. When <code>idx == 320</code>, the XOR yields 0, ZF is set, the branch is not taken, and control falls through to the epilogue — <b>exactly 24 iterations</b>. We count <em>up</em> because decrement-style ops don't work on this microcode (§3.2).</p>
+
+<h3 id="w-epilogue">5.9 Epilogue — store state, restore RSP (26 triads)</h3>
+<pre><code><span class="kw">for</span> i in 0..24:  <span class="kw">ST</span> REG[i] → OFF(i)     <span class="com">// write the 25 lanes back to the buffer</span>
+<span class="kw">LD</span> <span class="reg">RSP</span> ← RSPSAVE                    <span class="com">// restore the stack pointer before returning</span></code></pre>
+<p>The final <code>LD RSP</code> ends with <code>END_SEQWORD</code>, returning control to the C side cleanly — which is exactly what <code>probe_rsp</code> verified is safe.</p>
+
+<!-- ============================================================ -->
+<h2 id="g-pipeline">6. The generator (<code>keccak_gen.py</code>)</h2>
+
+<h3 id="g-pipeline-h">6.1 IR → simulate → pack → lower to C</h3>
+<p>The generator is a small compiler. The stages:</p>
+<table>
+<tr><th>Stage</th><th>Function(s)</th><th>What it does</th></tr>
+<tr><td>1. Emit IR</td><td><code>gen_prologue</code>, <code>gen_body</code>, <code>gen_loopctrl</code>, <code>gen_epilogue</code></td><td>Produce an ordered op-list using a tiny IR: <code>LD/ST/LDX/STX/XOR/XORI/ROL/NOTAND/MOV/ADDI/SHLI/LOOPTEST</code> with real register names.</td></tr>
+<tr><td>2. Simulate</td><td><code>simulate_perm</code></td><td>Run the op-list on a register-file + 56-lane memory model that <b>enforces the 8-bit signed offset</b> (<code>at(off)</code> asserts −128..127) and resolves index-register loads. Drives the 24-round loop in Python.</td></tr>
+<tr><td>3. Verify</td><td><code>verify_perm(64)</code></td><td>Assert the simulator output equals <code>keccak_perm_ref</code> for <b>64/64 random</b> states. Exit with an error if any lane mismatches.</td></tr>
+<tr><td>4. Pack</td><td><code>pack</code></td><td>Greedily chunk the op-list into triads: ≤3 ops, ≤1 memory op, no load-to-use within a triad, and <code>LOOPTEST</code> forced into its own triad.</td></tr>
+<tr><td>5. Lower</td><td><code>op_to_c</code>, <code>emit_perm_c</code></td><td>Map each IR op to a <code>ucode_macro.h</code> macro and write <code>keccak_perm.h</code> + <code>keccak_perm_body.h</code>, computing <code>loop_top</code> from the prologue length.</td></tr>
+</table>
+<p>The IR → macro mapping is direct: <code>LD</code> → <code>LDZX_DSZ64_ASZ32_SC1_DRI</code> (immediate offset), <code>LDX</code> → <code>..._DRR</code> (index register), <code>ST</code> → <code>STAD_..._RRI</code>, <code>XOR</code> → <code>XOR_DSZ64_DRR</code>, <code>ROL</code> → <code>ROL_DSZ64_DRI</code>, <code>NOTAND</code> → <code>NOTAND_DSZ64_DRR</code>, <code>MOV</code> → <code>ZEROEXT_DSZ64_DR</code>, <code>ADDI</code> → <code>ADD_DSZ64_DRI</code>. <code>LOOPTEST</code> expands to the <code>XOR + NOP + UJMPCC</code> triad shown in §5.8.</p>
+
+<h3 id="g-sim">6.2 Why simulating first is non-negotiable</h3>
+<div class="callout good"><span class="tag">Caught in software, not on the box</span>
+The simulator's <code>at(off)</code> assertion models the exact hardware addressing limit. An earlier buffer design put scratch at offsets ≥ 256, which on hardware <b>silently wrapped and corrupted the state</b> — and had previously crashed the NUC and been misdiagnosed as a "RAW dependency" failure. Modeling the constraint in the simulator turns a hardware crash into a Python <code>AssertionError</code>. Every design change is validated against 64 reference vectors before it ever touches patch RAM.</div>
+<p>Running <code>python3 keccak_gen.py</code> prints <code>PERM SIM OK: 64/64 …</code> and the triad budget (<code>perm triads=108 (prologue 26 + body+loop 56 + epilogue 26) cap 128</code>), then regenerates the two headers.</p>
+
+<!-- ============================================================ -->
+<h2 id="build">7. Build &amp; run</h2>
+
+<h3 id="build-h">7.1 Makefiles and the flags that matter</h3>
+<p>Two Makefiles: the top-level <code>keccak/Makefile</code> builds the implementation harness; <code>keccak/bench/Makefile</code> builds the benchmarks and compiles the SUPERCOP scalar baselines.</p>
+<pre><code><span class="com"># regenerate the patch (verifies 64/64 first)</span>
+$ python3 keccak_gen.py
+
+<span class="com"># build + KAT-verify on hardware</span>
+$ make PROG=asm_op_keccak_perm
+$ sudo taskset -c 0 ./asm_op_keccak_perm_static
+
+<span class="com"># head-to-head benchmark vs all SUPERCOP scalar variants</span>
+$ cd bench &amp;&amp; make PROG=asm_op_keccak_vs
+$ sudo taskset -c 0 ./asm_op_keccak_vs_static
+
+<span class="com"># full compiler × -O sweep → KECCAK_RESULTS.md</span>
+$ cd bench &amp;&amp; sudo ./bench_keccak_matrix.sh</code></pre>
+<div class="callout warn"><span class="tag">Critical flag: <code>-no-pie</code></span>
+<code>LDZX_DSZ64_ASZ32</code> only takes <b>32-bit addresses</b> (only the <code>ASZ32</code> form exists). Under <code>-fPIE</code>, the static <code>g_keccak_buf</code> can land above 4 GB and the microcode loads garbage. The Makefile filters out <code>-fPIE</code> and forces <code>-no-pie</code> for any patch-installing target, pinning the buffer into the low 4 GB. The harness also checks <code>g_keccak_buf &lt; 0x100000000</code> at startup and aborts if not.</div>
+<p class="small">The SUPERCOP baselines are compiled from <code>supercop-20260330/crypto_hash/keccakc1024/</code> and renamed via <code>objcopy --redefine-sym</code> so the four variants (and the microcode) coexist in one binary. The hand-written <code>.s</code> variants assemble identically at every config; only the C variants (<code>opt64lcu24</code>) are actually tuned by the compiler grid.</p>
+
+<!-- ============================================================ -->
+<h2 id="bench-trap">8. Benchmarking &amp; methodology</h2>
+
+<h3 id="bench-trap-h">8.1 The frequency trap (why naïve timing lies)</h3>
+<p>On Goldmont, <code>rdtsc</code> counts at a <b>constant reference rate (~1.1 GHz)</b>, <em>not</em> the core clock. The core bursts to ~2.4 GHz under load. So the <b>same work</b> reads as ~2.2× fewer or more <code>rdtsc</code> ticks depending on the P-state during measurement. Measuring two implementations in <b>separate runs</b> — or comparing a fresh number against a baseline captured at a different frequency — is <b>invalid</b>.</p>
+<div class="callout bad"><span class="tag">The trap, concretely</span>
+<code>asm_op_keccak_perm.c</code>'s built-in <code>bench()</code> prints "<code>baseline x86_64_asm: 939 cyc</code>" (a number captured standalone at base frequency) and compares the microcode's freshly-measured ticks against it. Because the microcode bench runs at burst frequency, it reads ~1900–2000 ticks and reports "<b>(loss)</b>" — even though the implementation actually <b>wins</b>. That comparison is kept only as a rough sanity timer; the verdict comes from <code>asm_op_keccak_vs.c</code>. This exact confusion is why Phase 4 first recorded a "2.2× loss" before the methodology was fixed.</div>
+
+<h3 id="bench-vs">8.2 The valid harness — <code>asm_op_keccak_vs.c</code></h3>
+<p>The fix: time the microcode and all four SUPERCOP scalar variants <b>back-to-back, interleaved, in one process</b>, after a warmup loop drives the core to steady frequency. Both see the <b>same frequency</b>, so the <b>ratio is frequency-invariant</b>. Per-rep batches of 1000 calls × 200 reps; report the <b>median</b> and a <b>robust min</b> (skip implausible near-zero batches caused by a P-state transition straddling the <code>rdtsc</code> bracket).</p>
+<p>It also benchmarks the right competitor. The four scalar contenders:</p>
+<ul>
+  <li><code>x86_64_asm</code> (Van Keer, ROL) — <b>942 cyc, the fastest</b></li>
+  <li><code>opt64lcu24</code> (C, 24× unroll, bebigokimisa) — 979 cyc</li>
+  <li><code>x86_64_shld</code> and <code>opt64lcu24shld</code> — ≈ 4630 cyc (<b>SHLD is catastrophic on Goldmont/Atom</b>)</li>
+</ul>
+<p>So the win is measured against the genuinely fastest scalar implementation, not a strawman.</p>
+
+<h3 id="bench-matrix">8.3 The compiler matrix — <code>bench_keccak_matrix.sh</code></h3>
+<p>SUPERCOP's autotuner picks the best result across many compiler/-O configs. To match that, the matrix rebuilds the head-to-head under 24 configs (gcc-11/12/13 and clang-14/17/18 × -O3/-O2/-Os/-O) and keeps the best per contender. A frequency guard pins to base first so absolute ticks ≈ true cycles; the same-process ratio inside each run stays valid regardless.</p>
+
+<h3 id="bench-results">8.4 Results</h3>
+<p>Best per contender across all 24 configs (from <code>KECCAK_RESULTS.md</code>):</p>
+<table>
+<tr><th>Contender</th><th class="num">best min (cyc/perm)</th><th class="num">best median</th><th>winning config</th></tr>
+<tr><td>keccak/<b>microcode</b> (looped)</td><td class="num"><span class="win">1910</span></td><td class="num">1916</td><td>gcc-13 -Os</td></tr>
+<tr><td>keccak/opt64lcu24</td><td class="num">2045</td><td class="num">2054</td><td>gcc-11 -Os</td></tr>
+<tr><td>keccak/x86_64_asm</td><td class="num">2061</td><td class="num">2069</td><td>clang-14 -O2</td></tr>
+<tr><td>keccak/x86_64_shld</td><td class="num">10086</td><td class="num">10097</td><td>gcc-13 -O2</td></tr>
+<tr><td>keccak/opt64lcu24shld</td><td class="num">10053</td><td class="num">10064</td><td>clang-17 -Os</td></tr>
+</table>
+<p><b>Headline:</b> microcode <b>1910</b> vs fastest SUPERCOP <b>2045</b> = <span class="win">0.934× — microcode wins by ~7%.</span></p>
+<div class="callout"><span class="tag">Reconciling 1910 vs 874</span>
+The design walkthrough quotes <b>874 vs 942</b>; the matrix quotes <b>1910 vs 2045</b>. Both give the same ratio (~0.93×). The absolute scale differs only because of the <code>rdtsc</code>-vs-core-clock issue: the matrix pins to <b>base</b> (so ticks ≈ true cycles, ~1910), while the warmup-driven head-to-head runs at <b>burst</b> (so <code>rdtsc</code> under-counts, ~874). The factor between them, ≈2.18, is exactly the 2.4/1.1 GHz P-state ratio. The <b>ratio is the result</b>; the absolute number is frequency-context-dependent — which is the entire reason the methodology insists on same-process ratios.</div>
+
+<!-- ============================================================ -->
+<h2 id="a-journey">9. Analysis</h2>
+
+<h3 id="a-journey-h">9.1 How the win was built — measured deltas</h3>
+<p>The optimizations were empirical, each measured back-to-back in the same process. The win is the product of four steps, each attacking the round's critical path or exploiting register headroom native lacks:</p>
+<table>
+<tr><th>Step</th><th>Change</th><th class="num">ratio</th><th>Note</th></tr>
+<tr><td>0</td><td>Per-lane D in buffer, naïve χ with save-MOVs</td><td class="num">1.00×</td><td>Correct but only a tie; looked D-memory-bound.</td></tr>
+<tr><td>1</td><td>D resident in registers via the <code>RSP</code> 32nd-register trick (no RCX rebuild)</td><td class="num">0.99×</td><td>Small directly, but freed the path to step 2.</td></tr>
+<tr><td>2</td><td><b>MOV-free χ</b> using the dead D-registers as NOTAND scratch</td><td class="num"><span class="win">0.95×</span></td><td>The biggest single jump (~5%) — the clearest "register headroom native lacks."</td></tr>
+<tr><td>3</td><td><b>θ balanced XOR tree</b> (depth 4→3) + <b>RC byte-index</b> (no SHL/ADD on the ι path)</td><td class="num"><span class="win">0.93×</span></td><td>The final ~7% — both shorten the critical path (C is the chain head; ι feeds lane 0).</td></tr>
+</table>
+
+<h3 id="a-latency">9.2 The latency model — why the gain is only ~7%</h3>
+<p>Per-triad cost has two faces. A single isolated firing measured <b>0.49 cyc/triad</b> — but that is a <b>throughput</b> figure: 1000 <em>independent</em> <code>vmwrite</code>s that the out-of-order engine overlaps heavily. The looped permutation is a hard <b>dependency chain</b> (round N needs round N−1) with a per-round backward branch, so it pays true <b>latency</b> with no inter-call overlap: ≈ <b>1.37 true cyc/triad</b> (1396 triads → ~1910 cyc).</p>
+<div class="callout"><span class="tag">The structural ceiling</span>
+Microcode is latency-bound at roughly <b>1 triad/cycle</b>. SUPERCOP's <code>x86_64_asm</code> does ~3 ops/cycle via BMI/rotate ILP. The register-residency advantage (no per-round spills) is real but does <b>not</b> blow the doors off, because θ→ρ→π→χ is an inherently sequential chain — each trick buys only a few percent, and we can't unroll for more parallelism because of the 128-triad patch-RAM cap. The win comes <b>entirely</b> from doing per-round work native can't: full register residency (state I/O paid once per perm), a free 32nd register, and MOV-free χ.</div>
+
+<h3 id="a-phases">9.3 Phase history</h3>
+<p>The project ran a disciplined phased plan (<code>docs/keccak-plan.md</code>). Compressed:</p>
+<table>
+<tr><th>Phase</th><th>Goal</th><th>Outcome</th></tr>
+<tr><td>0</td><td>Establish the baseline on real hardware</td><td>x86_64_asm = 939 cyc/perm; no-op hook = <b>4 cyc</b> (negligible). Win bracket implied ≤37–42 triads/round.</td></tr>
+<tr><td>1</td><td>Free patch RAM</td><td>Confirmed <b>128 triads</b> usable at U7c00 after init (bootstrap region reclaimable).</td></tr>
+<tr><td>2</td><td>Round body on paper</td><td>Designed a 2-body unroll closure; projected a tie-to-loss at ~1 cyc/triad.</td></tr>
+<tr><td>3</td><td>Single-round prototype</td><td><b>π self-resolves</b> via in-place cycle walk → one looped body suffices (the 2-body trick was unnecessary). Single round verified correct.</td></tr>
+<tr><td>4</td><td>Loop all 24 rounds, KAT-verify</td><td>Correct (anchor <code>0xF1258F7940E1DDE7</code>). Initially looked like a 2.2× loss (the frequency trap, §8.1); the same-process methodology + four optimizations turned it into a <b>0.93× win</b>.</td></tr>
+</table>
+<p class="small">Note: <code>docs/keccak-plan.md</code>'s Phase-4 section ends on the pre-methodology-fix "loss" verdict and was not rewritten; the authoritative result is the win recorded in <code>docs/keccak_understand.md</code>, <code>bench/KECCAK_RESULTS.md</code>, and the head-to-head harness.</p>
+
+<h3 id="a-verdict">9.4 Verdict</h3>
+<p>A <b>complete, correct, KAT-verified</b> 24-round Keccak-f[1600] runs entirely in Goldmont microcode patch RAM, looped inside one <code>vmwrite</code> firing, in <b>108 triads</b> (20 under the cap). Benchmarked honestly — back-to-back, same frequency, against the genuinely fastest scalar baseline — it runs at <b>0.934×</b>, a <b>~7% win</b>. The margin is modest by design: Keccak is chain-bound and microcode is latency-bound, so the only available edge is the per-round work that native register-starvation forbids — and that edge, fully exploited (residency, the borrowed 32nd register, MOV-free χ, a depth-3 parity tree, and a critical-path-free round constant), is exactly enough to win.</p>
+
+<div class="footer">
+  <p><b>Primary sources</b> (all in <code>simple/keccak/</code>): <code>keccak_gen.py</code> (the source of truth) · <code>keccak_perm_body.h</code> (the lowered patch) · <code>bench/asm_op_keccak_vs.c</code> (the valid benchmark) · <code>bench/KECCAK_RESULTS.md</code> (the scoreboard) · <code>docs/keccak_understand.md</code>, <code>docs/keccak-plan.md</code>, <code>docs/keccak-explained.md</code> (narrative). Hardware facts: <code>probes/*.c</code>.</p>
+  <p>Target hardware: Intel Goldmont, Celeron N3350. KAT anchor: Keccak-f[1600] of the all-zero state → lane 0 = <code>0xF1258F7940E1DDE7</code>.</p>
+</div>
+
+</main>
+</div>
+</body>
+</html>

@@ -13,9 +13,9 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
-#include "../../../include/patch.h"
-#include "../../../include/ucode_macro.h"
-#include "../../../include/misc.h"
+#include "../../../../include/patch.h"
+#include "../../../../include/ucode_macro.h"
+#include "../../../../include/misc.h"
 
 #ifndef SEG
 #define SEG 3

@@ -18,9 +18,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#include "../../../include/patch.h"
-#include "../../../include/ucode_macro.h"
-#include "../../../include/misc.h"
+#include "../../../../include/patch.h"
+#include "../../../../include/ucode_macro.h"
+#include "../../../../include/misc.h"
 
 /* median over a sample of per-rep batch totals (sorts in place). */
 static int cmp_u64(const void *a, const void *b){
@@ -43,7 +43,7 @@ static uint64_t robust_min(const uint64_t *sorted, int n, uint64_t med){
     return sorted[n-1];
 }
 
-#include "keccak_perm.h"
+#include "../keccak_perm.h"
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];
 
 /* SUPERCOP scalar Keccak permutations — benchmark vs ALL fast x86-64 variants
@@ -64,7 +64,7 @@ static const uint64_t KECCAK_RC[24] = {
 
 static void install_perm_patch(void){
     ucode_t patch[] = {
-        #include "keccak_perm_body.h"
+        #include "../keccak_perm_body.h"
     };
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
     patch_ucode(0x7c00, patch, KECCAK_PERM_TRIADS);
