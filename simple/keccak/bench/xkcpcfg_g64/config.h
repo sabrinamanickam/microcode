@@ -1,0 +1,1 @@
+#define KeccakP1600_plain64_fullUnrolling

@@ -102,6 +102,34 @@ keccak_simple.o: $(SC_KECCAK_DIR)/simple/Keccak-simple.c
 	objcopy --keep-global-symbol=keccak_simple_F $@.tmp2.o $@
 	rm -f $@.tmp.o $@.tmp2.o
 
+# ---- XKCP (Keccak team) single Keccak-p[1600], plain-64bits ----
+# Goldmont has no AVX2/AVX-512, and XKCP ships NO SSE single-permutation kernel,
+# so the only XKCP single-perm that runs here is plain-64bits (its generic64 /
+# generic64lc targets; SSSE3/AVX/x86-64 all fall back to it for one permutation).
+# Same KeccakP-1600-opt64.c, toggled by a generated config.h:
+#   xkcp_g64   = full unroll, no lane-complement   (generic64)
+#   xkcp_g64lc = full unroll, lane-complement       (generic64lc — what XKCP runs here)
+# Entry point KeccakP1600_plain64_Permute_24rounds(void*) is renamed per variant.
+XKCP_K1600 := ../../XKCP/lib/low/KeccakP-1600
+XKCP_INC   := -I$(XKCP_K1600)/plain-64bits -I$(XKCP_K1600)/plain-64bits/SnP \
+              -I$(XKCP_K1600)/common -I../../XKCP/lib/low/common -I../../XKCP/lib/common
+
+keccak_xkcp_g64.o: $(XKCP_K1600)/plain-64bits/KeccakP-1600-opt64.c
+	mkdir -p xkcpcfg_g64
+	printf '#define KeccakP1600_plain64_fullUnrolling\n' > xkcpcfg_g64/config.h
+	$(CC) $(KECCAK_CFLAGS) -Ixkcpcfg_g64 $(XKCP_INC) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakP1600_plain64_Permute_24rounds=keccak_xkcp_g64_perm $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_xkcp_g64_perm $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
+keccak_xkcp_g64lc.o: $(XKCP_K1600)/plain-64bits/KeccakP-1600-opt64.c
+	mkdir -p xkcpcfg_g64lc
+	printf '#define KeccakP1600_plain64_useLaneComplementing\n#define KeccakP1600_plain64_fullUnrolling\n' > xkcpcfg_g64lc/config.h
+	$(CC) $(KECCAK_CFLAGS) -Ixkcpcfg_g64lc $(XKCP_INC) -c $< -o $@.tmp.o
+	objcopy --redefine-sym KeccakP1600_plain64_Permute_24rounds=keccak_xkcp_g64lc_perm $@.tmp.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_xkcp_g64lc_perm $@.tmp2.o $@
+	rm -f $@.tmp.o $@.tmp2.o
+
 ifeq ($(PROG),bench_keccak)
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_opt64lcu6.o
 endif
@@ -115,7 +143,8 @@ LDFLAGS := -static -no-pie
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o \
               keccak_opt64lcu24.o keccak_opt64lcu24shld.o \
               keccak_opt64lcu6.o keccak_opt64u6.o \
-              keccak_sseu2.o keccak_mmxu1.o keccak_simple.o
+              keccak_sseu2.o keccak_mmxu1.o keccak_simple.o \
+              keccak_xkcp_g64.o keccak_xkcp_g64lc.o
 endif
 
 # Build $(PROG)_static from $(PROG).c (+ any extra objs)
@@ -124,6 +153,6 @@ $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
 
 clean:
 	rm -f *_static *.o
-	rm -rf scstub
+	rm -rf scstub xkcpcfg_g64 xkcpcfg_g64lc
 
 .PHONY: all clean
