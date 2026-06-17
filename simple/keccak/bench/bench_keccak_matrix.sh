@@ -69,10 +69,15 @@ CONTENDERS=(
     "keccak/x86_64_shld"
     "keccak/opt64lcu24"
     "keccak/opt64lcu24shld"
+    "keccak/opt64lcu6"
+    "keccak/opt64u6"
+    "keccak/sseu2"
+    "keccak/mmxu1"
+    "keccak/simple"
     "keccak/microcode"
 )
 # Short column headers for the markdown matrix, index-aligned with CONTENDERS.
-SHORT=( "asm" "shld" "opt24" "opt24shld" "ucode" )
+SHORT=( "asm" "shld" "opt24" "opt24shld" "lcu6" "u6" "sse" "mmx" "simple" "ucode" )
 
 ACTIVE_CONFIGS=()
 select_active_configs() {
@@ -129,7 +134,7 @@ run_matrix() {
         output=$(sudo taskset -c 0 ./asm_op_keccak_vs_static 2>&1)
 
         # Show the human report so the user sees per-config numbers in real time.
-        echo "$output" | sed -n '/--- SUPERCOP scalar/,/ratios valid/p'
+        echo "$output" | sed -n '/head-to-head/,/ratios valid/p'
 
         ran_cfgs+=("$cfg")
 
@@ -148,7 +153,9 @@ run_matrix() {
 compute_headline() {
     local label v sc_best="" sc_best_label="" uc
     for label in keccak/x86_64_asm keccak/x86_64_shld \
-                 keccak/opt64lcu24 keccak/opt64lcu24shld; do
+                 keccak/opt64lcu24 keccak/opt64lcu24shld \
+                 keccak/opt64lcu6 keccak/opt64u6 \
+                 keccak/sseu2 keccak/mmxu1 keccak/simple; do
         v="${best_min[$label]:-}"
         [ -z "$v" ] && continue
         if [ -z "$sc_best" ] || [ "$v" -lt "$sc_best" ]; then
@@ -197,7 +204,8 @@ emit_results_md() {
         echo "# Keccak SUPERCOP-matrix benchmark"
         echo
         echo "Same methodology as \`../bench_supercop_matrix.sh\`: for each (compiler, -O)"
-        echo "config SUPERCOP tries, rebuild the SUPERCOP scalar Keccak baselines + the"
+        echo "config SUPERCOP tries, rebuild every runnable SUPERCOP Keccak baseline (hand"
+        echo "asm, 64-bit C, x86 SIMD, reference) + the"
         echo "head-to-head harness, run back-to-back in one process, keep the best per"
         echo "contender. cyc/perm (RDTSC at TSC rate; pin to base so ticks ≈ true cycles)."
         echo
