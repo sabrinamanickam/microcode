@@ -167,16 +167,22 @@ compute_headline() {
 }
 
 report_terminal() {
-    local label hl sc_best_label sc_best uc
+    local label hl sc_best_label sc_best uc uc_best rcell bm
+    uc_best="${best_min[keccak/microcode]:-}"   # microcode's best min, for the ratio column
     echo
     echo "═══════════════════════════════════════════════════════════════"
     echo "  KECCAK MATRIX SCOREBOARD  (best cyc/perm over ${#ran_cfgs[@]} configs)"
     echo "═══════════════════════════════════════════════════════════════"
-    printf "  %-24s %8s %8s   %s\n" "contender" "min" "median" "best config (min)"
-    printf "  %-24s %8s %8s   %s\n" "------------------------" "--------" "--------" "-----------------"
+    printf "  %-24s %8s %8s %10s   %s\n" "contender" "min" "median" "this/ucode" "best config (min)"
+    printf "  %-24s %8s %8s %10s   %s\n" "------------------------" "--------" "--------" "----------" "-----------------"
     for label in "${CONTENDERS[@]}"; do
-        printf "  %-24s %8s %8s   %s\n" "$label" \
-            "${best_min[$label]:-n/a}" "${best_med[$label]:-n/a}" "${best_cfg[$label]:-—}"
+        # this/ucode = this_contender_cyc / microcode_cyc  (>1 => microcode faster)
+        rcell="—"; bm="${best_min[$label]:-}"
+        if [ -n "$uc_best" ] && [[ "$bm" =~ ^[0-9]+$ ]] && [ "$bm" -gt 0 ]; then
+            rcell=$(awk -v u="$uc_best" -v b="$bm" 'BEGIN{printf "%.3fx", b/u}')
+        fi
+        printf "  %-24s %8s %8s %10s   %s\n" "$label" \
+            "${best_min[$label]:-n/a}" "${best_med[$label]:-n/a}" "$rcell" "${best_cfg[$label]:-—}"
     done
 
     hl=$(compute_headline)
@@ -199,7 +205,7 @@ report_terminal() {
 # Markdown: a full (config × contender) matrix of mins + a best-per-contender
 # table + the headline. No git interaction (unlike the curve script).
 emit_results_md() {
-    local out="$1" cfg label i hl sc_best_label sc_best uc
+    local out="$1" cfg label i hl sc_best_label sc_best uc uc_best rcell bm
     {
         echo "# Keccak SUPERCOP-matrix benchmark"
         echo
@@ -225,10 +231,18 @@ emit_results_md() {
         echo
         echo "## best per contender (what SUPERCOP's autotuner would pick)"
         echo
-        echo "| contender | best min | best median | winning config |"
-        echo "|---|---|---|---|"
+        echo "\`this/microcode\` = this_contender_cyc / microcode_cyc; >1 means microcode is faster"
+        echo "(e.g. 1.071x = microcode is ~7% faster; 1.000x is microcode itself)."
+        echo
+        uc_best="${best_min[keccak/microcode]:-}"
+        echo "| contender | best min | best median | winning config | this/microcode |"
+        echo "|---|---|---|---|---|"
         for label in "${CONTENDERS[@]}"; do
-            echo "| $label | ${best_min[$label]:-n/a} | ${best_med[$label]:-n/a} | ${best_cfg[$label]:-—} |"
+            rcell="—"; bm="${best_min[$label]:-}"
+            if [ -n "$uc_best" ] && [[ "$bm" =~ ^[0-9]+$ ]] && [ "$bm" -gt 0 ]; then
+                rcell=$(awk -v u="$uc_best" -v b="$bm" 'BEGIN{printf "%.3fx", b/u}')
+            fi
+            echo "| $label | ${best_min[$label]:-n/a} | ${best_med[$label]:-n/a} | ${best_cfg[$label]:-—} | $rcell |"
         done
         echo
         hl=$(compute_headline)
