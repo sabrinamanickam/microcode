@@ -130,6 +130,23 @@ keccak_xkcp_g64lc.o: $(XKCP_K1600)/plain-64bits/KeccakP-1600-opt64.c
 	objcopy --keep-global-symbol=keccak_xkcp_g64lc_perm $@.tmp2.o $@
 	rm -f $@.tmp.o $@.tmp2.o
 
+# ---- OpenSSL keccak1600, x86-64 assembly (crypto/sha/asm, CRYPTOGAMS/Polyakov) ----
+# What OpenSSL actually runs on x86-64: plain scalar asm (no BMI/AVX), so it runs
+# on Goldmont. Generated from the perlasm via x86_64-xlate.pl. KeccakF1600 isn't
+# .globl in the asm (only SHA3_absorb/squeeze are) -> globalize + rename it. The
+# trailing .note.gnu.property CET block is emitted in a Solaris #alloc form GNU as
+# rejects, and it sits after all code -> stripped. (The avx2/avx512 OpenSSL keccak
+# asm needs AVX, which Goldmont lacks, so only this scalar path is benchmarkable.)
+OSSL_KECCAK := ../../openssl/crypto/sha/asm/keccak1600-x86_64.pl
+keccak_openssl.o: $(OSSL_KECCAK)
+	perl $< elf $@.s 2>/dev/null
+	sed -i '/\.section[[:space:]].*note\.gnu\.property/,$$d' $@.s
+	$(CC) -c $@.s -o $@.tmp.o
+	objcopy --globalize-symbol=KeccakF1600 $@.tmp.o $@.tmp1.o
+	objcopy --redefine-sym KeccakF1600=keccak_openssl_perm $@.tmp1.o $@.tmp2.o
+	objcopy --keep-global-symbol=keccak_openssl_perm $@.tmp2.o $@
+	rm -f $@.s $@.tmp.o $@.tmp1.o $@.tmp2.o
+
 ifeq ($(PROG),bench_keccak)
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_opt64lcu6.o
 endif
@@ -144,7 +161,7 @@ EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o \
               keccak_opt64lcu24.o keccak_opt64lcu24shld.o \
               keccak_opt64lcu6.o keccak_opt64u6.o \
               keccak_sseu2.o keccak_mmxu1.o keccak_simple.o \
-              keccak_xkcp_g64.o keccak_xkcp_g64lc.o
+              keccak_xkcp_g64.o keccak_xkcp_g64lc.o keccak_openssl.o
 endif
 
 # Build $(PROG)_static from $(PROG).c (+ any extra objs)
@@ -152,7 +169,7 @@ $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $< $(EXTRA_OBJS) $(LIBS) -o $@
 
 clean:
-	rm -f *_static *.o
+	rm -f *_static *.o keccak_openssl.o.s
 	rm -rf scstub xkcpcfg_g64 xkcpcfg_g64lc
 
 .PHONY: all clean

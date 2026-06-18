@@ -75,6 +75,11 @@ static void keccak_simple_perm(uint64_t s[25]){ keccak_simple_F(s, s, 0); }
 extern void keccak_xkcp_g64_perm(uint64_t state[25]);    /* generic64   : full unroll, no lane-complement */
 extern void keccak_xkcp_g64lc_perm(uint64_t state[25]);  /* generic64lc : full unroll, lane-complement (Goldmont default) */
 
+/* OpenSSL keccak1600, x86-64 scalar assembly (CRYPTOGAMS/Polyakov) — what OpenSSL
+ * runs on x86-64; no BMI/AVX, so it executes on Goldmont. Distinct hand-asm from
+ * SUPERCOP's x86_64_asm (Van Keer). Takes the 25-lane state (A[5][5]) pointer. */
+extern void keccak_openssl_perm(uint64_t state[25]);
+
 static const uint64_t KECCAK_RC[24] = {
     0x0000000000000001ULL,0x0000000000008082ULL,0x800000000000808aULL,0x8000000080008000ULL,
     0x000000000000808bULL,0x0000000080000001ULL,0x8000000080008081ULL,0x8000000000008009ULL,
@@ -137,10 +142,11 @@ int main(void){
     /* interleaved timing: each rep times every SUPERCOP variant + microcode,
      * all close in time so they see the same frequency. min over reps. */
     typedef void (*permfn)(uint64_t*);
-    #define NCONT 11
+    #define NCONT 12
     struct { const char *name; const char *type; const char *key; permfn fn; uint64_t min; uint64_t med; } C[NCONT] = {
         {"x86_64_asm",     "asm",  "x86_64_asm",     keccak_x86_64_asm_perm,     UINT64_MAX, 0},
         {"x86_64_shld",    "asm",  "x86_64_shld",    keccak_x86_64_shld_perm,    UINT64_MAX, 0},
+        {"openssl",        "asm",  "openssl",        keccak_openssl_perm,        UINT64_MAX, 0},
         {"opt64lcu24",     "C64",  "opt64lcu24",     keccak_opt64lcu24_perm,     UINT64_MAX, 0},
         {"opt64lcu24shld", "C64",  "opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX, 0},
         {"opt64lcu6",      "C64",  "opt64lcu6",      keccak_opt64lcu6_perm,      UINT64_MAX, 0},

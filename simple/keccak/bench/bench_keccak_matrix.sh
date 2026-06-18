@@ -76,10 +76,11 @@ CONTENDERS=(
     "keccak/simple"
     "keccak/xkcp_g64"
     "keccak/xkcp_g64lc"
+    "keccak/openssl"
     "keccak/microcode"
 )
 # Short column headers for the markdown matrix, index-aligned with CONTENDERS.
-SHORT=( "asm" "shld" "opt24" "opt24shld" "lcu6" "u6" "sse" "mmx" "simple" "xg64" "xg64lc" "ucode" )
+SHORT=( "asm" "shld" "opt24" "opt24shld" "lcu6" "u6" "sse" "mmx" "simple" "xg64" "xg64lc" "ossl" "ucode" )
 
 ACTIVE_CONFIGS=()
 select_active_configs() {
@@ -158,7 +159,7 @@ compute_headline() {
                  keccak/opt64lcu24 keccak/opt64lcu24shld \
                  keccak/opt64lcu6 keccak/opt64u6 \
                  keccak/sseu2 keccak/mmxu1 keccak/simple \
-                 keccak/xkcp_g64 keccak/xkcp_g64lc; do
+                 keccak/xkcp_g64 keccak/xkcp_g64lc keccak/openssl; do
         v="${best_min[$label]:-}"
         [ -z "$v" ] && continue
         if [ -z "$sc_best" ] || [ "$v" -lt "$sc_best" ]; then
