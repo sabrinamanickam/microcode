@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Addition-with-flags on Goldmont — findings</title>
+<style>
+  :root { --pass:#1a7f37; --new:#8250df; --warn:#9a6700; --bg:#fbfbfd; --ink:#1c1e21; --mut:#5b6470; --line:#e3e6ea; }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color: var(--ink); background: var(--bg); margin: 0; padding: 0 1rem; }
+  main { max-width: 60rem; margin: 0 auto; padding: 2.5rem 0 5rem; }
+  h1 { font-size: 1.9rem; line-height:1.2; margin: 0 0 .3rem; }
+  h2 { font-size: 1.3rem; margin: 2.4rem 0 .5rem; padding-top:.6rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.3rem 0 .3rem; }
+  .sub { color: var(--mut); margin:.2rem 0 1.4rem; }
+  code, .mono { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size: .92em; }
+  code { background:#eef0f3; padding:.08em .35em; border-radius:4px; }
+  .badge { display:inline-block; font-size:.72rem; font-weight:700; letter-spacing:.03em;
+           padding:.12em .5em; border-radius:999px; color:#fff; vertical-align:middle; }
+  .b-pass{background:var(--pass);} .b-new{background:var(--new);} .b-warn{background:var(--warn);}
+  .card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:1rem 1.2rem; margin:1.1rem 0; }
+  .key { background:#f3f0fb; border:1px solid #e0d8f5; border-left:4px solid var(--new); }
+  table { border-collapse:collapse; width:100%; margin:.7rem 0; font-size:.9rem; }
+  th,td { text-align:left; padding:.4em .6em; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; }
+  td.r { color:var(--pass); font-weight:600; white-space:nowrap; }
+  td.d { color:var(--warn); font-weight:600; white-space:nowrap; }
+  .model { background:#fff; border:1px solid var(--line); border-radius:10px; padding:.4rem 1.2rem; }
+  .foot { color:var(--mut); font-size:.85rem; margin-top:2.5rem; border-top:1px solid var(--line); padding-top:1rem; }
+  ul { margin:.4rem 0 .8rem; } li { margin:.2rem 0; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Addition-with-flags on the Goldmont microcode engine</h1>
+<p class="sub">Celeron N3350, red-unlocked &middot; <code>vmwrite</code> (0x0cd8) hook &rarr; patch RAM U7c00 &middot;
+results from <code>additionwithflags.c</code> &middot; <strong>45 / 45 certifying checks pass</strong>,
+27 / 28 exploratory probes match.</p>
+
+<div class="card model">
+<p><strong>The two-domain flag model (confirmed end-to-end).</strong> The microcode engine exposes two
+independent flag stores. <em>Domain&nbsp;#1</em> is a <strong>per-register</strong> latch of the arithmetic
+flags written by every ALU op into its destination register and read back by <code>SETCC_COND*</code>.
+<em>Domain&nbsp;#2</em> is the architectural <code>RFLAGS.CF</code> that the caller sets with <code>popfq</code>
+before the trigger; it is the only carry-in <code>ADC</code> ever reads, and it is frozen at patch entry.
+The two are isolated: a carry produced in Domain&nbsp;#1 is invisible to <code>ADC</code> unless
+<code>GENARITHFLAGS_RR(TMP,TMP)</code> explicitly copies it across.</p>
+</div>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 1 &mdash; ADD + SETCC carry chain (Domain&nbsp;#1) <span class="badge b-pass">6/6 PASS</span></h2>
+<p>This is the carry primitive every production curve uses, in isolation: <code>ADD&nbsp;&rarr;&nbsp;TMP</code>
+deposits a carry in that register's Domain&nbsp;#1 latch, <code>SETCC_CONDB</code> materialises it as a 0/1
+value, and a folding <code>ADD</code> adds it into the next limb &mdash; no <code>ADC</code>, no architectural
+flag touched. The 128-bit adder built this way reproduced <code>__uint128_t</code> exactly on every edge case
+(zero, no-carry, low-limb overflow propagating into the high limb, and a full wrap where the 129th-bit carry
+is correctly dropped) and on 5&nbsp;000 random inputs. This certifies the production mechanism: carries can be
+generated, captured, and propagated entirely inside the microcode domain with no dependence on
+architectural <code>RFLAGS</code>.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 2 &mdash; ADC reads the frozen architectural CF (Domain&nbsp;#2) <span class="badge b-pass">10/10 PASS</span></h2>
+<p><strong>2a (single ADC).</strong> With both source operands zero, <code>ADC</code> returned exactly the
+entry <code>CF</code> (0&rarr;0, 1&rarr;1), and <code>5+3</code> returned 8 or 9 depending on entry <code>CF</code>.
+So <code>ADC</code>'s carry-in is unambiguously the architectural carry flag.</p>
+<p><strong>2b (intra-triad) and 2c (cross-triad).</strong> An overflowing <code>ADD</code> placed in slot&nbsp;0
+of the same triad as the <code>ADC</code> (2b), or in the preceding triad (2c), did <em>not</em> change what
+<code>ADC</code> saw: with entry <code>CF=0</code> the <code>ADC</code> still read 0, and with a non-overflowing
+<code>ADD</code> but entry <code>CF=1</code> it still read 1. Neither slot adjacency nor a triad boundary lets an
+<code>ADD</code>'s carry reach <code>ADC</code>.</p>
+<p><strong>2d (two ADCs).</strong> The decisive isolation test. Under entry <code>CF=1</code> the first
+<code>ADC</code> returned 1 (its own carry-<em>out</em> being 0), and the second <code>ADC</code> <em>also</em>
+returned 1 &mdash; it read the same frozen architectural carry, not the first <code>ADC</code>'s output. This
+proves <code>ADC</code> never <em>writes</em> Domain&nbsp;#2: the architectural <code>CF</code> is constant for
+the lifetime of the patch unless something deliberately rewrites it.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 3 &mdash; Negative controls: can ADC reach a Domain-#1 carry? <span class="badge b-pass">7/7 PASS</span></h2>
+<p>This section answers the central question by isolating cause from effect, with the entry architectural
+<code>CF</code> forced so that any <code>1</code> from <code>ADC</code> could only have come from the
+microcode-domain carry.</p>
+<ul>
+  <li><strong>(A) the carry genuinely exists.</strong> After an overflowing <code>ADD</code>,
+      <code>SETCC</code> read the carry as 1 (and 0 for a non-overflowing add). So the Domain&nbsp;#1 carry is
+      real and present.</li>
+  <li><strong>(B) ADC cannot see it.</strong> With that same Domain&nbsp;#1 carry set and entry
+      <code>CF=0</code>, <code>ADC</code> returned 0 &mdash; not because the carry is absent (A proves it is
+      present) but because <code>ADC</code> simply cannot reach it.</li>
+  <li><strong>(C) SETCC is not a bridge.</strong> Inserting a <code>SETCC</code> that reads the carry before
+      the <code>ADC</code> changed nothing: <code>ADC</code> still returned 0. Reading the carry does not
+      promote it to the architectural flag.</li>
+  <li><strong>(D) GENARITHFLAGS_RR is the bridge.</strong> The only change that made <code>ADC</code> return 1
+      was inserting <code>GENARITHFLAGS_RR(TMP0,TMP0)</code> between the <code>ADD</code> and the
+      <code>ADC</code>.</li>
+  <li><strong>(E) the carry-in is immovable.</strong> Setting and then overwriting the Domain&nbsp;#1 carry
+      (1&rarr;0 and 0&rarr;1) never altered what <code>ADC</code> read &mdash; it always returned the frozen
+      entry value. The two domains do not leak into each other in either direction.</li>
+</ul>
+<p><strong>Answer to "without GENARITHFLAGS, can ADC find a microcode-domain carry?" &mdash; No.</strong>
+And SETCC does not substitute for the bridge; <code>GENARITHFLAGS_RR(TMP,TMP)</code> is required.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 4 &mdash; GENARITHFLAGS_RR bridges Domain&nbsp;#1 &rarr; #2 <span class="badge b-pass">10/10 PASS</span></h2>
+<p>The bridge was exercised over eight inputs spanning no-overflow and overflow. The crucial cases are the
+<em>discriminators</em> &mdash; overflows whose low word is non-zero (<code>FF..FE+3</code>,
+<code>FF..FE+5</code>, and a random pair). For each, <code>ADC</code> read <code>CF=1</code>, proving the bridge
+copies the <em>actual carry</em> and not a coincidental "result&nbsp;==&nbsp;0" condition (a confound in the
+earliest 2026-04 measurements, now ruled out). The two appended checks confirm the bridge <strong>writes</strong>
+the architectural flag rather than OR-ing into it: starting from entry <code>CF=1</code>, a non-overflowing
+add drove <code>CF</code> back to 0. That write-not-OR behaviour is what makes a multi-limb chain able to
+propagate a "no-carry" limb correctly.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 5 &mdash; ADC's carry-out is itself a Domain-#1 carry (chainable) <span class="badge b-pass">5/5 PASS</span></h2>
+<p><code>ADC</code>'s destination register receives a Domain&nbsp;#1 carry exactly like an <code>ADD</code>'s
+does, so a second <code>GENARITHFLAGS_RR</code> on that register re-publishes it to the architectural flag for
+the next <code>ADC</code>. Across the five cases (first add carrying or not, second add overflowing or not) the
+re-bridged carry was always correct. This is what makes the <code>GENARITHFLAGS_RR&nbsp;+&nbsp;ADC</code> chain
+compose to arbitrary width at two micro-ops per limb.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 6 &mdash; end-to-end 256-bit add (chained ADC + bridge) <span class="badge b-pass">5/5 PASS</span></h2>
+<p>The full <code>{ADC, GENARITHFLAGS_RR(dst,dst)}</code> packed layout &mdash; the same one used in production
+&mdash; computed a 4&times;64 addition (result and final carry) matching <code>__uint128_t</code> on the edge
+vectors (zero, single-limb carry, carry rippling through all four limbs, max&nbsp;+&nbsp;max) and on 10&nbsp;000
+random inputs. This is the working primitive, not just the building blocks: the bridge is reliable inside a
+realistic multi-triad patch.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 7 &mdash; Domain&nbsp;#1 latches the FULL flag set <span class="badge b-new">NEW &middot; 24/24 MATCH</span></h2>
+<div class="card key">
+<p><strong>Headline finding.</strong> The per-register flag latch is not CF-only. Reading <code>TMP0</code> after
+an <code>ADD</code> through <code>SETCC_CONDB</code>, <code>_CONDZ</code>, <code>_CONDS</code> and
+<code>_CONDO</code> reproduced the x86 <strong>CF, ZF, SF and OF</strong> on all six vectors &mdash;
+<strong>CF&nbsp;6/6, ZF&nbsp;6/6, SF&nbsp;6/6, OF&nbsp;6/6</strong>. The microcode domain carries the complete
+arithmetic flag set per register, even though production code has only ever used CF.</p>
+</div>
+<table>
+<tr><th>input</th><th>CF</th><th>ZF</th><th>SF</th><th>OF</th><th>what it isolates</th></tr>
+<tr><td><code>5 + 3</code></td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td>all clear (baseline)</td></tr>
+<tr><td><code>5 + (&minus;5)</code></td><td class="r">1</td><td class="r">1</td><td class="r">0</td><td class="r">0</td><td>zero result &rarr; ZF, with CF</td></tr>
+<tr><td><code>0 + 2<sup>63</sup></code></td><td class="r">0</td><td class="r">0</td><td class="r">1</td><td class="r">0</td><td>sign bit &rarr; SF</td></tr>
+<tr><td><code>INT64_MAX + 1</code></td><td class="r">0</td><td class="r">0</td><td class="r">1</td><td class="r">1</td><td>signed +overflow &rarr; OF (no CF)</td></tr>
+<tr><td><code>INT64_MIN + INT64_MIN</code></td><td class="r">1</td><td class="r">1</td><td class="r">0</td><td class="r">1</td><td>signed &minus;overflow &rarr; OF with CF</td></tr>
+<tr><td><code>FF..F + 1</code></td><td class="r">1</td><td class="r">1</td><td class="r">0</td><td class="r">0</td><td>unsigned wrap &rarr; CF, ZF (no OF)</td></tr>
+</table>
+<p>The <code>INT64_MAX+1</code> and <code>INT64_MIN+INT64_MIN</code> rows are the discriminators: they separate
+signed overflow (OF) from unsigned carry (CF), and the engine got both independently right. The practical
+consequence is that zero-detection, sign tests, and signed-overflow detection &mdash; hence conditional
+reduction and constant-time comparison &mdash; are all expressible directly in the microcode domain via
+<code>SETCC_CONDZ/CONDS/CONDO</code>, with no architectural-flag round trip.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Section 8 &mdash; per-register carry lifetime <span class="badge b-pass">#6 PASS</span> <span class="badge b-new">#5 model refined</span></h2>
+<p><strong>#6 &mdash; SETCC reads are non-destructive.</strong> Two consecutive <code>SETCC_CONDB</code> reads of
+the same register's carry both returned 1; reading the latch does not consume it.</p>
+<p><strong>#5 &mdash; what (re)writes a register's latched carry.</strong> Starting from <code>TMP0</code> holding
+an <code>ADD</code> carry of 1, we overwrote <code>TMP0</code> with a different op and re-read its carry:</p>
+<table>
+<tr><th>op writing TMP0</th><th>observed carry</th><th>reading</th></tr>
+<tr><td><code>ZEROEXT TMP0 = 7</code></td><td class="d">0</td><td><strong>clears</strong> the latch (differs from a naive "move preserves" guess)</td></tr>
+<tr><td><code>OR TMP0 = 3 | 4</code></td><td class="r">0</td><td>clears, as x86 <code>OR</code> does</td></tr>
+<tr><td><code>SHL TMP0 = 2<sup>63</sup> &laquo; 1</code></td><td class="r">1</td><td>sets to the bit shifted out, as x86 <code>SHL</code> does</td></tr>
+<tr><td><code>SHR TMP8 = &hellip; (different reg)</code></td><td class="r">1</td><td>TMP0 untouched &mdash; the latch is strictly per-register</td></tr>
+</table>
+<p>The one probe that "differed" from the stated hypothesis (<code>ZEROEXT</code>) is not an error &mdash; it
+<em>refines the model</em>. Unlike an x86 <code>MOV</code>, which is flag-transparent, a microcode
+<code>ZEROEXT</code> rewrites its destination's Domain&nbsp;#1 flags to "no carry." Combined with the other
+three rows, the rule is clean: <strong>a register's latched flags are redefined by whatever op most recently
+wrote that register</strong> &mdash; arithmetic ops by their result, <code>SHL</code>/<code>SHR</code> by the
+shifted-out bit, and <code>ZEROEXT</code>/<code>OR</code> to zero. Two operational corollaries for code
+generation: (1) a carry must be captured with <code>SETCC</code> <em>before</em> any other op overwrites that
+register, which is exactly what the production curve25519 schedule does; and (2) operations on
+<em>other</em> registers never disturb a carry you are holding, which is what lets the squaring routine compute
+shifts of the accumulator into scratch registers without losing the limb carry.</p>
+
+<!-- ───────────────────────────────────────────────────────────── -->
+<h2>Summary for the paper</h2>
+<p>The microcode ALU maintains a <strong>per-register arithmetic-flag latch</strong> (CF, ZF, SF, OF) that is
+the substrate of all our carry handling, and a separate, entry-frozen <strong>architectural carry</strong> that
+<code>ADC</code>/<code>SBB</code> consume. The two are strictly isolated, and the <em>only</em> documented bridge
+from the register domain to the architectural domain is <code>GENARITHFLAGS_RR(TMP,TMP)</code>, which performs a
+genuine write of the real carry (not an OR, not a result-is-zero proxy). <code>SETCC</code> reads the register
+domain but does not bridge to <code>ADC</code>. Two carry-chain styles follow, both verified correct:
+<code>ADD&nbsp;+&nbsp;SETCC&nbsp;+&nbsp;fold</code> at three ops per limb (never touching architectural flags,
+used in production), and <code>GENARITHFLAGS_RR&nbsp;+&nbsp;ADC</code> at two ops per limb (routing through the
+architectural carry). The newly confirmed full-flag latch additionally opens signed-comparison and
+zero-detection primitives in the microcode domain.</p>
+
+<p class="foot">Generated from the run of <code>Sabrina/tests/additionwithflags.c</code> on
+2026-06-22. Certifying checks 45/45 pass; exploratory probes 27/28 match (the single non-match is the
+<code>ZEROEXT</code>-clears-carry result, which refines rather than contradicts the model). Subtraction
+(<code>SBB_DSZ64</code>) is characterised separately in <code>subtractionwithflags.c</code>.</p>
+
+</main>
+</body>
+</html>

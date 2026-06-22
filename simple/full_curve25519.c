@@ -2094,6 +2094,144 @@ static void benchmark(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * SAME-PROCESS, INTERLEAVED BENCHMARK  (the paper's clean number)
+ *
+ * benchmark() above times each contender in a 100-rep block, one block after
+ * another. Across the ~30M cycles of a block the CPU frequency can drift, and
+ * rdtsc counts at the constant TSC rate (~1.1 GHz) not the core clock — so two
+ * blocks measured minutes apart at different P-states are not comparable
+ * (this is the turbo-vs-TSC artifact that makes cross-run absolutes invalid).
+ *
+ * Here every contender is timed once per rep, back-to-back, so within a rep
+ * they all see the same instantaneous frequency. The min-over-reps RATIO is
+ * therefore frequency-invariant regardless of governor state. Mirrors the
+ * Keccak harness keccak/bench/asm_op_keccak_vs.c.
+ * ════════════════════════════════════════════════════════════════════ */
+
+typedef void (*x25519_vs_fn)(uint8_t *out, const uint8_t *scalar, const uint8_t *point);
+static void vs_native  (uint8_t *o, const uint8_t *s, const uint8_t *p){ x25519_native(o, s, p); }
+static void vs_fiat    (uint8_t *o, const uint8_t *s, const uint8_t *p){ x25519_fiat(o, s, p); }
+static void vs_cryptopt(uint8_t *o, const uint8_t *s, const uint8_t *p){ x25519_cryptopt(o, s, p); }
+static void vs_ucode   (uint8_t *o, const uint8_t *s, const uint8_t *p){ x25519_ucode(o, s, p); }
+static void vs_donna   (uint8_t *o, const uint8_t *s, const uint8_t *p){ (void)x25519_donna_c64(o, s, p); }
+static void vs_a51     (uint8_t *o, const uint8_t *s, const uint8_t *p){ (void)x25519_amd64_51(o, s, p); }
+static void vs_a51u    (uint8_t *o, const uint8_t *s, const uint8_t *p){ (void)x25519_amd64_51_ucode(o, s, p); }
+static void vs_a64     (uint8_t *o, const uint8_t *s, const uint8_t *p){ (void)x25519_amd64_64(o, s, p); }
+
+#define VS_REPS 200
+#define VS_NC   8
+#define VS_NVEC 8
+
+static uint64_t vs_median(uint64_t *v, int n){ qsort(v, n, sizeof(uint64_t), cmp_u64); return v[n/2]; }
+/* Smallest sample that isn't an implausible downward glitch (a P-state
+ * transition straddling the rdtsc bracket can read near-zero); skip anything
+ * below half the median so one bad batch can't poison the min. `sorted` ascending. */
+static uint64_t vs_robust_min(const uint64_t *sorted, int n, uint64_t med){
+    uint64_t floor = med / 2;
+    for (int i = 0; i < n; i++) if (sorted[i] >= floor) return sorted[i];
+    return sorted[n - 1];
+}
+
+static void benchmark_interleaved(void) {
+    struct vs_row { const char *name; const char *key; x25519_vs_fn fn; uint64_t min, med; }
+    C[VS_NC] = {
+        {"ours/hand-C",    "native",    vs_native,   UINT64_MAX, 0},
+        {"ours/fiat",      "fiat",      vs_fiat,     UINT64_MAX, 0},
+        {"ours/cryptopt",  "cryptopt",  vs_cryptopt, UINT64_MAX, 0},
+        {"ours/ucode",     "ucode",     vs_ucode,    UINT64_MAX, 0},
+        {"donna_c64",      "donna",     vs_donna,    UINT64_MAX, 0},
+        {"amd64-51/asm",   "a51_asm",   vs_a51,      UINT64_MAX, 0},
+        {"amd64-51/ucode", "a51_ucode", vs_a51u,     UINT64_MAX, 0},
+        {"amd64-64/asm",   "a64_asm",   vs_a64,      UINT64_MAX, 0},
+    };
+
+    /* RFC 7748 vector + 7 deterministic (scalar,point) pairs. X25519 is
+     * constant-time so the cycle count is input-independent; rotating inputs
+     * guards against single-vector branch-predictor training (review issue #6). */
+    uint8_t scal[VS_NVEC][32], pt[VS_NVEC][32];
+    hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scal[0], 32);
+    hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", pt[0], 32);
+    for (int v = 1; v < VS_NVEC; v++)
+        for (int i = 0; i < 32; i++) {
+            scal[v][i] = (uint8_t)(0x11 * v + 7 * i + 1);
+            pt[v][i]   = (uint8_t)(0xA5 ^ (13 * v) ^ (3 * i));
+        }
+
+    /* Correctness gate: every contender must agree with ours/ucode on every
+     * vector before we trust any timing. */
+    int agree = 0, total = 0;
+    for (int v = 0; v < VS_NVEC; v++) {
+        uint8_t ref[32]; vs_ucode(ref, scal[v], pt[v]);
+        for (int c = 0; c < VS_NC; c++) {
+            uint8_t o[32]; C[c].fn(o, scal[v], pt[v]); total++;
+            if (memcmp(o, ref, 32) == 0) agree++;
+        }
+    }
+    printf("=== X25519 head-to-head (same process, same frequency, interleaved) ===\n");
+    printf("correctness: %d/%d contender×vector outputs agree with ours/ucode%s\n",
+           agree, total, agree == total ? "" : "  <-- MISMATCH");
+
+    /* warmup: warm icache/BTB/dcache then a busy loop to reach steady frequency */
+    { uint8_t o[32]; for (int w = 0; w < 50; w++) for (int c = 0; c < VS_NC; c++) C[c].fn(o, scal[0], pt[0]); }
+    { volatile uint64_t w = 0; for (uint64_t i = 0; i < 200000000ULL; i++) w += i; (void)w; }
+
+    static uint64_t samp[VS_NC][VS_REPS];
+    for (int r = 0; r < VS_REPS; r++) {
+        int v = r % VS_NVEC;
+        for (int c = 0; c < VS_NC; c++) {
+            uint8_t o[32];
+            uint64_t t0 = rdtsc_start();
+            C[c].fn(o, scal[v], pt[v]);
+            uint64_t t1 = rdtsc_end();
+            samp[c][r] = t1 - t0;
+        }
+    }
+    for (int c = 0; c < VS_NC; c++) {
+        C[c].med = vs_median(samp[c], VS_REPS);
+        C[c].min = vs_robust_min(samp[c], VS_REPS, C[c].med);
+    }
+
+    uint64_t uc = 0, a51 = 0, a51u = 0;
+    for (int c = 0; c < VS_NC; c++) {
+        if (!strcmp(C[c].key, "ucode"))     uc   = C[c].min;
+        if (!strcmp(C[c].key, "a51_asm"))   a51  = C[c].min;
+        if (!strcmp(C[c].key, "a51_ucode")) a51u = C[c].min;
+    }
+
+    struct vs_row R[VS_NC];
+    for (int c = 0; c < VS_NC; c++) R[c] = C[c];
+    for (int i = 1; i < VS_NC; i++) {
+        struct vs_row k = R[i]; int j = i - 1;
+        while (j >= 0 && R[j].min > k.min) { R[j + 1] = R[j]; j--; } R[j + 1] = k;
+    }
+
+    printf("\n--- X25519 full scalarmult: same process & frequency (cycles) ---\n");
+    printf("  %-16s %10s %10s   %s\n", "contender", "min", "median", "x vs ours/ucode");
+    printf("  %-16s %10s %10s   %s\n", "----------------", "----------", "----------", "---------------");
+    for (int i = 0; i < VS_NC; i++)
+        printf("  %-16s %10" PRIu64 " %10" PRIu64 "   %6.3fx%s\n",
+               R[i].name, R[i].min, R[i].med, uc ? (double)R[i].min / (double)uc : 0.0,
+               !strcmp(R[i].key, "ucode") ? "  <== ours/ucode" : "");
+
+    printf("\n  CLEANEST CLAIM (same amd64-51 ladder/invert/pack — only fe_mul/fe_sq differ):\n");
+    printf("    amd64-51/asm   = %" PRIu64 " cyc\n", a51);
+    printf("    amd64-51/ucode = %" PRIu64 " cyc\n", a51u);
+    if (a51 && a51u) {
+        if (a51u < a51)
+            printf("    => microcode field ops are %.2f%% FASTER than amd64-51 hand-asm field ops\n",
+                   100.0 * (double)(a51 - a51u) / (double)a51);
+        else
+            printf("    => microcode field ops are %.2f%% slower than amd64-51 hand-asm field ops\n",
+                   100.0 * (double)(a51u - a51) / (double)a51);
+    }
+
+    printf("\n=== matrix-parse ===\n");
+    for (int c = 0; c < VS_NC; c++)
+        printf("x25519/%s: min %" PRIu64 " median %" PRIu64 "\n", C[c].key, C[c].min, C[c].med);
+    printf("\n");
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * MAIN
  * ════════════════════════════════════════════════════════════════════ */
 
@@ -2214,6 +2352,7 @@ int main(void) {
     cswap_microbench();
     fe_sq_chain_microbench();
     benchmark();
+    benchmark_interleaved();
 
     init_match_and_patch();
     do_fix_IN_patch();

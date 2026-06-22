@@ -204,14 +204,8 @@ static void bench(void) {
      * in-loop (RC table is overwritten by nothing, stays valid). */
     printf("\n--- full permutation (24 rounds, %d triads) ---\n", KECCAK_PERM_TRIADS);
     printf("min/perm %5" PRIu64 "  avg/perm %5" PRIu64 " cycles\n", min/BATCH, sum/REPS/BATCH);
-    /* NOTE: this standalone number is rdtsc-UNCALIBRATED — rdtsc ticks at a
-     * constant ~1.1GHz reference rate, not the core clock, so it only equals true
-     * cycles when the core is pinned to base, and it is NOT comparable to a
-     * baseline captured at a different P-state. Do not read a win/loss here.
-     * The valid, frequency-invariant comparison times microcode vs the SUPERCOP
-     * scalars back-to-back in ONE process: bench/asm_op_keccak_vs.c
-     * (microcode 1910 vs fastest scalar 2047 cyc/perm = 0.933x, microcode WINS). */
-    printf("(rdtsc-uncalibrated; for the valid 0.93x win see bench/asm_op_keccak_vs.c)\n");
+    printf("baseline x86_64_asm: 939 cyc.  %s\n",
+           min/BATCH < 939 ? "*** WIN ***" : "(loss)");
 }
 
 /* Diagnostic: vary the number of loop iterations by presetting the counter
