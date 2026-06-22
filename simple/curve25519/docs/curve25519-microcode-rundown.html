@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curve25519 field arithmetic in Goldmont Microcode — Complete Implementation Rundown</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f4f6f9; --panel2:#eaeef3; --ink:#1c2530; --muted:#5a6675;
+    --accent:#0969da; --accent2:#1a7f37; --warn:#9a6700; --bad:#cf222e; --good:#1a7f37;
+    --line:#d6dce3; --code:#f3f5f8; --kw:#cf222e; --reg:#116329; --mem:#0550ae; --com:#6e7781;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{display:flex; max-width:1500px; margin:0 auto;}
+  nav.toc{
+    position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto;
+    width:300px; flex:0 0 300px; padding:24px 18px; background:var(--panel);
+    border-right:1px solid var(--line); font-size:13.5px;
+  }
+  nav.toc h2{font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:18px 0 8px;}
+  nav.toc a{display:block; color:var(--muted); text-decoration:none; padding:3px 8px; border-radius:6px; border-left:2px solid transparent;}
+  nav.toc a:hover{color:var(--ink); background:var(--panel2);}
+  nav.toc a.sub{padding-left:20px; font-size:12.8px;}
+  nav.toc .brand{font-weight:700; color:var(--accent); font-size:15px; margin-bottom:4px;}
+  nav.toc .brandsub{color:var(--muted); font-size:12px; margin-bottom:8px;}
+  main{flex:1 1 auto; padding:42px 56px 120px; min-width:0; max-width:1100px;}
+  h1{font-size:33px; line-height:1.2; margin:0 0 6px; color:#0d1117; letter-spacing:-.01em;}
+  h2{font-size:25px; margin:54px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#0d1117; scroll-margin-top:20px;}
+  h3{font-size:19px; margin:34px 0 10px; color:var(--accent); scroll-margin-top:20px;}
+  h4{font-size:16px; margin:22px 0 8px; color:var(--accent2);}
+  p{margin:12px 0;}
+  a{color:var(--accent);}
+  code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13.5px;
+    background:var(--code); padding:1.5px 6px; border-radius:5px; color:#0a3069; border:1px solid var(--line);}
+  pre{background:var(--code); border:1px solid var(--line); border-radius:10px; padding:16px 18px; overflow-x:auto;
+    font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13px; line-height:1.55; margin:16px 0;}
+  pre code{background:none; border:none; padding:0; color:var(--ink);}
+  .com{color:var(--com); font-style:italic;}
+  .kw{color:var(--kw);}
+  .reg{color:var(--reg);}
+  .mem{color:var(--mem);}
+  .lit{color:#8250df;}
+  ul,ol{margin:12px 0; padding-left:24px;}
+  li{margin:5px 0;}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:13.8px;}
+  th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top;}
+  th{background:var(--panel2); color:#0d1117; font-weight:600;}
+  tr:nth-child(even) td{background:rgba(0,0,0,.025);}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums;}
+  .lead{font-size:18px; color:var(--muted); margin:14px 0 8px;}
+  .headline{background:linear-gradient(135deg,#eaf6ee,#e7f0fb); border:1px solid #bfe3cc; border-radius:14px;
+    padding:22px 26px; margin:26px 0; display:flex; gap:30px; flex-wrap:wrap; align-items:center;}
+  .headline .big{font-size:46px; font-weight:800; color:var(--good); line-height:1; letter-spacing:-.02em;}
+  .headline .lbl{color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.08em;}
+  .callout{border-left:4px solid var(--accent); background:var(--panel2); border-radius:0 10px 10px 0; padding:12px 18px; margin:18px 0;}
+  .callout.warn{border-color:var(--warn);}
+  .callout.bad{border-color:var(--bad);}
+  .callout.good{border-color:var(--good);}
+  .callout .tag{font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; color:var(--accent); display:block; margin-bottom:4px;}
+  .callout.warn .tag{color:var(--warn);} .callout.bad .tag{color:var(--bad);} .callout.good .tag{color:var(--good);}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:18px 0;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 20px;}
+  .card h4{margin-top:0;}
+  .pill{display:inline-block; font-size:11.5px; padding:2px 9px; border-radius:20px; background:var(--panel2); border:1px solid var(--line); color:var(--muted); margin:2px 3px 2px 0;}
+  .pill.ok{color:var(--good); border-color:#bfe3cc;}
+  .pill.no{color:var(--bad); border-color:#f1c0c4;}
+  .win{color:var(--good); font-weight:700;}
+  .loss{color:var(--bad); font-weight:700;}
+  hr{border:none; border-top:1px solid var(--line); margin:40px 0;}
+  .small{font-size:13px; color:var(--muted);}
+  .footer{margin-top:60px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;}
+  .kbd{font-family:"SF Mono",monospace; background:var(--panel2); border:1px solid var(--line); border-bottom-width:2px; border-radius:5px; padding:1px 7px; font-size:12.5px;}
+  .flow{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:16px 0; font-size:13px;}
+  .flow .step{background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:7px 13px; font-family:"SF Mono",monospace; font-size:12.5px;}
+  .flow .arr{color:var(--muted);}
+  .spec{border-left:4px solid #8250df; background:#f7f3fe; border-radius:0 10px 10px 0; padding:10px 16px 4px; margin:16px 0;}
+  .spec .tag{font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; color:#8250df; display:block; margin-bottom:2px;}
+  .spec pre{background:#fcfaff; border-color:#e7dbfb; margin:8px 0; color:#3b2c5e;}
+  .spec pre .v{color:#8250df;} .spec pre .o{color:#0550ae;} .spec pre .c{color:var(--com);}
+  .srcptr{display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; font-size:12.6px;
+    background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:8px 13px; margin:12px 0;}
+  .srcptr .k{color:#fff; background:var(--accent); border-radius:4px; padding:1px 7px; font-size:10px; letter-spacing:.06em; text-transform:uppercase; font-weight:700;}
+  .srcptr .k.ref{background:var(--accent2);} .srcptr .k.ir{background:#8250df;} .srcptr .k.tri{background:var(--warn);}
+  .srcptr code{font-size:12.3px; background:var(--bg);}
+  .srcptr .sep{color:var(--line);}
+  .lanegrid{display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin:14px 0; max-width:720px;}
+  .lanegrid .cell{background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:7px 6px; text-align:center; font-family:"SF Mono",monospace; font-size:12px;}
+  .lanegrid .cell .lane{color:var(--muted); font-size:10.5px;}
+  .lanegrid .cell .rg{color:var(--reg); font-weight:700; font-size:13px;}
+  .lanegrid .cell.gpr{border-color:#bcdcc7;}
+  .lanegrid .cell.tmp{border-color:#c2d4ee;}
+  .lanegrid .cell.tmp .rg{color:var(--mem);}
+  .tag-gpr{color:var(--reg);} .tag-tmp{color:var(--mem);}
+  details{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px 16px; margin:14px 0;}
+  summary{cursor:pointer; font-weight:600; color:var(--accent); padding:8px 0;}
+  .legend{font-size:12px; color:var(--muted); margin:8px 0;}
+  @media(max-width:980px){ nav.toc{display:none;} main{padding:28px 20px 80px;} .grid2{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="toc">
+  <div class="brand">Curve25519 field arithmetic in Microcode</div>
+  <div class="brandsub">Goldmont · Celeron N3350 · patch RAM</div>
+  <a href="#abstract">Abstract &amp; headline result</a>
+
+  <h2>Background</h2>
+  <a href="#bg-microcode" class="sub">1.1 Microcode patching</a>
+  <a href="#bg-hook" class="sub">1.2 The vmwrite / vmread hooks</a>
+  <a href="#bg-x25519" class="sub">1.3 Where fe_mul / fe_sq sit</a>
+  <a href="#bg-field" class="sub">1.4 The field, in 5×51 limbs</a>
+  <a href="#bg-bet" class="sub">1.5 The bet</a>
+
+  <h2>Repository</h2>
+  <a href="#repo-tree" class="sub">2.1 File structure</a>
+  <a href="#repo-roles" class="sub">2.2 What each file does</a>
+  <a href="#repo-handwritten" class="sub">2.3 Hand-written, harness-verified</a>
+
+  <h2>Hardware facts</h2>
+  <a href="#hw-constraints" class="sub">3.1 Constraints → code</a>
+  <a href="#hw-flags" class="sub">3.2 The flag-domain rule</a>
+
+  <h2>The design</h2>
+  <a href="#d-mac" class="sub">4.1 The MAC accumulator</a>
+  <a href="#d-progressive" class="sub">4.2 Progressive accumulation</a>
+  <a href="#d-carry" class="sub">4.3 The 51-bit carry / link</a>
+  <a href="#d-regs" class="sub">4.4 Register allocation</a>
+
+  <h2>The squaring patch</h2>
+  <a href="#sq-overview" class="sub">5.1 Formula &amp; triad map</a>
+  <a href="#sq-prep" class="sub">5.2 PREP (in the wrapper)</a>
+  <a href="#sq-limb" class="sub">5.3 One limb, 8 triads</a>
+  <a href="#sq-c4" class="sub">5.4 c4 packed 8→7</a>
+  <a href="#sq-final" class="sub">5.5 Final reduction</a>
+
+  <h2>The multiply patch</h2>
+  <a href="#mul-overview" class="sub">6.1 Formula &amp; triad map</a>
+  <a href="#mul-prep" class="sub">6.2 PREP (3 triads)</a>
+  <a href="#mul-limb" class="sub">6.3 One limb, 12 triads</a>
+  <a href="#mul-final" class="sub">6.4 Final reduction</a>
+
+  <h2>Build &amp; run</h2>
+  <a href="#build" class="sub">7.1 Makefiles &amp; flags</a>
+
+  <h2>Benchmarking</h2>
+  <a href="#bench-verify" class="sub">8.1 Three-way verification</a>
+  <a href="#bench-trap" class="sub">8.2 The frequency trap</a>
+  <a href="#bench-results" class="sub">8.3 Results</a>
+
+  <h2>Analysis</h2>
+  <a href="#a-journey" class="sub">9.1 The packing journey</a>
+  <a href="#a-latency" class="sub">9.2 Why squaring wins big</a>
+  <a href="#a-verdict" class="sub">9.3 Verdict</a>
+</nav>
+
+<main>
+
+<h1>Curve25519 Field Arithmetic in Goldmont Microcode</h1>
+<p class="lead">A complete technical rundown — from file structure to the last triad — of the two field operations that dominate X25519 (<code>fe_mul</code> and <code>fe_sq</code> over GF(2²⁵⁵−19)) encoded directly in Intel Goldmont microcode patch RAM, and benchmarked against fiat-crypto, the formally-verified C baseline that CryptOpt itself targets.</p>
+
+<section id="abstract">
+<div class="headline">
+  <div>
+    <div class="big">0.74×</div>
+    <div class="lbl">fe_sq microcode / fiat-crypto -O3</div>
+  </div>
+  <div style="flex:1; min-width:280px;">
+    <p style="margin:0;">The squaring patch runs in <b>~37 cyc/op</b> versus fiat-crypto's baseline — a <span class="win">~26% win</span> — in <b>42 triads</b>. The multiply patch runs in <b>~58 cyc/op</b>, a <span class="win">~3% win</span>, in <b>66 triads</b>. Both fit comfortably inside the 128-triad patch-RAM cap and are validated against an independent schoolbook reference on the published basepoint, 10 000 random vectors, and a 1 000-deep iterated chain.</p>
+  </div>
+</div>
+
+<p>This document explains the two production patches in <code>simple/asm_op_curve25519.c</code> (squaring) and <code>simple/asm_op_curve25519_mul.c</code> (multiplication). Unlike the Keccak project, these are <b>hand-written</b> triad arrays — there is no generator. The single technique that makes them fast is the <b>MAC accumulator</b>: a 64×64→128 multiply whose high half, low half, and carry bit all flow into different registers <em>inside the same triad</em>, so a five-term multiply-accumulate sum costs almost nothing beyond its five MULs.</p>
+
+<p>The narrative has three threads, woven together below:</p>
+<ol>
+  <li><b>Why the patch is shaped the way it is</b> — the radix-2⁵¹ field, the MAC pattern, and the hardware facts that forced each choice.</li>
+  <li><b>A line-by-line read of both patches</b> in execution order, with the actual triads.</li>
+  <li><b>How the win was built</b> — the packing deltas (88→73→66 for multiply, 43→42 for squaring), the verification methodology, and the honest ceiling.</li>
+</ol>
+</section>
+
+<!-- ============================================================ -->
+<h2 id="bg-microcode">1. Background</h2>
+
+<h3 id="bg-microcode-h">1.1 What microcode patching is on this CPU</h3>
+<p>On this Goldmont CPU (Intel Atom family, Celeron N3350), <b>microcode is patchable</b>. Each x86 instruction is internally cracked into <em>micro-ops</em> (uops); some instructions execute a sequence of uops fetched from a small on-die <b>patch RAM</b>. The <code>lib-micro</code> infrastructure exposes two primitives:</p>
+<ul>
+  <li><code>patch_ucode(addr, patch, n)</code> — write our own uops into patch RAM at <code>U7c00</code>…</li>
+  <li><code>hook_match_and_patch(slot, opcode, addr)</code> — redirect an x86 instruction so executing it jumps into our uops.</li>
+</ul>
+<p>Microcode is organized as <b>triads</b>: a unit of <b>3 micro-ops + 1 sequence word</b> (the seqword controls flow — <code>NOP_SEQWORD</code> falls through, <code>END_SEQWORD</code> returns to the x86 stream). One triad occupies 4 address units, hence the <code>×4</code> in address arithmetic. The usable region <code>U7c00–U7dfc</code> holds <b>128 triads</b> — the hard size cap. <code>fe_mul</code> uses 66 of them; <code>fe_sq</code> uses 42.</p>
+
+<h3 id="bg-hook">1.2 The vmwrite / vmread hooks — the C↔microcode bridge</h3>
+<p>We hijack instructions that are meaningless in ordinary user code. The standalone test harnesses each hook <code>vmwrite</code> (opcode <code>0x0cd8</code>) and fire it with <code>vmwrite rcx, rdx</code>. In the <b>integrated</b> X25519 build (<code>full_curve25519.c</code>), the two patches must coexist, so multiply is on the <code>vmwrite</code> hook and squaring is moved to the <code>vmread</code> opcode (<code>0f 78 ca</code>) — two hooks, two patch regions, one binary. The bridge in C pins operands to specific registers, fires the hooked instruction, and declares every clobbered GPR:</p>
+<pre><code><span class="kw">register</span> uint64_t *_in  <span class="kw">asm</span>(<span class="lit">"rcx"</span>) = (uint64_t *)a;
+<span class="kw">register</span> uint64_t *_out <span class="kw">asm</span>(<span class="lit">"r15"</span>) = out;
+<span class="kw">asm volatile</span>(
+    <span class="lit">"push r15\n\t"</span>                <span class="com">// save out-ptr before we destroy r15</span>
+    <span class="lit">"mov rdi, [rcx]\n\t"</span> …          <span class="com">// load 5 limbs through the rcx pointer</span>
+    <span class="lit">"lea r15, [rdi + rdi]\n\t"</span> …    <span class="com">// precompute 2·a / 19·a in arch regs (sq only)</span>
+    <span class="lit">"xor eax, eax\n\t  xor r8d, r8d\n\t"</span> <span class="com">// clear the two accumulators</span>
+    <span class="lit">"vmwrite rcx, rdx\n\t"</span>          <span class="com">// ← microcode fires here, NO memory access</span>
+    <span class="lit">"pop rcx\n\t  mov [rcx], rdi\n\t"</span> … <span class="com">// store 5 result limbs</span>
+    : <span class="lit">"+r"</span>(_in), <span class="lit">"+r"</span>(_out) : : <span class="com">/* rax rbx rdx rsi rdi r8–r14, memory, cc */</span>);</code></pre>
+<p>The microcode itself touches <b>no memory</b> — all 5 (or 10) input limbs arrive in architectural registers, all 5 result limbs leave in registers, and the wrapper does every load/store. This is the opposite of the Keccak design (which loads/stores inside the patch): here the operands are small enough to live entirely in the register file for the patch's whole lifetime.</p>
+
+<h3 id="bg-x25519">1.3 Where <code>fe_mul</code> / <code>fe_sq</code> sit in X25519</h3>
+<p>X25519 is "scalar × point" on Curve25519, used for Diffie–Hellman. It runs a <b>Montgomery ladder</b>: 255 iterations, each one a <code>ladderstep</code> of <b>5 <code>fe_mul</code> + 4 <code>fe_sq</code> + 1 <code>fe_mul121665</code> + ~10 <code>fe_add/fe_sub</code></b>, plus a final Fermat inversion (~265 field ops). Per call that is ≈ 2 300 multiply/square invocations — so <b>field multiply and square are the entire hot loop</b>. Everything else (the ladder driver, cswap, byte (de)serialization) is glue. Speeding up those two ops is the whole game.</p>
+<div class="srcptr"><span class="k ref">MATH</span> <code>curve_basics.md</code> (the algorithm) <span class="sep">|</span> <code>design.md</code> (the engineering: register allocation, memory traffic, cycle budget) <span class="sep">|</span> integration <code>full_curve25519.c</code> → <code>x25519_ucode()</code></div>
+
+<h3 id="bg-field">1.4 The field, in 5×51 limbs</h3>
+<p>A field element is a 255-bit integer mod <code>p = 2²⁵⁵ − 19</code>, stored as <b>5 limbs of 51 bits</b> in <code>uint64_t[5]</code> — <b>unsaturated radix-2⁵¹</b> (the "Dettman/fiat" representation). Limb <code>i</code> carries weight <code>2<sup>51·i</sup></code>; the spare 13 high bits per limb (64−51) absorb carries lazily, which is what lets addition skip a reduction. Two facts drive every line of the patch:</p>
+<ul>
+  <li><b>2²⁵⁵ ≡ 19 (mod p).</b> A product spills into limbs 5..8 (weights 2²⁵⁵ and up); folding them back means multiplying by 19 and adding into limbs 0..3. This is why the precomputed <code>19·b<sub>j</sub></code> values appear everywhere.</li>
+  <li><b>2⁶⁴ = 2¹³ · 2⁵¹.</b> The accumulator's "above 64 bits" overflow count (held in <code>R8</code>) contributes to the next limb's carry shifted left by exactly 13. This single arithmetic identity is the carry/link mechanism of §4.3.</li>
+</ul>
+
+<h3 id="bg-bet">1.5 The bet: the whole multiply lives in the register file</h3>
+<p>A 5×51 multiply is 25 (or, by squaring symmetry, 15) cross-products, each a 64×64→128 MUL, summed column-by-column with carries. Native code on x86-64 has ~14 GPRs and must juggle the 128-bit partial products, the running accumulator, and the carry chain through flags and spills. Microcode exposes a register file of <b>32 entries</b>: GPRs <code>0x20–0x2f</code> and TMP registers <code>0x30–0x3f</code>. That headroom lets the entire accumulation — low accumulator, high accumulator, carry-sum, per-limb carries, mask scratch — stay resident, and lets a single triad issue a MUL <em>and</em> two accumulation ops together.</p>
+<div class="callout"><span class="tag">The thesis in one line</span>
+Pack each 64×64 multiply-accumulate so its MUL, its low-half add, and its carry/high-half book-keeping share triads — and keep every accumulator in a register. Native code can't pack three dependent 64-bit ops into one issue group, and can't keep this many live carries without spilling; microcode can, and that density is the win — biggest for squaring, where there are only 15 MACs to begin with.</div>
+
+<!-- ============================================================ -->
+<h2 id="repo-tree">2. The repository</h2>
+
+<h3 id="repo-tree-h">2.1 File structure</h3>
+<pre><code>simple/
+├── <span class="reg">asm_op_curve25519.c</span>          <span class="com"># PRODUCTION fe_sq — 42-triad patch + 3-way verify + bench</span>
+├── <span class="reg">asm_op_curve25519_mul.c</span>      <span class="com"># PRODUCTION fe_mul — 66-triad patch + 3-way verify + bench</span>
+├── curve_basics.md              <span class="com"># the X25519 math: ladder, ladderstep, field ops</span>
+├── design.md                    <span class="com"># the engineering: register alloc, memory traffic, cycle budget</span>
+├── full_curve25519.c            <span class="com"># full X25519, both patches integrated (vmwrite + vmread)</span>
+├── ../curvesC/curve25519_square.c   <span class="com"># fiat-crypto reference (#include'd as the baseline)</span>
+├── ../curvesC/curve25519_mul.c      <span class="com"># fiat-crypto reference for multiply</span>
+│
+├── <span class="com"># exploratory variants (not the production path):</span>
+│   asm_op_curve25519_sat_mul.c           <span class="com"># saturated 4×64 attempt</span>
+│   asm_op_curve25519_solinas_sq.c        <span class="com"># Solinas-reduction squaring</span>
+│   asm_op_curve25519_solinas_mul*.c      <span class="com"># Solinas multiply + chained v1/v2/v3</span>
+│
+└── curve25519/                  <span class="com"># the SUPERCOP head-to-head benchmark harness (this folder)</span>
+    ├── bench_supercop_matrix.sh     <span class="com"># compiler×-O sweep → RESULTS.md</span>
+    ├── full_curve25519*.c           <span class="com"># whole-X25519 contenders incl. amd64-51/64, donna</span>
+    └── docs/curve25519-microcode-rundown.html   <span class="com"># ← this document</span></code></pre>
+
+<h3 id="repo-roles">2.2 What each file does</h3>
+<table>
+<tr><th>File</th><th>Role</th></tr>
+<tr><td><code>asm_op_curve25519.c</code></td><td><b>The squaring patch.</b> Holds the 42-triad <code>ucode_t</code> array (<code>install_fe_sq_patch</code>), the inline-asm wrapper <code>fe_sq_ucode</code>, a native <code>__uint128_t</code> reference, an independent schoolbook reference, fiat-crypto via <code>#include</code>, the 3-way verifier, and a standalone timing loop.</td></tr>
+<tr><td><code>asm_op_curve25519_mul.c</code></td><td><b>The multiply patch.</b> Same shape: the 66-triad array (<code>install_fe_mul_patch</code>), the <code>fe_mul_ucode</code> wrapper with its PREP, the three references, the verifier, the bench.</td></tr>
+<tr><td><code>curve_basics.md</code> / <code>design.md</code></td><td>The two prose docs: <em>what</em> X25519 computes, and <em>how</em> the microcode realizes it (this rundown draws on both).</td></tr>
+<tr><td><code>full_curve25519.c</code></td><td>The whole-algorithm integration — both patches installed on two hooks, driving 255 ladder steps + inversion. The standalone <code>asm_op_*</code> files are where each patch is developed and unit-tested in isolation.</td></tr>
+<tr><td><code>../curvesC/curve25519_{square,mul}.c</code></td><td>fiat-crypto's formally-verified field ops, <code>#include</code>d directly so the bench compares against the exact code CryptOpt and real libraries ship.</td></tr>
+<tr><td>Solinas / sat variants</td><td>Dead-end experiments (saturated 4×64, Solinas reduction). Kept for the record; the 5×51 Dettman patches above are the production path.</td></tr>
+</table>
+
+<h3 id="repo-handwritten">2.3 Hand-written, harness-verified</h3>
+<p>The Keccak patch is emitted by a self-verifying Python generator. The curve25519 patches are <b>hand-written triad arrays</b> — each is small and dense enough (42 / 66 triads) to author and reason about directly, and the carry algebra is fixed rather than parameterized over rounds. Correctness instead comes from a <b>three-way differential harness</b> baked into each file: every test runs an independent schoolbook reference, the native <code>__uint128_t</code> C, and the microcode, and asserts all three agree (§8.1). The accumulation pattern itself was lifted from a previously-proven patch (<code>p521_sq</code>'s progressive accumulation), so the risky part — the carry chain — is reused, not reinvented.</p>
+
+<!-- ============================================================ -->
+<h2 id="hw-constraints">3. Hardware facts (and how each shapes the code)</h2>
+<p>Every line of the patch obeys a fixed set of Goldmont microcode facts, established by the probe suite in <code>simple/tests/</code> and recorded in <code>CLAUDE.md</code>. The load-bearing ones for field arithmetic:</p>
+
+<h3 id="hw-constraints-h">3.1 Constraints → code</h3>
+<div class="grid2">
+  <div class="card"><h4><code>MUL_DSZ64_DRR(hi, srcA, srcB)</code> semantics</h4>
+  <p>A 64×64→128 multiply: <b>srcA is preserved</b>, <b>srcB receives the low 64 bits</b>, and <b>hi receives the high 64 bits</b>. So <code>MUL(RCX, RDI, RDX)</code> leaves <code>RDI</code> intact, puts the low product in <code>RDX</code>, the high in <code>RCX</code>. The patches exploit this constantly: the multiplier limb is loaded into the soon-to-be-overwritten <code>RDX</code>, and the surviving operand (<code>a<sub>i</sub></code>) stays put for reuse.</p></div>
+
+  <div class="card"><h4>MUL works in any slot</h4>
+  <p>Confirmed by <code>test_mul_slot2.c</code> — a MUL is legal in slot 0, 1, <em>or</em> 2 of a triad. This is what lets PREP pack <b>three</b> <code>×19</code> MULs into one triad, and lets each MAC's MUL ride in slot 1 alongside an accumulate in slot 0 and a carry-add in slot 2.</p></div>
+
+  <div class="card"><h4>Fully-sequential triads (RAW/WAR/WAW)</h4>
+  <p><code>test_raw_war_waw.c</code> proved <b>every</b> intra-triad hazard resolves sequentially for both arch and TMP regs: a later slot sees an earlier slot's write (RAW), an earlier reader sees the old value (WAR), and on a double-write the later slot wins (WAW). This is what the 88→66 / 43→42 packing rests on — e.g. <code>{MUL RCX…; …; SHL TMP1, R8}</code> where slot 2 reads the <code>R8</code> that slot 0 just updated.</p></div>
+
+  <div class="card"><h4><code>SETCC_CONDB_DR</code> only on TMP registers</h4>
+  <p>Capturing a carry-out bit (<code>SETCC</code> of the "below"/carry condition) works <b>only into a TMP register</b>, never an arch reg. So the carry chain is forced through TMPs: <code>ADD TMP0,…</code> then <code>SETCC TMP15, TMP0</code>. Result limbs are produced in TMPs and shifted out to arch regs at the end.</p></div>
+
+  <div class="card"><h4>TMP registers don't persist across firings</h4>
+  <p>TMP0–TMP15 are reset between <code>vmwrite</code> calls. Everything the patch needs must arrive in arch regs and leave in arch regs; TMPs are scratch only <em>within</em> one firing. (Irrelevant here since each field op is one firing, but it forbids caching anything between calls.)</p></div>
+
+  <div class="card"><h4><code>ZEROEXT</code>, not <code>MOVE</code>; even addresses</h4>
+  <p>Register moves use <code>ZEROEXT_DSZ64_DR</code> (the generic <code>MOVE</code> form traps to a slow path). A zero is materialised with <code>NOTAND(r,r,r)</code> = <code>¬r ∧ r = 0</code>. Patch base addresses must be even (<code>0x7c00</code>).</p></div>
+</div>
+
+<h3 id="hw-flags">3.2 The flag-domain rule — why <code>SETCC</code>, never <code>ADC</code></h3>
+<div class="callout warn"><span class="tag">Two separate carry worlds</span>
+Goldmont microcode has <b>two flag domains</b>. Domain&nbsp;#1 is <b>per-TMP-register</b> flags, set by <code>ADD</code> to a TMP and read by <code>SETCC</code> on that same TMP; it persists until the next <code>ADD</code> to that TMP. Domain&nbsp;#2 is the architectural <code>RFLAGS</code> that <code>ADC</code> reads — but it is <b>frozen at patch entry</b> and the bridge from #1→#2 (<code>GENARITHFLAGS_R</code>) fails unreliably in large patches. <b>Consequence:</b> the entire carry chain is built from <code>ADD → SETCC(TMP) → ADD(+carry)</code> triples. <code>ADC</code> is never used. See <code>tests/adc_findings.md</code>.</div>
+<p>This is why a multiply-accumulate looks the way it does: you cannot say "add with carry." You add the low half into the accumulator, <code>SETCC</code> the carry into a TMP, and explicitly add that TMP into the next-higher accumulator. Each of those is one micro-op, and the trick is fitting all three into the triad of the MUL that produced the value.</p>
+
+<!-- ============================================================ -->
+<h2 id="d-mac">4. The design</h2>
+
+<h3 id="d-mac-h">4.1 The MAC accumulator — one cross-product</h3>
+<p>Every limb <code>c<sub>k</sub></code> is a sum of products <code>Σ a<sub>i</sub>·b<sub>j</sub></code>. Each term is a 64×64→128 multiply whose 128-bit result must be added into a running sum that can exceed 64 bits. The patch keeps that running sum in <b>three</b> places:</p>
+<table>
+<tr><th>Register</th><th>Holds</th></tr>
+<tr><td><code>TMP0</code></td><td><b>low accumulator</b> — the running 64-bit sum of low halves (mod 2⁶⁴).</td></tr>
+<tr><td><code>R8</code></td><td><b>high accumulator</b> — the running sum of the products' high 64-bit halves.</td></tr>
+<tr><td><code>TMP9</code></td><td><b>carry-sum</b> — the running count of carry-outs from the low-accumulator adds.</td></tr>
+<tr><td><code>TMP15</code></td><td><b>carry scratch</b> — the single <code>SETCC</code> bit from the most recent <code>ADD</code>, before it is folded into <code>TMP9</code>.</td></tr>
+</table>
+<p>The full 128-bit column sum is therefore <code>(R8 + TMP9)·2⁶⁴ + TMP0</code>. One MAC term, expanded:</p>
+<pre><code><span class="kw">MUL</span> RCX = hi, RDX = lo   <span class="kw">of</span>  a_i × b_j     <span class="com">// srcA=a_i preserved, srcB=RDX←b_j gets lo</span>
+<span class="kw">ADD</span> <span class="reg">TMP0</span> += RDX                          <span class="com">// low half into low accumulator</span>
+<span class="kw">SETCC</span> <span class="reg">TMP15</span> = carry(TMP0)               <span class="com">// did that add overflow 2^64?</span>
+<span class="kw">ADD</span> <span class="reg">R8</span>   += RCX                          <span class="com">// high half into high accumulator</span>
+<span class="kw">ADD</span> <span class="reg">TMP9</span> += TMP15                        <span class="com">// fold the carry into carry-sum</span></code></pre>
+<p>Five micro-ops per term — but they pack. The MUL of the <em>next</em> term goes in the same triad as the <code>ADD R8</code>/<code>ADD TMP9</code> of the current one, so the steady-state cost is close to <b>one triad per two micro-ops of useful work</b>. The two alternating triad shapes are:</p>
+<pre><code>{ <span class="kw">ADD</span> TMP0 += RDX ,  <span class="kw">SETCC</span> TMP15 ,  <span class="kw">ZEROEXT</span> RDX = next_b }   <span class="com">// "ACC + prep" </span>
+{ <span class="kw">ADD</span> R8 += RCX  ,  <span class="kw">MUL</span> RCX = a_i × RDX ,  <span class="kw">ADD</span> TMP9 += TMP15 }   <span class="com">// "hi + MAC + carry"</span></code></pre>
+<p>Notice the <b>operand prep</b> riding in slot 2 of the ACC triad: it loads the next multiplier limb into <code>RDX</code> (e.g. the next <code>19·b<sub>j</sub></code>) so the following MUL fires with zero setup latency.</p>
+
+<h3 id="d-progressive">4.2 Progressive accumulation (the p521_sq pattern)</h3>
+<p>The earlier, larger versions of these patches (88 triads for multiply) saved each MAC's high half and carry bit to <em>separate</em> TMP registers, then summed all of them at the end of the limb. That cost a register per term and a long tail of adds. The win, borrowed from the proven <code>p521_sq</code> patch, is <b>progressive accumulation</b>: fold each term's high half into <code>R8</code> and each carry into <code>TMP9</code> <em>immediately</em>, inside the MAC triad's free slot. No per-term storage, no tail — just two running registers that are already summed by the time the last MUL retires.</p>
+<div class="callout good"><span class="tag">What it bought</span>
+Multiply: <b>88 → 73 → 66</b> triads. Squaring: <b>43 → 42</b>. The pattern collapses the "sum the partials" tail and frees the registers it used, which in turn enabled the cross-slot RAW/WAR packing tricks (§9.1).</div>
+
+<h3 id="d-carry">4.3 The 51-bit carry and inter-limb link</h3>
+<p>After a limb's MAC sum is complete, its value is <code>V = (R8 + TMP9)·2⁶⁴ + TMP0</code> (with <code>R8</code> already holding <code>R8+TMP9</code> after the finalize add). The output limb is <code>V mod 2⁵¹</code> and the carry to the next limb is <code>V div 2⁵¹</code>. Using <code>2⁶⁴ = 2¹³·2⁵¹</code>:</p>
+<pre><code><span class="com">// output limb = low 51 bits of TMP0, via a shift pair (no AND-immediate needed)</span>
+<span class="kw">SHL</span> TMP_X = TMP0 &lt;&lt; 13      <span class="kw">SHR</span> out = TMP_X &gt;&gt; 13      <span class="com">// = TMP0 &amp; (2^51−1)</span>
+<span class="com">// carry to next limb = V &gt;&gt; 51 = (R8 &lt;&lt; 13) | (TMP0 &gt;&gt; 51)</span>
+<span class="kw">SHR</span> <span class="reg">TMP8</span> = TMP0 &gt;&gt; 51        <span class="com">// low part of the carry (≤13 bits)</span>
+<span class="kw">SHL</span> <span class="reg">TMP1</span> = R8   &lt;&lt; 13        <span class="com">// high part (R8 counts 2^64 overflows → bit 13+)</span>
+<span class="com">// next limb's first triad links them in:</span>
+<span class="kw">OR</span>  <span class="reg">TMP0</span> = TMP8 | TMP1     <span class="com">// OR works because the two pieces don't overlap</span></code></pre>
+<p>The <code>OR</code> is valid (not just <code>ADD</code>) precisely because <code>TMP0&gt;&gt;51</code> occupies ≤13 low bits and <code>R8&lt;&lt;13</code> has zeros there — they tile without collision. This <code>OR</code>-link is the seam between consecutive limbs, and it absorbs what would otherwise be a separate "add the carry in" step into the start of the next limb for free.</p>
+
+<h3 id="d-regs">4.4 Register allocation</h3>
+<p>The wrapper hands the patch its operands in fixed architectural registers and reads the results back from fixed registers. Multiply uses all five <code>b</code> limbs plus five <code>a</code> limbs; squaring pre-doubles and pre-reduces in the wrapper to exploit symmetry.</p>
+<div class="grid2">
+<div class="card"><h4>fe_sq — inputs &amp; outputs</h4>
+<pre><code>RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
+R15=2a0 R13=2a1 R9=2a2  R10=2a3      <span class="com">// doubled (wrapper lea)</span>
+RBX=19a4  RDX=19a3                   <span class="com">// reduced (wrapper imul)</span>
+RAX=0  R8=0                          <span class="com">// accumulators cleared</span>
+<span class="com">─ output ─</span>
+RDI=h0  R9=h1  R10=h2  RBX=h3  RAX=h4</code></pre></div>
+<div class="card"><h4>fe_mul — inputs &amp; outputs</h4>
+<pre><code>RDI=a0  RSI=a1  R12=a2  R11=a3  R14=a4
+R15=b0  R13=b1  R9=b2   R10=b3  RBX=b4
+RAX=0  R8=0
+<span class="com">─ after PREP (in-patch) ─</span>
+TMP10..14 = b0..b4 (saved)
+R13=19b1 R9=19b2 R10=19b3 RBX=19b4
+<span class="com">─ output ─</span>
+R15=h0  R13=h1  R9=h2  R10=h3  RAX=h4</code></pre></div>
+</div>
+<p><b>Internal scratch (both patches):</b> <code>RCX</code> = MUL high-half target; <code>RDX</code> = MUL low-half / next-multiplier; <code>TMP0</code> = low accumulator; <code>R8</code> = high accumulator; <code>TMP9</code> = carry-sum; <code>TMP15</code> = SETCC bit; <code>TMP8</code> = lo carry-out; <code>TMP1</code> = hi carry-out; <code>TMP6</code>/<code>TMP2</code> = mask shift scratch.</p>
+
+<!-- ============================================================ -->
+<h2 id="sq-overview">5. The squaring patch, in execution order</h2>
+
+<h3 id="sq-overview-h">5.1 Formula &amp; triad map</h3>
+<div class="spec"><span class="tag">fe_sq — the symmetric 15-MAC form</span>
+<pre><code><span class="c"># d_i = 2·a_i ;  r3 = 19·a3 ;  r4 = 19·a4  (precomputed in the wrapper)</span>
+<span class="v">c0</span> = a0·a0 + d1·r4 + d2·r3
+<span class="v">c1</span> = d0·a1 + r3·a3 + d2·r4
+<span class="v">c2</span> = d0·a2 + a1·a1 + d3·r4
+<span class="v">c3</span> = d0·a3 + d1·a2 + r4·a4
+<span class="v">c4</span> = d0·a4 + d1·a3 + a2·a2</code></pre></div>
+<p>Squaring is cheaper than multiply because <code>a<sub>i</sub>·a<sub>j</sub> = a<sub>j</sub>·a<sub>i</sub></code>: the 25 cross-products collapse to <b>15 MACs</b> (3 per limb) once the doubled limbs <code>d<sub>i</sub></code> account for the off-diagonal pairs. The wrapper precomputes <code>d<sub>i</sub></code> and <code>r3,r4</code> with <code>lea</code>/<code>imul</code> so the patch only does MULs.</p>
+<table>
+<tr><th>Region</th><th class="num">Triads</th><th>Source</th><th>Work</th></tr>
+<tr><td>PREP</td><td class="num">0 (in wrapper)</td><td><code>asm_op_curve25519.c:282–292</code></td><td>5 loads + <code>lea</code>×4 + <code>imul</code>×2 + clear RAX/R8</td></tr>
+<tr><td>c0 … c3</td><td class="num">8 each</td><td>lines 59–197</td><td>3 MACs + carry + 51-bit split + link, per limb</td></tr>
+<tr><td>c4</td><td class="num">7</td><td>lines 199–229</td><td>last limb, packed 8→7 via cross-slot RAW/WAR</td></tr>
+<tr><td>Final reduction</td><td class="num">3</td><td>lines 231–244</td><td>fold top carry ×19 into h0, propagate, mask</td></tr>
+</table>
+<div class="flow">
+  <span class="step">wrapper: load + double + reduce</span><span class="arr">→</span>
+  <span class="step">c0 (8)</span><span class="arr">→</span><span class="step">c1 (8)</span><span class="arr">→</span><span class="step">c2 (8)</span><span class="arr">→</span><span class="step">c3 (8)</span><span class="arr">→</span><span class="step">c4 (7)</span><span class="arr">→</span>
+  <span class="step">F0 ×19 fold</span><span class="arr">→</span><span class="step">F1 propagate</span><span class="arr">→</span><span class="step">F2 mask</span>
+</div>
+
+<h3 id="sq-prep">5.2 PREP — done in the wrapper, not the patch</h3>
+<div class="srcptr"><span class="k tri">wrapper</span> <code>asm_op_curve25519.c:271–311</code> (<code>fe_sq_ucode</code>)</div>
+<p>Unlike multiply (whose PREP is 3 in-patch triads), squaring does its setup in the inline-asm wrapper, because the doubled/reduced limbs are pure arch-register arithmetic that the CPU's normal pipeline does for free before the patch fires:</p>
+<pre><code><span class="kw">mov</span> rdi,[rcx] … <span class="kw">mov</span> r14,[rcx+32]   <span class="com">// load a0..a4</span>
+<span class="kw">lea</span> r15,[rdi+rdi]  <span class="kw">lea</span> r13,[rsi+rsi] … <span class="com">// 2·a0, 2·a1, 2·a2, 2·a3</span>
+<span class="kw">imul</span> rbx,r14,19   <span class="kw">imul</span> rdx,r11,19      <span class="com">// 19·a4, 19·a3</span>
+<span class="kw">xor</span> eax,eax  <span class="kw">xor</span> r8d,r8d            <span class="com">// clear accumulators</span>
+<span class="kw">vmwrite</span> rcx,rdx                       <span class="com">// fire</span></code></pre>
+
+<h3 id="sq-limb">5.3 One limb in full — c0, 8 triads</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519.c:59–92</code></div>
+<p><code>c0 = a0·a0 + d1·r4 + d2·r3</code>. Watch the three running registers (<code>TMP0</code> low, <code>R8</code> high, <code>TMP9</code> carry-sum) fill, and the carry/link emerge in T5–T7:</p>
+<pre><code>T0 { <span class="kw">ZEROEXT</span>(TMP0,RAX),        <span class="kw">MUL</span>(RCX,RDI,RDI),    NOP }                 <span class="com">// TMP0=0; a0² → RCX:hi RDI:lo</span>
+T1 { <span class="kw">ADD</span>(TMP0,TMP0,RDI),       <span class="kw">SETCC</span>(TMP15,TMP0),   <span class="kw">ADD</span>(R8,R8,RCX) }       <span class="com">// MAC1: acc lo, carry, acc hi</span>
+T2 { <span class="kw">ZEROEXT</span>(TMP9,TMP15),      <span class="kw">MUL</span>(RCX,RBX,R13),    <span class="kw">ADD</span>(TMP0,TMP0,R13) }   <span class="com">// carry-sum init; MAC2 r4·d1; acc lo</span>
+T3 { <span class="kw">SETCC</span>(TMP15,TMP0),        <span class="kw">ADD</span>(R8,R8,RCX),      <span class="kw">ADD</span>(TMP9,TMP9,TMP15) } <span class="com">// MAC2 carry/hi folded</span>
+T4 { <span class="kw">MUL</span>(RCX,RDX,R9),          <span class="kw">ADD</span>(TMP0,TMP0,R9),   <span class="kw">SETCC</span>(TMP15,TMP0) }    <span class="com">// MAC3 r3·d2; acc lo; carry</span>
+T5 { <span class="kw">ADD</span>(R8,R8,RCX),           <span class="kw">ADD</span>(TMP9,TMP9,TMP15),<span class="kw">SHR</span>(TMP8,TMP0,51) }    <span class="com">// last hi/carry; lo carry-out</span>
+T6 { <span class="kw">ADD</span>(R8,R8,TMP9),          <span class="kw">SHL</span>(TMP6,TMP0,13),  <span class="kw">SHL</span>(TMP1,R8,13) }      <span class="com">// finalize hi; mask scratch; hi carry-out (s0→s2 RAW on R8)</span>
+T7 { <span class="kw">SHR</span>(RDI,TMP6,13),         <span class="kw">ZEROEXT</span>(R13,RSI),   <span class="kw">NOTAND</span>(R8,R8,R8) }     <span class="com">// h0=mask; prep a1 for c1; R8=0</span></code></pre>
+<p>Three things to see. <b>(1)</b> The carry-sum <code>TMP9</code> is initialised by copying the first <code>SETCC</code> bit (T2 slot 0) rather than adding, saving an op. <b>(2)</b> T6 slot 2 reads the <code>R8</code> that slot 0 wrote in the same triad — a slot-0→2 RAW, legal under §3.1. <b>(3)</b> T7 slot 1 preps the next limb's first operand (<code>R13=a1</code>) and slot 2 re-zeros <code>R8</code> for the next limb, both in the otherwise-idle output triad.</p>
+<p>Limbs c1, c2, c3 are the same 8-triad skeleton with different operands and different in-flight prep (e.g. c1 recomputes <code>R9=2·a2</code> in T1, c3 rebuilds <code>d1=2·a1</code> while <code>RSI=a1</code> is still live). The link into each is the <code>OR TMP0 = TMP8 | TMP1</code> in its T0.</p>
+
+<h3 id="sq-c4">5.4 c4 — the 8→7 packing</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519.c:199–229</code></div>
+<p>The last limb has no "next limb" to prep for, so its three idle prep/zero slots are reclaimed and the limb is compressed to <b>7 triads</b> using the full sequential-hazard menu (the change that took the patch 43→42):</p>
+<pre><code>T3 { <span class="kw">ADD</span>(R8,R8,RCX), <span class="kw">ADD</span>(TMP9,TMP9,TMP15), <span class="kw">MUL</span>(RCX,R12,R12) }  <span class="com">// MAC3=a2² placed in slot 2 (s0→s2 WAR on RCX)</span>
+T4 { <span class="kw">ADD</span>(TMP0,TMP0,R12), <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">ADD</span>(R8,R8,RCX) }   <span class="com">// consume that MAC's lo/carry/hi</span>
+T5 { <span class="kw">ADD</span>(TMP9,TMP9,TMP15), <span class="kw">SHR</span>(TMP8,TMP0,51), <span class="kw">ADD</span>(R8,R8,TMP9) } <span class="com">// finalize (s0→s2 RAW on TMP9)</span>
+T6 { <span class="kw">SHL</span>(TMP6,TMP0,13), <span class="kw">SHL</span>(TMP1,R8,13), <span class="kw">SHR</span>(RAX,TMP6,13) }     <span class="com">// mask + hi carry + h4 (s0→s2 RAW on TMP6)</span></code></pre>
+<p>The WAR on <code>RCX</code> in T3 (slot 0 reads the old MUL hi, slot 2 overwrites it with a fresh MUL) and the two slot-0→2 RAW chains in T5/T6 are exactly the hazards <code>test_raw_war_waw.c</code> certified, used here to erase three NOPs.</p>
+
+<h3 id="sq-final">5.5 Final reduction — fold the top carry ×19</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519.c:231–244</code></div>
+<p>After c4 there is still a carry above limb 4 (weight ≥ 2²⁵⁵). Since 2²⁵⁵ ≡ 19, it folds back into limb 0 multiplied by 19:</p>
+<pre><code>F0 { <span class="kw">OR</span>(TMP0,TMP8,TMP1),  <span class="kw">MUL</span>(TMP6,19,TMP0),  <span class="kw">ADD</span>(RDI,RDI,TMP0) }  <span class="com">// full_carry; ×19 (s0→s1 RAW); h0 += 19·carry (s1→s2 RAW)</span>
+F1 { <span class="kw">SHR</span>(TMP0,RDI,51),    <span class="kw">ADD</span>(R9,R9,TMP0),    NOP }                <span class="com">// overflow from h0 into h1 (lazy)</span>
+F2 { <span class="kw">SHL</span>(TMP6,RDI,13),    <span class="kw">SHR</span>(RDI,TMP6,13),  NOP }   <span class="kw">END</span>           <span class="com">// mask h0 to 51 bits; return</span></code></pre>
+<p>F0 is a 3-deep dependency chain inside one triad: <code>OR</code> builds the carry, <code>MUL</code> reads it (slot 0→1 RAW), <code>ADD</code> reads the <em>product</em> (slot 1→2 RAW). H1 is left "lazily" ≤52 bits — legal because the next field op re-reduces, and the verifier explicitly checks no limb exceeds 52 bits.</p>
+
+<!-- ============================================================ -->
+<h2 id="mul-overview">6. The multiply patch, in execution order</h2>
+
+<h3 id="mul-overview-h">6.1 Formula &amp; triad map</h3>
+<div class="spec"><span class="tag">fe_mul — schoolbook + 19-fold reduction</span>
+<pre><code><span class="v">c0</span> = a0·b0 + a1·19b4 + a2·19b3 + a3·19b2 + a4·19b1
+<span class="v">c1</span> = a0·b1 + a1·b0   + a2·19b4 + a3·19b3 + a4·19b2
+<span class="v">c2</span> = a0·b2 + a1·b1   + a2·b0   + a3·19b4 + a4·19b3
+<span class="v">c3</span> = a0·b3 + a1·b2   + a2·b1   + a3·b0   + a4·19b4
+<span class="v">c4</span> = a0·b4 + a1·b3   + a2·b2   + a3·b1   + a4·b0</code></pre></div>
+<p>No symmetry to exploit, so all <b>25 cross-products</b> are computed — 5 MACs per limb. The wrap-around terms (anything that would land in limbs 5..8) are pre-multiplied by 19 so they fold straight into limbs 0..3.</p>
+<table>
+<tr><th>Region</th><th class="num">Triads</th><th>Source</th><th>Work</th></tr>
+<tr><td>PREP</td><td class="num">3</td><td><code>asm_op_curve25519_mul.c:97–111</code></td><td>save b0..b4 → TMP10..14; compute 19·b1..b4 in place (3 MULs/triad)</td></tr>
+<tr><td>c0 … c4</td><td class="num">12 each</td><td>lines 113–368</td><td>5 MACs + carry + 51-bit split + link, per limb</td></tr>
+<tr><td>Final reduction</td><td class="num">3</td><td>lines 370–386</td><td>fold top carry ×19 into h0, propagate, mask</td></tr>
+</table>
+<p class="small">3 + 12×5 + 3 = <b>66 triads</b>. (c4's "prep next limb's RDX" slot is its only structural difference, but every limb is a uniform 12 here — the saved triad relative to earlier versions came from absorbing the per-limb prep into the next limb's T0, not from shortening c4.)</p>
+
+<h3 id="mul-prep">6.2 PREP — 3 triads, 3 MULs in one</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519_mul.c:97–111</code></div>
+<p>The patch needs <code>b<sub>j</sub></code> both raw (for c1..c4's straight terms) and ×19 (for the wrap terms), so it saves the raw values to TMPs first, then reduces the originals in place. P2 packs <b>three</b> <code>×19</code> MULs into one triad — legal because MUL works in any slot and the shared <code>RCX</code> high-half target is a WAW where the last write wins and is unused:</p>
+<pre><code>P0 { <span class="kw">ZEROEXT</span>(TMP10,R15), <span class="kw">ZEROEXT</span>(TMP11,R13), <span class="kw">ZEROEXT</span>(TMP12,R9) }   <span class="com">// save b0,b1,b2</span>
+P1 { <span class="kw">ZEROEXT</span>(TMP13,R10), <span class="kw">ZEROEXT</span>(TMP14,RBX), <span class="kw">MUL</span>(RCX,19,R13) }      <span class="com">// save b3,b4; R13=19·b1</span>
+P2 { <span class="kw">MUL</span>(RCX,19,R9),    <span class="kw">MUL</span>(RCX,19,R10),     <span class="kw">MUL</span>(RCX,19,RBX) }      <span class="com">// R9=19b2 R10=19b3 RBX=19b4</span></code></pre>
+<p><code>TMP0</code> init and the <code>RDX=b0</code> seed for c0's first MAC are not done here — they were pushed down into c0's T0 to save the prep triads, an absorb that helped take the patch from 73 to 66.</p>
+
+<h3 id="mul-limb">6.3 One limb in full — c0, 12 triads</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519_mul.c:113–163</code></div>
+<p>Five MACs in the alternating "ACC+prep" / "hi+MAC+carry" cadence of §4.1. Each ACC triad's slot 2 preps the <em>next</em> multiplier into <code>RDX</code>, so every MUL fires with its operand already in place:</p>
+<pre><code>T0  { <span class="kw">ZEROEXT</span>(RDX,TMP10),    <span class="kw">MUL</span>(RCX,RDI,RDX),  <span class="kw">NOTAND</span>(TMP0,TMP0,TMP0) }  <span class="com">// RDX=b0; MAC1 a0·b0; TMP0=0 (s0→s1 RAW)</span>
+T1  { <span class="kw">ADD</span>(TMP0,TMP0,RDX),    <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">ZEROEXT</span>(RDX,RBX) }       <span class="com">// acc lo; carry; prep RDX=19b4</span>
+T2  { <span class="kw">ZEROEXT</span>(R8,RCX),       <span class="kw">MUL</span>(RCX,RSI,RDX),  <span class="kw">ZEROEXT</span>(TMP9,TMP15) }     <span class="com">// R8=hi_1 (overwrite, no NOTAND); MAC2 a1·19b4; carry-sum init</span>
+T3  { <span class="kw">ADD</span>(TMP0,TMP0,RDX),    <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">ZEROEXT</span>(RDX,R10) }       <span class="com">// acc lo; carry; prep RDX=19b3</span>
+T4  { <span class="kw">ADD</span>(R8,R8,RCX),        <span class="kw">MUL</span>(RCX,R12,RDX),  <span class="kw">ADD</span>(TMP9,TMP9,TMP15) }    <span class="com">// hi; MAC3 a2·19b3; carry fold</span>
+T5  { <span class="kw">ADD</span>(TMP0,TMP0,RDX),    <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">ZEROEXT</span>(RDX,R9) }        <span class="com">// acc lo; carry; prep RDX=19b2</span>
+T6  { <span class="kw">ADD</span>(R8,R8,RCX),        <span class="kw">MUL</span>(RCX,R11,RDX),  <span class="kw">ADD</span>(TMP9,TMP9,TMP15) }    <span class="com">// hi; MAC4 a3·19b2; carry fold</span>
+T7  { <span class="kw">ADD</span>(TMP0,TMP0,RDX),    <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">ZEROEXT</span>(RDX,R13) }       <span class="com">// acc lo; carry; prep RDX=19b1</span>
+T8  { <span class="kw">ADD</span>(R8,R8,RCX),        <span class="kw">MUL</span>(RCX,R14,RDX),  <span class="kw">ADD</span>(TMP9,TMP9,TMP15) }    <span class="com">// hi; MAC5 a4·19b1; carry fold</span>
+T9  { <span class="kw">ADD</span>(TMP0,TMP0,RDX),    <span class="kw">SETCC</span>(TMP15,TMP0), <span class="kw">SHR</span>(TMP8,TMP0,51) }       <span class="com">// last acc; carry; lo carry-out (s0→s2 RAW)</span>
+T10 { <span class="kw">ADD</span>(R8,R8,RCX),        <span class="kw">ADD</span>(TMP9,TMP9,TMP15),<span class="kw">SHL</span>(TMP2,TMP0,13) }     <span class="com">// last hi; last carry; mask scratch</span>
+T11 { <span class="kw">ADD</span>(R8,R8,TMP9),       <span class="kw">SHR</span>(R15,TMP2,13),  <span class="kw">SHL</span>(TMP1,R8,13) }        <span class="com">// finalize hi; h0=mask; hi carry-out (s0→s2 RAW)</span></code></pre>
+<p>The <b>T2 trick</b> is the cleanest packing in the patch: instead of <code>ADD R8 += RCX</code> (which would need <code>R8</code> pre-zeroed by a NOTAND), the first high half is written with <code>ZEROEXT R8 = RCX</code> — overwriting whatever <code>R8</code> held, which makes the per-limb <code>R8</code>-zeroing NOTAND unnecessary. That single substitution is one of the three changes that took the patch 73→66.</p>
+<p>Limbs c1–c4 follow the identical 12-triad template; only the operand sequence and the <code>OR</code>-link (their T0 slot 2 instead of the <code>NOTAND</code>) differ. Each writes its result into the register the wrapper expects (<code>R15,R13,R9,R10,RAX</code> for h0..h4), reusing limb registers as they free up.</p>
+
+<h3 id="mul-final">6.4 Final reduction</h3>
+<div class="srcptr"><span class="k tri">triads</span> <code>asm_op_curve25519_mul.c:370–386</code></div>
+<p>Identical in shape to squaring's: fold the top carry ×19 into h0, propagate one carry into h1, mask h0.</p>
+<pre><code>F0 { <span class="kw">OR</span>(TMP0,TMP8,TMP1), <span class="kw">MUL</span>(TMP2,19,TMP0), <span class="kw">ADD</span>(R15,R15,TMP0) }   <span class="com">// 19·full_carry into h0 (3-deep RAW chain)</span>
+F1 { <span class="kw">SHR</span>(TMP0,R15,51),   <span class="kw">ADD</span>(R13,R13,TMP0),  NOP }              <span class="com">// h0 overflow → h1 (lazy ≤52 bits)</span>
+F2 { <span class="kw">SHL</span>(TMP2,R15,13),   <span class="kw">SHR</span>(R15,TMP2,13),  NOP }  <span class="kw">END</span>           <span class="com">// mask h0; return</span></code></pre>
+
+<!-- ============================================================ -->
+<h2 id="build">7. Build &amp; run</h2>
+
+<h3 id="build-h">7.1 Makefiles and the flags that matter</h3>
+<p>Each standalone patch is its own program; the integrated X25519 and the SUPERCOP head-to-head live under <code>curve25519/</code>.</p>
+<pre><code><span class="com"># build + 3-way verify + standalone timing for each field op</span>
+$ make PROG=asm_op_curve25519        &amp;&amp; sudo taskset -c 0 ./asm_op_curve25519_static
+$ make PROG=asm_op_curve25519_mul    &amp;&amp; sudo taskset -c 0 ./asm_op_curve25519_mul_static
+
+<span class="com"># full X25519 + the SUPERCOP compiler×-O matrix (this folder)</span>
+$ cd curve25519
+$ sudo cpupower frequency-set -g userspace &amp;&amp; sudo cpupower frequency-set -f 1.10GHz
+$ ./bench_supercop_matrix.sh         <span class="com"># best-per-contender → RESULTS.md</span></code></pre>
+<div class="callout warn"><span class="tag">Pin the core, and beware -fPIE</span>
+The bench must run on core 0 (<code>taskset -c 0</code>) with the patch installed there. Like Keccak, any patch-installing target wants the static buffer in the low 4&nbsp;GB; the harness pins the core and clears the hook on exit (<code>init_match_and_patch</code>). Frequency pinning to base (1.10&nbsp;GHz) makes <code>rdtsc</code> ticks ≈ true cycles — see §8.2.</div>
+
+<!-- ============================================================ -->
+<h2 id="bench-verify">8. Verification &amp; benchmarking</h2>
+
+<h3 id="bench-verify-h">8.1 Three-way differential verification</h3>
+<p>Because there is no generator-simulator, correctness is proven on hardware by <b>differential testing against two independent C implementations</b>. Each harness defines:</p>
+<ul>
+  <li><code>fe_*_reference</code> — a naïve schoolbook <code>__uint128_t[9]</code> accumulate-then-reduce, written for obviousness, not speed (the oracle).</li>
+  <li><code>fe_*_native</code> — the optimised <code>__uint128_t</code> C that mirrors the patch's own formula (catches formula bugs).</li>
+  <li><code>fe_*_ucode</code> — the microcode under test.</li>
+</ul>
+<p>The verifier (<code>verify_all</code>) runs all three across: <b>hand-checked known vectors</b> (0, 1, 9, powers of 2⁵¹ that probe the 19-fold wrap, the basepoint), <b>10 000 random</b> 5×51 inputs, and a <b>1 000-deep iterated chain</b> from the basepoint (so any error compounds and is caught). It asserts <code>reference == native == ucode</code> bit-for-bit at every step, and additionally checks <b>no output limb exceeds 52 bits</b> (the lazy-carry invariant). Only if zero failures does it proceed to timing.</p>
+<div class="callout good"><span class="tag">Why the chain test matters</span>
+A single squaring that is off in one high bit can pass a one-shot test by luck. Feeding the output back in 1 000 times turns a one-in-a-million carry bug into a guaranteed, loud divergence from the reference chain — the same role the 64-vector sweep plays in the Keccak generator, done on hardware here.</div>
+
+<h3 id="bench-trap">8.2 The frequency trap</h3>
+<p>On Goldmont, <code>rdtsc</code> counts at a <b>constant ~1.1&nbsp;GHz reference rate</b>, not the core clock (which bursts to ~2.4&nbsp;GHz). The standalone harness measures all three implementations <b>back-to-back in one process</b> (<code>BATCH=1000</code>, <code>REPS=100</code>, report min and avg per op) so they share one frequency and the <b>ratio is frequency-invariant</b>. The SUPERCOP matrix additionally pins the core to base frequency so the absolute tick counts also read as true cycles. The number that matters is always the <b>ratio</b> microcode/fiat, never a raw tick count compared across runs.</p>
+
+<h3 id="bench-results">8.3 Results</h3>
+<p>Measured back-to-back against fiat-crypto (the formally-verified C that CryptOpt and real libraries build on) and naïve <code>-O3</code>:</p>
+<table>
+<tr><th>Field op</th><th class="num">microcode</th><th class="num">fiat-crypto</th><th>triads</th><th class="num">ratio</th><th>verdict</th></tr>
+<tr><td>fe_sq</td><td class="num"><b>~37 cyc</b></td><td class="num">~50 cyc</td><td>42</td><td class="num"><span class="win">0.74×</span></td><td><span class="win">~26% faster</span></td></tr>
+<tr><td>fe_mul</td><td class="num"><b>~58 cyc</b></td><td class="num">~60 cyc</td><td>66</td><td class="num"><span class="win">0.97×</span></td><td><span class="win">~3% faster</span></td></tr>
+</table>
+<p class="small">Absolute cycle figures are the burst-frequency, same-process numbers recorded in <code>CLAUDE.md</code>; the fiat columns are the in-process baselines the harness prints alongside. As with Keccak, treat the ratio as the result and the absolute value as frequency-context-dependent. Both patches also beat the naïve <code>-O3</code> C in the same harness.</p>
+
+<!-- ============================================================ -->
+<h2 id="a-journey">9. Analysis</h2>
+
+<h3 id="a-journey-h">9.1 How the patches got small — the packing journey</h3>
+<p>Both patches started large and were compressed by exploiting the (later-certified) full sequential-hazard semantics of triads. The deltas, from the file headers:</p>
+<table>
+<tr><th>Patch</th><th>Change</th><th class="num">triads</th></tr>
+<tr><td>fe_mul</td><td>Naïve: each MAC's hi/carry saved to its own TMP, summed at end</td><td class="num">88</td></tr>
+<tr><td>fe_mul</td><td><b>Progressive accumulation</b> (p521_sq pattern): hi→R8, carry→TMP9 inside the MAC triad</td><td class="num">73</td></tr>
+<tr><td>fe_mul</td><td>PREP 6→3 (3 MULs/triad); per-limb prep absorbed into next limb's T0; NOTAND-zeroing of R8 replaced by <code>ZEROEXT R8=RCX</code> in T2</td><td class="num"><span class="win">66</span></td></tr>
+<tr><td>fe_sq</td><td>Per-limb 8-triad skeleton with progressive accumulation</td><td class="num">43</td></tr>
+<tr><td>fe_sq</td><td>c4 packed 8→7 via cross-slot RAW/WAR/WAW (<code>test_raw_war_waw.c</code>)</td><td class="num"><span class="win">42</span></td></tr>
+</table>
+<p>The throughline: the <b>progressive accumulation</b> idea did the heavy lifting (88→73), then the <b>sequential-hazard packing</b> certified by the probe suite squeezed out the NOPs (73→66, 43→42). None of these change the math — they change how many of the three slots in each triad do useful work.</p>
+
+<h3 id="a-latency">9.2 Why squaring wins big and multiply barely</h3>
+<div class="callout"><span class="tag">The structural reason</span>
+fiat-crypto's C already compiles to tight <code>mulx</code>/<code>adcx</code>/<code>adox</code> on a normal core — but <b>this is Goldmont, which has no fast ADX and a narrow multiplier</b>. Microcode's edge is issuing a MUL plus two accumulation ops in one triad, with all carries in registers. <b>Squaring</b> has only 15 MACs, so the per-MAC packing dominates and the wrapper's <code>lea</code>/<code>imul</code> pre-work is cheap → a clear <b>26%</b>. <b>Multiply</b> has 25 MACs <em>and</em> a 3-triad in-patch PREP (the ×19 reductions can't be hoisted to the wrapper as cheaply), so the fixed overhead is a larger fraction and the C baseline is closer → only <b>3%</b>. In both cases the win is the per-MAC triad density that native register-starved code can't match.</p></div>
+<p>There is also a real ceiling: microcode is latency-bound at roughly one triad/cycle, and a field multiply is a fundamentally serial carry chain. The patches are already near the floor of "one triad per two useful micro-ops"; further wins would have to come from the C-side wrapper (the ~15 cyc/call marshalling identified in <code>design.md</code>), not the patch.</p>
+
+<h3 id="a-verdict">9.3 Verdict</h3>
+<p>Two <b>complete, correct, differentially-verified</b> Curve25519 field operations run entirely in Goldmont microcode patch RAM — squaring in <b>42 triads</b> at <b>~37 cyc (≈26% faster than fiat-crypto)</b>, multiply in <b>66 triads</b> at <b>~58 cyc (≈3% faster)</b>, both far under the 128-triad cap. The win is built from one reusable idea — the MAC accumulator with progressive high/carry folding — packed into dense triads using the CPU's fully-sequential intra-triad semantics, and exploiting field-specific structure (radix-2⁵¹ carries via <code>2⁶⁴=2¹³·2⁵¹</code>, the 19-fold wrap, and squaring symmetry). Dropped into the X25519 ladder (<code>full_curve25519.c</code>), these two patches are the accelerated core of an X25519 that is competitive with the fastest scalar field arithmetic on this hardware.</p>
+
+<div class="footer">
+  <p><b>Primary sources</b> (in <code>simple/</code>): <code>asm_op_curve25519.c</code> (the 42-triad squaring patch + verifier + bench) · <code>asm_op_curve25519_mul.c</code> (the 66-triad multiply patch) · <code>design.md</code> (engineering: register allocation, memory traffic, cycle budget) · <code>curve_basics.md</code> (the X25519 algorithm) · <code>full_curve25519.c</code> (the integrated ladder) · <code>../curvesC/curve25519_{square,mul}.c</code> (the fiat-crypto baseline). Hardware facts: <code>simple/tests/</code> probes (<code>test_mul_slot2.c</code>, <code>test_raw_war_waw.c</code>), <code>tests/adc_findings.md</code>.</p>
+  <p>Target hardware: Intel Goldmont, Celeron N3350. Field: GF(2²⁵⁵−19), unsaturated radix-2⁵¹, 5 limbs. Anchor: the published basepoint <code>{0x62D608F25D51A, …}</code>, verified across 10 000 random vectors and a 1 000-deep iterated squaring/multiply chain against an independent schoolbook reference.</p>
+</div>
+
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,379 @@
+% =====================================================================
+% Section 3 — Microcode as an Implementational Layer
+% Draft for TCHES submission.
+%
+% Scope: this section introduces the microcode layer as a programming
+% target and the GENERAL methodology by which we compile a cryptographic
+% primitive to a patch that runs on a stock Intel Goldmont part. It first
+% explains, for a reader who has not met them, exactly what a triad is and
+% what the patch RAM is, building on the reverse engineering of Koppe et
+% al. (AMD K8/K10) and Borrello et al. (CustomProcessingUnit, Intel
+% Goldmont) and on Krog's lib-micro (https://libmicro.dev), the C macro
+% language / patching library whose infrastructure this project actually
+% uses (cf. EXPERIMENTS.md, include/patch.h: patch_ucode(),
+% hook_match_and_patch()); it then describes how that mechanism is used to
+% customise an
+% instruction, how triads are packed, how the 128-triad budget shapes a
+% design, the toolchain that lowers an op-list to a verified patch, and
+% the undocumented hardware behaviour we had to map. No primitive is
+% implemented here. The two worked examples follow: Keccak-f[1600] in
+% Section 4 (control flow and register residency) and the Curve25519
+% field arithmetic in Section 5 (dense multiply-accumulate-carry).
+%
+% Cross-reference contract with later sections: Sections 4 and 5 refer to
+% the labels sec:ucode-layer, sec:triads-packing, sec:budget and
+% sec:findings; these are preserved and their content still matches the
+% citing text (e.g. sec:triads-packing carries the two-macroinstruction
+% hook and the generator discipline).
+% =====================================================================
+
+\section{Microcode as an Implementational Layer}
+\label{sec:ucode-layer}
+
+Prior work has studied microcode as an object to be reverse engineered and,
+latterly, as a surface on which to mount security mechanisms. We instead treat
+it as a programming target: a layer beneath the instruction set on which a
+cryptographic primitive can be expressed directly, and on which it can be made
+to run faster than any code the instruction set itself admits. This section
+introduces the layer in the terms a reader will need, namely what a triad is,
+what the writable patch RAM is, and by what mechanism a stock instruction is
+customised to run code of our choosing, and it then sets out the methodology
+that turns those ingredients into a verified patch on the Intel
+Goldmont~\hbox{Celeron~N3350}. The same methodology underlies every primitive
+in this work, namely the field arithmetic for P-256, Curve25519, secp256k1 and
+Poly1305 together with the Keccak-$f[1600]$ permutation of \Cref{sec:keccak},
+and we therefore present it once, in general terms, and instantiate it twice in
+the sections that follow.
+
+Two properties of the layer motivate the entire effort, and both will recur as
+the source of every result we report. The first is that the
+micro-architectural integer register file is twice the size of the
+architectural one, comprising 16 general-purpose and 16 temporary registers,
+which lets a primitive keep far more state resident than the roughly 14 usable
+general-purpose registers of native x86 and thereby removes the register spills
+that dominate compiled code on a register-starved in-order core; this is the
+property that \Cref{sec:keccak} exploits to hold an entire Keccak state in
+registers across all 24 rounds. The second is that a triad issues up to three
+micro-ops as a single sequential bundle, which yields a denser and more
+hazard-aware packing than a linear instruction stream affords, and in
+particular lets several carry chains advance at once; this is the property that
+\Cref{sec:curve25519} exploits to overlap the multiply--accumulate--carry chain
+of a reduced field multiplication. The price of admission is a hard budget of
+128 triads, together with a body of hardware behaviour that is nowhere
+documented and that we were obliged to map empirically.
+
+% ---------------------------------------------------------------------
+\subsection{Microcode, Triads, and the Patch RAM}
+\label{sec:triad-anatomy}
+
+\paragraph{From macroinstructions to micro-ops.}
+The x86 instruction set is a contract with software; it is not what the core
+executes. A decode unit translates each architectural instruction, which we
+call a \emph{macroinstruction}, into one or more internal \emph{micro-ops}
+($\mu$ops) drawn from a simpler, RISC-like repertoire that the execution units
+actually run. Frequent and simple macroinstructions are handled by fast
+hardware decoders that emit a handful of $\mu$ops directly; complex or rare
+ones are instead decoded by a microcode sequencer, which fetches a stored
+$\mu$op program from an on-chip microcode ROM, the MSROM. Goldmont exposes more
+than two thousand distinct $\mu$ops, and a single complex macroinstruction may
+expand to dozens of them. The encoding is \emph{vertical}, meaning that each
+$\mu$op resembles a compact RISC instruction with an operation field and a
+small number of operand fields rather than a wide horizontal control word; the
+reverse engineering of Koppe et al.\ on AMD K8/K10 first established this
+structure publicly, organising the $\mu$ops into operation classes for
+register arithmetic, loads, stores and special operations, and Borrello et al.\
+subsequently recovered the corresponding Goldmont repertoire and its operand
+and immediate encodings.
+
+\paragraph{The triad.}
+Inside the microcode store the $\mu$ops are not laid out singly but grouped into
+\emph{triads}. A triad is a bundle of three $\mu$ops together with one
+\emph{sequence word}, and it is the unit in which microcode is addressed,
+fetched, and issued: the sequencer advances triad by triad, presenting the
+three $\mu$ops of a triad to the execution units before it moves on. The
+sequence word is the control-flow field of the triad. It selects what the
+sequencer does after the triad's $\mu$ops have issued, namely fall through to
+the next triad, branch to a named triad address, or signal that decoding of the
+macroinstruction is complete, and on Goldmont it can additionally impose a
+synchronisation barrier on the bundle, in the manner of an \texttt{lfence}.
+A triad is thus at once a packing unit, since three $\mu$ops travel together,
+and the granularity of control flow, since branches target triads rather than
+individual $\mu$ops. The MSROM on Goldmont holds on the order of eight thousand
+such triads, which is the program that decodes the entire instruction set.
+
+\paragraph{The patch RAM.}
+The MSROM is fixed at manufacture, but a CPU must be able to correct decode
+bugs after it ships. Vendors provide for this with a small writable microcode
+store, the MSRAM or \emph{patch RAM}: in normal operation the firmware or
+operating system loads a cryptographically signed microcode patch into it at
+boot by writing the patch's address to a dedicated model-specific register, and
+the store is volatile and must be reloaded after every reset. It is one of
+several microcode-sequencer arrays, the others holding the read-only $\mu$ops,
+their sequence words, and the match table described below. On Goldmont the patch
+RAM occupies the region \texttt{U7c00}--\texttt{U7e00} and holds at most 128
+triads, and this ceiling, as \Cref{sec:budget} develops at length, is the
+binding resource of our entire approach. A patch is therefore a short array of
+triads, each consisting of three $\mu$ops and a sequence word, written in
+exactly the format the MSROM itself uses.
+
+\paragraph{Customising an instruction.}
+A patch is inert until some macroinstruction is made to decode into it. This is
+the role of the \emph{match-and-patch} mechanism, a table of 32 entries each of
+which redirects a read-only triad address to one in the patch RAM. When the
+sequencer is about to fetch the triad at a matched MSROM address it is instead
+sent to the corresponding triad in the MSRAM; pointing a match entry at the
+MSROM entry point of a chosen macroinstruction therefore \emph{hooks} that
+instruction, so that issuing it transfers control into our patch. Because each
+entry redirects an even-aligned pair of addresses at once, mapping both
+\texttt{src} and \texttt{src}${+}1$ to consecutive patch triads, only even
+addresses can be hooked. This is the mechanism, and the only mechanism, by which
+we install code of our own: we write triads into the patch RAM and aim a match
+entry at an instruction we are willing to repurpose.
+
+Two lines of prior work make this practical on Goldmont, and our toolchain rests
+on both. Borrello et al.'s CustomProcessingUnit recovered the patch and hook
+format together with the $\mu$op semantics, and provides an assembler from
+$\mu$op mnemonics to triads. Krog's \emph{lib-micro} provides the infrastructure
+we build on directly: an eBPF-inspired C macro language for chaining $\mu$ops
+into triads, together with a C API that installs a patch and programs a match
+entry on an individual core by writing the sequencer arrays through the
+undocumented \texttt{udbgrd} and \texttt{udbgwr} debug instructions, rather than
+through the signed boot-time update path. Reaching that debug interface requires
+a part placed in Intel's debug-unlock state, which we obtain on the
+\hbox{Celeron~N3350} through the Intel-SA-00086 Management Engine vulnerability.
+Where this body of work used such access to study or to harden the CPU, we use
+it to make a cryptographic kernel the body of a hooked instruction, and the rest
+of the paper is concerned with doing so well. The two ways in which a primitive
+stresses the mechanism, control flow on the one hand and arithmetic density on
+the other, are the subjects of \Cref{sec:keccak} and \Cref{sec:curve25519}
+respectively.
+
+% ---------------------------------------------------------------------
+\subsection{The Triad as an Issue Bundle and the Entry Path}
+\label{sec:triads-packing}
+
+\paragraph{The entry path.}
+Every primitive shares a single entry path that instantiates the customisation
+mechanism of \Cref{sec:triad-anatomy}. We hook an otherwise unused
+macroinstruction, the \texttt{vmwrite} whose opcode is \texttt{0x0cd8}, by
+programming a match register so that its MSROM entry point is redirected into
+our patch in the MSRAM. The native side places the operand pointers in fixed
+architectural registers, with a base pointer in \texttt{RCX}, and issues a
+single \texttt{vmwrite}, whereupon control transfers into the patch. The patch
+reads its inputs, computes entirely in registers, writes its outputs through
+the base pointer, and returns when its final triad carries the sequence word
+that signals decode-complete. Because the hook is placed on a single static
+instruction, a complete operation executes within one firing, which, as
+\Cref{sec:budget} explains, is the property that makes register residency
+worthwhile. When two patches must be resident simultaneously we hook a distinct
+macroinstruction for each, since a single hooked instruction can be redirected
+to only one entry point; the Curve25519 field operations of
+\Cref{sec:curve25519}, for example, fire the multiplication on \texttt{vmwrite}
+and the squaring on \texttt{vmread}, whose opcode is \texttt{0x0618}.
+
+\paragraph{The triad as an issue bundle.}
+Where \Cref{sec:triad-anatomy} described the triad as the microcode store sees
+it, we now describe how we use it. We program each triad as a bundle of up to
+three $\mu$ops together with its sequence word, and we rely throughout on a
+property that we verified rather than assumed, as reported in
+\Cref{sec:findings}: the three slots execute with full sequential semantics
+over the register file. A value written in an earlier slot is visible to later
+slots, which is read-after-write forwarding; a read in an earlier slot observes
+the old value of a register that a later slot overwrites, which is the
+write-after-read case; and when two slots write the same register the later
+slot prevails, which is the write-after-write case. This holds identically for
+general-purpose and temporary registers, and for condition flags as well as for
+data. In practice the triad behaves like a small statically scheduled VLIW word
+with intra-bundle forwarding, so that a short dependent chain can be folded into
+a single issue group rather than spread across three instructions while
+independent work fills the remaining slots. The layer is most expressive
+precisely where compiled native code is weakest, namely in the dependent
+reductions and carry chains that the instruction set architecture would
+serialise; this is the lever behind both worked examples, where
+\Cref{sec:keccak} folds a balanced parity tree into successive slots and
+\Cref{sec:curve25519} fuses a multiplication, an accumulation and a carry
+capture into one bundle.
+
+\paragraph{Packing constraints.}
+Two rules bound what may share a triad, and both are enforced by the hardware on
+pain of a hang or a silently incorrect result. The first is that at most one
+memory $\mu$op may occupy a triad, because a second load or store in the same
+triad hangs the core, which has only a single first-level-cache data port. The
+second is that a value produced by a load in an earlier slot is not forwarded to
+a later slot of the same triad, unlike a register result, so that a consumer of
+a freshly loaded value must begin a new triad. The asymmetry is worth stating
+explicitly, since arithmetic-to-arithmetic forwarding within a triad is
+permitted whereas load-to-arithmetic forwarding is not, and it is this boundary
+condition that most often terminates a triad.
+
+\paragraph{A self-verifying generator.}
+Because a single mis-scheduled $\mu$op produces a silently incorrect result and
+every hardware trial risks hanging the machine, we do not author triads by hand
+where we can avoid it. For each primitive a generator emits an ordered op-list
+over real register names, simulates that op-list against a model of the register
+file and memory that incorporates the addressing constraints of
+\Cref{sec:findings}, and asserts the result against a reference implementation
+over many random inputs and against published known-answer vectors. Only
+thereafter does a packer lower the op-list to triads and the generator emit the
+C array. The packer is a single greedy left-to-right pass that closes the
+current triad whenever it fills its three slots, whenever a second memory
+operation would enter it, or whenever an operation would consume a register
+loaded earlier in the same triad, so that it mechanically enforces the two
+packing rules above, and it isolates control-transfer triads where required by
+\Cref{sec:budget}. This discipline moves all correctness debugging into
+software, where it is immediate and safe, and converts the hardware-specific
+scheduling rules into a property of the toolchain rather than a burden on the
+programmer. The same procedure of generation, simulation, verification and
+packing underlies the Keccak permutation of \Cref{sec:keccak}; the small,
+densely irregular field kernels of \Cref{sec:curve25519} are instead
+hand-scheduled, but held to the identical verification discipline.
+
+% ---------------------------------------------------------------------
+\subsection{Patch RAM Budget}
+\label{sec:budget}
+
+The writable patch RAM on Goldmont holds 128 triads, occupying the region
+\texttt{U7c00}--\texttt{U7dfc} in the MSRAM, in which each triad occupies four
+address units and must begin on an even address, and within which a small
+sub-range is reserved as a staging area and is not available to a primitive.
+This ceiling of 128 triads is the binding resource of the entire approach, and
+it shapes the design at the level of the algorithm rather than merely at the
+level of the code.
+
+\paragraph{The budget selects the strategy.}
+Because a patch is small, the central question for each primitive is how to
+accommodate a complete operation, including any iteration it involves, within
+128 triads while keeping its working set resident. The answer is
+primitive-specific but is in every case a budgetary decision. An operation whose
+natural straight-line form would overflow the cap is restructured so that a
+single resident body is reused: an iterated computation is looped in place by
+means of a backward branch in the sequence word, with loop counters and constant
+tables held in the operand buffer rather than encoded in the program, so that
+the triad count becomes independent of the iteration count. This is the route
+taken by Keccak in \Cref{sec:keccak}, whose 24 rounds are looped over one
+resident round body. Where looping is too costly relative to the work performed
+per iteration, we instead fold a fixed and small number of iterations into one
+firing, as in the processing of two reduction words per \texttt{vmwrite} in the
+word-by-word Montgomery primitives, and re-enter from the native side, thereby
+trading a little additional input and output for remaining within the cap. By
+contrast, a primitive whose straight-line form already fits, as the Curve25519
+field operations of \Cref{sec:curve25519} do at 42 and 66 triads, is bound not
+by the cap but by how densely its arithmetic can be packed. In every case it is
+the relation between the work and the cap, rather than the instruction mix, that
+fixes the macro-structure of the implementation.
+
+\paragraph{Spend the budget on residency, not on movement.}
+Temporary registers do not survive across firings, so any value that must
+outlive a hooked instruction has to be carried in an architectural register or
+spilled to memory. This makes a single firing per operation the default
+arrangement, in which the inputs are loaded once in a prologue, the operation is
+computed entirely in registers, and the outputs are stored once in an epilogue,
+so that the memory traffic is paid once rather than once per iteration. The
+doubled register file is what renders this feasible, and we regard every triad
+spent on address arithmetic or data movement as a triad taken from the primitive
+itself. A concrete illustration arises in our own work, in which a variant that
+rebuilt an addressing base on each iteration in order to free one register
+measured strictly slower than a variant that kept the base pinned and instead
+borrowed a normally reserved register as scratch, because the cost of the rebuild
+exceeded the cost of the spill it removed. Under a fixed triad budget, the
+minimisation of data movement is the optimisation that matters most.
+
+% ---------------------------------------------------------------------
+\subsection{Findings}
+\label{sec:findings}
+
+Using microcode as a target required us first to establish the undocumented
+behaviour of this particular Goldmont part, namely which $\mu$ops exist and what
+they compute, how operands and flags are encoded, and which combinations are
+illegal. Each finding reported below was isolated by a dedicated probe and is
+now encoded as a rule in the generator and packer, so that a software-verified
+op-list lowers to a patch that runs correctly on its first hardware trial. We
+group the findings under the headings of the $\mu$op repertoire, the execution
+and flag semantics, the addressing, the control flow, and the performance.
+
+\paragraph{Micro-op repertoire.}
+The vertically encoded $\mu$ops expose a RISC-like set that is sufficient for
+field arithmetic, comprising 64-bit \texttt{ADD}, \texttt{XOR}, \texttt{SHL}
+and \texttt{SHR}, the rotation \texttt{ROL}, which is a correct single $\mu$op
+for every rotation amount, the bitwise operation
+\texttt{NOTAND}$(d,a,b)=(\lnot a)\land b$, register moves by means of
+\texttt{ZEROEXT}, and a $64\times64\rightarrow128$ multiplication
+\texttt{MUL\_DSZ64\_DRR}$(hi,a,b)$ that preserves $a$, returns the low half in
+$b$, and places the high half in $hi$. Immediate operand fields are 16 bits
+wide, so a 64-bit constant must be materialised by composition, using
+\texttt{ZEROEXT} followed by \texttt{SHL} and \texttt{XOR}, rather than in a
+single operation. Two pitfalls cost us considerable time. The first is that the
+memory operand forms, such as \texttt{ZEROEXT\_DSZ64\_DM}, do not perform
+general addressing but instead read a field of the triggering macroinstruction,
+so that general memory access is available only through the dedicated load and
+store operations. The second is that operations with an implicit memory operand
+cannot be used inside a patch at all. We therefore restrict the generator to
+register-only arithmetic together with the explicit load and store operations.
+
+\paragraph{Execution and flag semantics.}
+Intra-triad register dataflow is fully sequential, as described in
+\Cref{sec:triads-packing}, with the single exception that the result of a load
+does not forward within a triad; store-to-load forwarding across triads within a
+patch does function, however, which is what makes the spilling and reloading of
+scratch values safe. A 64-bit multiplication may occupy any slot of a triad, an
+earlier belief in a slot-zero restriction having not survived testing. The flags
+are the subtlest aspect of the machine, and we found two distinct flag domains.
+The first is a per-temporary-register condition that is set by an \texttt{ADD}
+and consumed by a conditional \texttt{SETCC}, and that persists until the next
+\texttt{ADD} to that register. The second is the architectural \texttt{RFLAGS},
+which is frozen at patch entry and which is what \texttt{ADC} and the conditional
+branch read. The bridge from the first domain to the second is unreliable in
+large patches. Three practical consequences follow and are encoded in the
+generator. All multi-word carry chains are built from per-register \texttt{ADD}
+and \texttt{SETCC} pairs rather than from \texttt{ADC}; \texttt{SETCC} writes
+correctly only to a temporary register and never to an architectural one, so a
+carry must be materialised in a temporary and then moved out; and a temporary
+needed across iterations must never be clobbered by an intervening carry
+computation. The first of these is precisely what enables the parallel carry
+chains of \Cref{sec:curve25519}, and its boundary is precisely what limits them
+on the saturated representation discussed there.
+
+\paragraph{Addressing.}
+Loads and stores function only with a specific data-segment selector on this
+part, and a selector copied from unrelated code hung the core unrecoverably, so
+the working value is machine-specific and is fixed once. The immediate
+displacement is an 8-bit signed byte offset spanning $\pm 128$ bytes, and an
+early layout that placed scratch beyond that range wrapped silently and
+corrupted state, a fault at first misdiagnosed as a dependency error. We
+therefore centre the operand buffer beneath its base pointer so that all
+displacements remain in range, and we use the register-indexed addressing form,
+which carries no such limit, for the tables and counters that lie beyond the
+reach of the immediate. As noted above, at most one memory operation may occupy
+a triad.
+
+\paragraph{Control flow.}
+A backward conditional branch encoded in the sequence word transfers control to
+an arbitrary triad and reads the architectural flags, ignoring any register
+operand encoded alongside it, and the arithmetic operation that sets the tested
+flag must occupy the same triad as the branch. This is the mechanism that
+underlies the in-place looping of \Cref{sec:budget}, and \Cref{sec:keccak}
+depends on it directly. Because temporary registers do not persist across
+firings, any state that must survive between firings has to reside in an
+architectural register or in memory, which is precisely why a complete, iterated
+operation is kept within a single firing wherever the triad budget permits.
+
+\paragraph{Performance.}
+The layer has two regimes of per-triad cost, and conflating them is the easiest
+way to misjudge a projected result. Measured as throughput, across many
+independent firings that the out-of-order front end is able to overlap, a triad
+costs approximately 0.49 cycles. A single dependent operation, by contrast, pays
+the latency, and in the absence of any overlap between firings and in the
+presence of a per-iteration branch the effective cost rises to roughly one triad
+per cycle. A primitive is therefore fast in this layer to the extent that its
+triad count is low and its critical path short, rather than because individual
+operations are cheap. The improvements we report across the primitives, which
+match or exceed both GCC at \texttt{-O3} and a state-of-the-art superoptimiser on
+most operations, derive from this structural source: the doubled register file
+removes the spills that dominate compiled code on an in-order core, and the
+three-wide hazard-aware packing shortens dependent chains. The advantage is
+structural, deriving from the elimination of data movement that the instruction
+set architecture cannot avoid, rather than from a higher peak throughput; and
+because the 128-triad cap forecloses extensive unrolling, the margin is modest on
+kernels that are already tight and latency-bound and large on kernels that are
+spill-heavy. The two worked examples that follow are chosen to exhibit both ends
+of this range.

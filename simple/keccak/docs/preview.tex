@@ -1,0 +1,44 @@
+% Standalone preview wrapper for the draft sections.
+% Build:  latexmk -pdf preview.tex   (or: pdflatex preview.tex, twice for refs)
+% This is NOT the paper — just a harness so the section fragments render.
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+% cleveref must load after hyperref
+\usepackage{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+% listings style used by the sections
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=2pt,
+}
+
+\title{Microcode Paper --- Draft Sections 3 \& 4 (preview)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\bigskip
+
+\input{section3_microcode_layer.tex}
+\clearpage
+\input{section4_keccak.tex}
+\clearpage
+\input{section5_curve25519.tex}
+
+\end{document}
