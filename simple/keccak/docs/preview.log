@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Debian) (preloaded format=pdflatex 2026.5.13)  21 JUN 2026 21:09
+This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Debian) (preloaded format=pdflatex 2026.5.13)  22 JUN 2026 10:08
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -528,13 +528,42 @@ LaTeX Font Info:    External font `lmex10' loaded for size
 {/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf/fonts/enc/
 dvips/lm/lm-ec.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-mathit.enc}{/usr/sha
 re/texmf/fonts/enc/dvips/lm/lm-rm.enc}]
-LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 9
-8.
 
+LaTeX Warning: Citation `koppeReverseEngineeringX862017' on page 2 undefined on
+ input line 87.
+
+
+LaTeX Warning: Citation `borrelloCustomProcessingUnitReverseEngineering2023' on
+ page 2 undefined on input line 90.
+
+LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 1
+04.
 (/usr/share/texmf/tex/latex/lm/t1lmtt.fd
 File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
-) [2] [3] [4] [5{/usr/share/texmf/fonts/enc/dvips/lm/lm-mathsy.enc}]) [6] [7] (
-./section4_keccak.tex
+)
+
+LaTeX Warning: Citation `borrelloCustomProcessingUnitReverseEngineering2023' on
+ page 2 undefined on input line 117.
+
+[2]
+
+LaTeX Warning: Citation `ermolovUCodeDisasm2021' on page 3 undefined on input l
+ine 127.
+
+
+LaTeX Warning: Citation `ermolovUndocumentedX862022' on page 3 undefined on inp
+ut line 184.
+
+
+LaTeX Warning: Citation `ermolovUCodeDisasm2021' on page 3 undefined on input l
+ine 186.
+
+
+LaTeX Warning: Citation `borrelloCustomProcessingUnitReverseEngineering2023' on
+ page 3 undefined on input line 190.
+
+[3] [4] [5] [6{/usr/share/texmf/fonts/enc/dvips/lm/lm-mathsy.enc}]) [7]
+(./section4_keccak.tex
 LaTeX Font Info:    External font `lmex10' loaded for size
 (Font)              <14.4> on input line 16.
 LaTeX Font Info:    External font `lmex10' loaded for size
@@ -570,12 +599,16 @@ nput line 126.
 LaTeX2e <2023-11-01> patch level 1
 L3 programming layer <2024-01-22>
  ***********
+
+
+LaTeX Warning: There were undefined references.
+
 Package rerunfilecheck Info: File `preview.out' has not changed.
 (rerunfilecheck)             Checksum: 596FE55E78442256AE2D8FF55C45DDE0;3137.
  ) 
 Here is how much of TeX's memory you used:
- 14208 strings out of 474222
- 223313 string characters out of 5748733
+ 14209 strings out of 474222
+ 223324 string characters out of 5748733
  2023975 words of memory out of 5000000
  36194 multiletter control sequences out of 15000+600000
  630599 words of font info for 97 fonts, out of 8000000 for 9000
@@ -592,10 +625,10 @@ pfb></usr/share/texmf/fonts/type1/public/lm/lmsy10.pfb></usr/share/texmf/fonts/
 type1/public/lm/lmsy8.pfb></usr/share/texmf/fonts/type1/public/lm/lmtt10.pfb></
 usr/share/texmf/fonts/type1/public/lm/lmtt9.pfb></usr/share/texmf/fonts/type1/p
 ublic/lm/lmtti10.pfb>
-Output written on preview.pdf (17 pages, 350654 bytes).
+Output written on preview.pdf (17 pages, 354756 bytes).
 PDF statistics:
- 384 PDF objects out of 1000 (max. 8388607)
- 328 compressed objects within 4 object streams
- 86 named destinations out of 1000 (max. 500000)
+ 390 PDF objects out of 1000 (max. 8388607)
+ 334 compressed objects within 4 object streams
+ 87 named destinations out of 1000 (max. 500000)
  137 words of extra memory for PDF output out of 10000 (max. 10000000)
 

@@ -2,49 +2,50 @@
 \contentsline {subsection}{\numberline {1.1}Microcode, Triads, and the Patch RAM}{2}{subsection.1.1}%
 \contentsline {paragraph}{From macroinstructions to micro-ops.}{2}{section*.2}%
 \contentsline {paragraph}{The triad.}{2}{section*.3}%
-\contentsline {paragraph}{The patch RAM.}{2}{section*.4}%
-\contentsline {paragraph}{Customising an instruction.}{3}{section*.5}%
-\contentsline {subsection}{\numberline {1.2}The Triad as an Issue Bundle and the Entry Path}{3}{subsection.1.2}%
-\contentsline {paragraph}{The entry path.}{3}{section*.6}%
-\contentsline {paragraph}{The triad as an issue bundle.}{3}{section*.7}%
-\contentsline {paragraph}{Packing constraints.}{4}{section*.8}%
-\contentsline {paragraph}{A self-verifying generator.}{4}{section*.9}%
-\contentsline {subsection}{\numberline {1.3}Patch RAM Budget}{4}{subsection.1.3}%
-\contentsline {paragraph}{The budget selects the strategy.}{4}{section*.10}%
-\contentsline {paragraph}{Spend the budget on residency, not on movement.}{5}{section*.11}%
-\contentsline {subsection}{\numberline {1.4}Findings}{5}{subsection.1.4}%
-\contentsline {paragraph}{Micro-op repertoire.}{5}{section*.12}%
-\contentsline {paragraph}{Execution and flag semantics.}{6}{section*.13}%
-\contentsline {paragraph}{Addressing.}{6}{section*.14}%
-\contentsline {paragraph}{Control flow.}{6}{section*.15}%
-\contentsline {paragraph}{Performance.}{6}{section*.16}%
+\contentsline {paragraph}{The encoding of a triad.}{3}{section*.4}%
+\contentsline {paragraph}{The patch RAM.}{3}{section*.5}%
+\contentsline {paragraph}{Customising an instruction.}{3}{section*.6}%
+\contentsline {subsection}{\numberline {1.2}The Triad as an Issue Bundle and the Entry Path}{4}{subsection.1.2}%
+\contentsline {paragraph}{The entry path.}{4}{section*.7}%
+\contentsline {paragraph}{The triad as an issue bundle.}{4}{section*.8}%
+\contentsline {paragraph}{Packing constraints.}{5}{section*.9}%
+\contentsline {paragraph}{A self-verifying generator.}{5}{section*.10}%
+\contentsline {subsection}{\numberline {1.3}Patch RAM Budget}{5}{subsection.1.3}%
+\contentsline {paragraph}{The budget selects the strategy.}{5}{section*.11}%
+\contentsline {paragraph}{Spend the budget on residency, not on movement.}{6}{section*.12}%
+\contentsline {subsection}{\numberline {1.4}Findings}{6}{subsection.1.4}%
+\contentsline {paragraph}{Micro-op repertoire.}{6}{section*.13}%
+\contentsline {paragraph}{Execution and flag semantics.}{6}{section*.14}%
+\contentsline {paragraph}{Addressing.}{7}{section*.15}%
+\contentsline {paragraph}{Control flow.}{7}{section*.16}%
+\contentsline {paragraph}{Performance.}{7}{section*.17}%
 \contentsline {section}{\numberline {2}Keccak-$f[1600]$ in Microcode}{8}{section.2}%
-\contentsline {paragraph}{The structural advantage.}{8}{section*.17}%
+\contentsline {paragraph}{The structural advantage.}{8}{section*.18}%
 \contentsline {subsection}{\numberline {2.1}State Layout and Residency}{8}{subsection.2.1}%
-\contentsline {paragraph}{Register allocation.}{8}{section*.18}%
-\contentsline {paragraph}{Buffer organisation.}{8}{section*.19}%
+\contentsline {paragraph}{Register allocation.}{8}{section*.19}%
+\contentsline {paragraph}{Buffer organisation.}{8}{section*.20}%
 \contentsline {subsection}{\numberline {2.2}The Looped Round Body}{8}{subsection.2.2}%
-\contentsline {paragraph}{The $\theta $ stage and the residency of $D$.}{9}{section*.20}%
-\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{9}{section*.21}%
-\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{9}{section*.22}%
-\contentsline {paragraph}{The $\iota $ stage and loop control.}{10}{section*.23}%
+\contentsline {paragraph}{The $\theta $ stage and the residency of $D$.}{9}{section*.21}%
+\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{9}{section*.22}%
+\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{9}{section*.23}%
+\contentsline {paragraph}{The $\iota $ stage and loop control.}{10}{section*.24}%
 \contentsline {subsection}{\numberline {2.3}Triad Budget}{10}{subsection.2.3}%
 \contentsline {subsection}{\numberline {2.4}Verification}{10}{subsection.2.4}%
 \contentsline {subsection}{\numberline {2.5}Performance}{11}{subsection.2.5}%
-\contentsline {paragraph}{Measurement methodology.}{11}{section*.24}%
-\contentsline {paragraph}{Result.}{11}{section*.25}%
-\contentsline {paragraph}{The source and the bound of the improvement.}{11}{section*.26}%
+\contentsline {paragraph}{Measurement methodology.}{11}{section*.25}%
+\contentsline {paragraph}{Result.}{11}{section*.26}%
+\contentsline {paragraph}{The source and the bound of the improvement.}{11}{section*.27}%
 \contentsline {section}{\numberline {3}Curve25519 in Microcode}{13}{section.3}%
-\contentsline {paragraph}{The structural advantage.}{13}{section*.27}%
+\contentsline {paragraph}{The structural advantage.}{13}{section*.28}%
 \contentsline {subsection}{\numberline {3.1}Representation and Operations}{13}{subsection.3.1}%
 \contentsline {subsection}{\numberline {3.2}The Patch: Fused Multiply--Accumulate and Parallel Carry Chains}{13}{subsection.3.2}%
-\contentsline {paragraph}{Three concurrent accumulators.}{14}{section*.28}%
-\contentsline {paragraph}{Authoring and verification.}{14}{section*.29}%
+\contentsline {paragraph}{Three concurrent accumulators.}{14}{section*.29}%
+\contentsline {paragraph}{Authoring and verification.}{14}{section*.30}%
 \contentsline {subsection}{\numberline {3.3}Triad Budget}{15}{subsection.3.3}%
 \contentsline {subsection}{\numberline {3.4}Integration into X25519}{15}{subsection.3.4}%
 \contentsline {subsection}{\numberline {3.5}Performance}{16}{subsection.3.5}%
-\contentsline {paragraph}{Methodology.}{16}{section*.30}%
-\contentsline {paragraph}{The field-operation result.}{16}{section*.31}%
-\contentsline {paragraph}{The integration result.}{16}{section*.32}%
-\contentsline {paragraph}{The limits of the result.}{16}{section*.33}%
-\contentsline {paragraph}{Summary.}{17}{section*.34}%
+\contentsline {paragraph}{Methodology.}{16}{section*.31}%
+\contentsline {paragraph}{The field-operation result.}{16}{section*.32}%
+\contentsline {paragraph}{The integration result.}{16}{section*.33}%
+\contentsline {paragraph}{The limits of the result.}{16}{section*.34}%
+\contentsline {paragraph}{Summary.}{17}{section*.35}%

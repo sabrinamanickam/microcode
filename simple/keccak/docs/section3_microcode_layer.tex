@@ -11,8 +11,9 @@
 % Goldmont) and on Krog's lib-micro (https://libmicro.dev), the C macro
 % language / patching library whose infrastructure this project actually
 % uses (cf. EXPERIMENTS.md, include/patch.h: patch_ucode(),
-% hook_match_and_patch()); it then describes how that mechanism is used to
-% customise an
+% hook_match_and_patch()). The triad/sequence-word bit-field encoding in
+% sec:triad-anatomy follows libmicro.dev/structure.html. It then describes
+% how that mechanism is used to customise an
 % instruction, how triads are packed, how the 128-triad budget shapes a
 % design, the toolchain that lowers an op-list to a verified patch, and
 % the undocumented hardware behaviour we had to map. No primitive is
@@ -67,23 +68,28 @@ documented and that we were obliged to map empirically.
 \label{sec:triad-anatomy}
 
 \paragraph{From macroinstructions to micro-ops.}
-The x86 instruction set is a contract with software; it is not what the core
-executes. A decode unit translates each architectural instruction, which we
+The x86 instruction set is a contract between software and the hardware that
+runs it, a stable interface that fixes what each instruction must appear to do
+while saying nothing about how the hardware is to achieve it, and it is not the
+language the core actually executes. A decode unit translates each architectural instruction, which we
 call a \emph{macroinstruction}, into one or more internal \emph{micro-ops}
 ($\mu$ops) drawn from a simpler, RISC-like repertoire that the execution units
 actually run. Frequent and simple macroinstructions are handled by fast
-hardware decoders that emit a handful of $\mu$ops directly; complex or rare
-ones are instead decoded by a microcode sequencer, which fetches a stored
-$\mu$op program from an on-chip microcode ROM, the MSROM. Goldmont exposes more
+hardware decoders that emit a handful of $\mu$ops directly, whereas complex or
+rare ones are instead decoded by a microcode sequencer. It is for these latter,
+microcoded instructions that the $\mu$op program implementing the
+macroinstruction is held on an on-chip microcode ROM, the MSROM, from which the
+sequencer fetches it. Goldmont exposes more
 than two thousand distinct $\mu$ops, and a single complex macroinstruction may
 expand to dozens of them. The encoding is \emph{vertical}, meaning that each
 $\mu$op resembles a compact RISC instruction with an operation field and a
-small number of operand fields rather than a wide horizontal control word; the
-reverse engineering of Koppe et al.\ on AMD K8/K10 first established this
-structure publicly, organising the $\mu$ops into operation classes for
-register arithmetic, loads, stores and special operations, and Borrello et al.\
-subsequently recovered the corresponding Goldmont repertoire and its operand
-and immediate encodings.
+small number of operand fields rather than a wide horizontal control word. The
+reverse engineering of Koppe et al.\ \cite{koppeReverseEngineeringX862017} on
+AMD K8/K10 first established this structure publicly, organising the $\mu$ops
+into operation classes for register arithmetic, loads, stores and special
+operations, and Borrello et al.\ \cite{borrelloCustomProcessingUnitReverseEngineering2023}
+subsequently recovered the corresponding $\mu$ops for Goldmont together with
+their operand and immediate encodings.
 
 \paragraph{The triad.}
 Inside the microcode store the $\mu$ops are not laid out singly but grouped into
@@ -96,10 +102,50 @@ sequencer does after the triad's $\mu$ops have issued, namely fall through to
 the next triad, branch to a named triad address, or signal that decoding of the
 macroinstruction is complete, and on Goldmont it can additionally impose a
 synchronisation barrier on the bundle, in the manner of an \texttt{lfence}.
-A triad is thus at once a packing unit, since three $\mu$ops travel together,
-and the granularity of control flow, since branches target triads rather than
-individual $\mu$ops. The MSROM on Goldmont holds on the order of eight thousand
-such triads, which is the program that decodes the entire instruction set.
+A triad is thus at once a packing unit and the granularity of control flow. It
+is a packing unit because its three $\mu$ops are fetched and issued together as
+a single bundle, so that the quantity governing both the size of a program and
+the length of its dependency chains is the number of triads rather than the
+number of $\mu$ops, and filling all three slots of every triad is in consequence
+the central concern of the packing described in \Cref{sec:triads-packing}. It is
+the granularity of control flow because the sequence word steers the sequencer
+one triad at a time and a branch can target only a triad boundary, never a
+$\mu$op within a triad, which has the practical consequence, developed in
+\Cref{sec:findings}, that an operation setting a condition and the branch that
+tests it must be placed in the same triad. The MSROM on Goldmont holds on the
+order of eight thousand such triads, 7936 to be exact
+\cite{borrelloCustomProcessingUnitReverseEngineering2023}, which together form
+the $\mu$op program that decodes the entire x86 instruction set. Against that backdrop the 128
+triads of writable patch RAM introduced below amount to under two percent of the
+decode store, and it is within that small allowance that an entire cryptographic
+primitive must be expressed.
+
+\paragraph{The encoding of a triad.}
+The structure of a triad is worth making concrete, since it determines what a
+single $\mu$op can express and therefore what the packer of \Cref{sec:findings}
+is working against. We follow the Goldmont encoding first documented by Ermolov,
+Goryachy and Sklyarov's uCodeDisasm \cite{ermolovUCodeDisasm2021}, whose $\mu$op
+mnemonics our toolchain inherits by way of lib-micro. Each $\mu$op is a 48-bit
+word. A 12-bit opcode names the operation, and for some operations also encodes
+a sub-mode such as a condition code or a data size; two 6-bit fields select the
+source registers and a third 6-bit field the destination, which for a memory
+operation instead supplies a second source. An operand need not be a register:
+when the top three bits of a source field are \texttt{001} that field's
+remaining bits and the $\mu$op's two immediate fields together form a 16-bit
+immediate, and when they are \texttt{010} the field indexes a read-only
+constants ROM. A few mode bits and a two-bit parity check complete the word. The
+16-bit ceiling on an immediate is exactly why a 64-bit constant must be built by
+composition, a point \Cref{sec:findings} returns to. The sequence word is a
+narrower 30-bit word, but its fields act on the triad rather than on data.
+Three 2-bit pointers bind its actions to particular slots; a four-bit
+control-flow field selects among returning to the caller, looping within the
+microcode, stopping, and signalling that decoding is complete; a branch-address
+field supplies a jump target that becomes conditional when the preceding $\mu$op
+is a flag-setting test or subtract; and a three-bit synchronisation field can
+place a load fence or a full barrier on the bundle, which is the
+\texttt{lfence}-like behaviour noted above. These two fields together are the
+whole of control flow in the layer, and \Cref{sec:findings} records which of
+their forms behave reliably on this part.
 
 \paragraph{The patch RAM.}
 The MSROM is fixed at manufacture, but a CPU must be able to correct decode
@@ -121,7 +167,7 @@ A patch is inert until some macroinstruction is made to decode into it. This is
 the role of the \emph{match-and-patch} mechanism, a table of 32 entries each of
 which redirects a read-only triad address to one in the patch RAM. When the
 sequencer is about to fetch the triad at a matched MSROM address it is instead
-sent to the corresponding triad in the MSRAM; pointing a match entry at the
+sent to the corresponding triad in the MSRAM. Pointing a match entry at the
 MSROM entry point of a chosen macroinstruction therefore \emph{hooks} that
 instruction, so that issuing it transfers control into our patch. Because each
 entry redirects an even-aligned pair of addresses at once, mapping both
@@ -130,20 +176,27 @@ addresses can be hooked. This is the mechanism, and the only mechanism, by which
 we install code of our own: we write triads into the patch RAM and aim a match
 entry at an instruction we are willing to repurpose.
 
-Two lines of prior work make this practical on Goldmont, and our toolchain rests
-on both. Borrello et al.'s CustomProcessingUnit recovered the patch and hook
-format together with the $\mu$op semantics, and provides an assembler from
-$\mu$op mnemonics to triads. Krog's \emph{lib-micro} provides the infrastructure
-we build on directly: an eBPF-inspired C macro language for chaining $\mu$ops
-into triads, together with a C API that installs a patch and programs a match
-entry on an individual core by writing the sequencer arrays through the
-undocumented \texttt{udbgrd} and \texttt{udbgwr} debug instructions, rather than
-through the signed boot-time update path. Reaching that debug interface requires
-a part placed in Intel's debug-unlock state, which we obtain on the
-\hbox{Celeron~N3350} through the Intel-SA-00086 Management Engine vulnerability.
-Where this body of work used such access to study or to harden the CPU, we use
-it to make a cryptographic kernel the body of a hooked instruction, and the rest
-of the paper is concerned with doing so well. The two ways in which a primitive
+Three lines of prior work make this practical on Goldmont, and our toolchain
+rests on all of them. The foundation is due to Ermolov, Goryachy and Sklyarov:
+beginning in 2020 they obtained Intel's \emph{Red Unlock} debug state on Goldmont
+through the Intel-SA-00086 Management Engine vulnerability, identified the
+undocumented \texttt{udbgrd} and \texttt{udbgwr} instructions that read and write
+the microcode arrays from software \cite{ermolovUndocumentedX862022}, and released
+\emph{uCodeDisasm}, the disassembler that first documented the Goldmont $\mu$op,
+triad and sequence-word encoding publicly \cite{ermolovUCodeDisasm2021}. Building
+on this, Borrello et al.'s CustomProcessingUnit (2023) reverse-engineered the
+patch and hook format, defined the semantics of some eight thousand $\mu$ops, and
+provides a static decompiler together with an assembler from $\mu$op mnemonics to
+triads \cite{borrelloCustomProcessingUnitReverseEngineering2023}. We build most
+directly on Krog's \emph{lib-micro}, an eBPF-inspired C macro language for
+chaining $\mu$ops into triads together with a C API that installs a patch and
+programs a match entry on an individual core, writing the sequencer arrays
+through the \texttt{udbgrd}/\texttt{udbgwr} interface rather than through the
+signed boot-time update path. Reaching that interface requires a part held in the
+Red-Unlock state above, which we reproduce on our \hbox{Celeron~N3350}. Where
+this body of work used such access to study or to harden the CPU, we use it to
+make a cryptographic kernel the body of a hooked instruction, and the rest of the
+paper is concerned with doing so well. The two ways in which a primitive
 stresses the mechanism, control flow on the one hand and arithmetic density on
 the other, are the subjects of \Cref{sec:keccak} and \Cref{sec:curve25519}
 respectively.
