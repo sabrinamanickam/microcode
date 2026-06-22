@@ -46,12 +46,39 @@ static uint64_t robust_min(const uint64_t *sorted, int n, uint64_t med){
 #include "../keccak_perm.h"
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];
 
-/* SUPERCOP scalar Keccak permutations — benchmark vs ALL fast x86-64 variants
- * so we compare against the TRUE fastest (what SUPERCOP's autotuner would pick). */
-extern void keccak_x86_64_asm_perm(uint64_t state[25]);        /* Van Keer, ROL */
-extern void keccak_x86_64_shld_perm(uint64_t state[25]);       /* Van Keer, SHLD */
-extern void keccak_opt64lcu24_perm(uint64_t state[25]);        /* C, 24x unroll, bebigokimisa */
-extern void keccak_opt64lcu24shld_perm(uint64_t state[25]);    /* C, 24x unroll, SHLD */
+/* SUPERCOP Keccak permutations — benchmark vs EVERY keccakc1024 variant that
+ * runs on this x86-64 Goldmont core (hand asm, 64-bit C, x86 SIMD) plus the
+ * reference C, so we compare against the genuinely fastest, not a strawman.
+ * Deliberately EXCLUDED (cannot run / not competitive on a 64-bit Intel core):
+ *   - xopu24                : AMD XOP -> #UD (illegal instruction) on GenuineIntel
+ *   - avr8* / *armv* / *rv* : other ISAs (won't build for x86-64)
+ *   - inplace* / *32bi* / compact* : 32-bit bit-interleaved / size-optimised,
+ *                             structurally slower on a 64-bit core
+ *   - sphlib / sphlib-small : no cleanly-exposed bare permutation (sponge inline) */
+extern void keccak_x86_64_asm_perm(uint64_t state[25]);        /* hand asm, ROL */
+extern void keccak_x86_64_shld_perm(uint64_t state[25]);       /* hand asm, SHLD */
+extern void keccak_opt64lcu24_perm(uint64_t state[25]);        /* 64-bit C, lane-compl + unroll 24 */
+extern void keccak_opt64lcu24shld_perm(uint64_t state[25]);    /* 64-bit C, SHLD + unroll 24 */
+extern void keccak_opt64lcu6_perm(uint64_t state[25]);         /* 64-bit C, lane-compl + unroll 6 */
+extern void keccak_opt64u6_perm(uint64_t state[25]);           /* 64-bit C, plain + unroll 6 */
+extern void keccak_sseu2_perm(uint64_t state[25]);             /* SSE2/SSSE3 SIMD */
+extern void keccak_mmxu1_perm(uint64_t state[25]);             /* MMX SIMD */
+extern void keccak_simple_F(uint64_t *state, const uint64_t *in, int laneCount); /* reference C */
+/* simple's KeccakF absorbs `laneCount` lanes then permutes; laneCount=0 skips the
+ * absorb (while(--0>=0) is false) -> a pure Keccak-f[1600] permutation. */
+static void keccak_simple_perm(uint64_t s[25]){ keccak_simple_F(s, s, 0); }
+
+/* XKCP (eXtended Keccak Code Package) single Keccak-p[1600], plain-64bits. On
+ * Goldmont (no AVX2/AVX-512, and XKCP has no SSE single-perm kernel) this is the
+ * only XKCP single permutation that runs, and what its recommended x86-64 target
+ * falls back to. It's the current upstream of SUPERCOP's opt64lcu* family. */
+extern void keccak_xkcp_g64_perm(uint64_t state[25]);    /* generic64   : full unroll, no lane-complement */
+extern void keccak_xkcp_g64lc_perm(uint64_t state[25]);  /* generic64lc : full unroll, lane-complement (Goldmont default) */
+
+/* OpenSSL keccak1600, x86-64 scalar assembly (CRYPTOGAMS/Polyakov) — what OpenSSL
+ * runs on x86-64; no BMI/AVX, so it executes on Goldmont. Distinct hand-asm from
+ * SUPERCOP's x86_64_asm (Van Keer). Takes the 25-lane state (A[5][5]) pointer. */
+extern void keccak_openssl_perm(uint64_t state[25]);
 
 static const uint64_t KECCAK_RC[24] = {
     0x0000000000000001ULL,0x0000000000008082ULL,0x800000000000808aULL,0x8000000080008000ULL,
@@ -115,12 +142,20 @@ int main(void){
     /* interleaved timing: each rep times every SUPERCOP variant + microcode,
      * all close in time so they see the same frequency. min over reps. */
     typedef void (*permfn)(uint64_t*);
-    #define NCONT 4
-    struct { const char *name; const char *key; permfn fn; uint64_t min; uint64_t med; } C[NCONT] = {
-        {"x86_64_asm    ", "x86_64_asm",     keccak_x86_64_asm_perm,     UINT64_MAX, 0},
-        {"x86_64_shld   ", "x86_64_shld",    keccak_x86_64_shld_perm,    UINT64_MAX, 0},
-        {"opt64lcu24    ", "opt64lcu24",     keccak_opt64lcu24_perm,     UINT64_MAX, 0},
-        {"opt64lcu24shld", "opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX, 0},
+    #define NCONT 12
+    struct { const char *name; const char *type; const char *key; permfn fn; uint64_t min; uint64_t med; } C[NCONT] = {
+        {"x86_64_asm",     "asm",  "x86_64_asm",     keccak_x86_64_asm_perm,     UINT64_MAX, 0},
+        {"x86_64_shld",    "asm",  "x86_64_shld",    keccak_x86_64_shld_perm,    UINT64_MAX, 0},
+        {"openssl",        "asm",  "openssl",        keccak_openssl_perm,        UINT64_MAX, 0},
+        {"opt64lcu24",     "C64",  "opt64lcu24",     keccak_opt64lcu24_perm,     UINT64_MAX, 0},
+        {"opt64lcu24shld", "C64",  "opt64lcu24shld", keccak_opt64lcu24shld_perm, UINT64_MAX, 0},
+        {"opt64lcu6",      "C64",  "opt64lcu6",      keccak_opt64lcu6_perm,      UINT64_MAX, 0},
+        {"opt64u6",        "C64",  "opt64u6",        keccak_opt64u6_perm,        UINT64_MAX, 0},
+        {"sseu2",          "SSE2", "sseu2",          keccak_sseu2_perm,          UINT64_MAX, 0},
+        {"mmxu1",          "MMX",  "mmxu1",          keccak_mmxu1_perm,          UINT64_MAX, 0},
+        {"simple",         "ref",  "simple",         keccak_simple_perm,         UINT64_MAX, 0},
+        {"xkcp_g64",       "xkcp", "xkcp_g64",       keccak_xkcp_g64_perm,       UINT64_MAX, 0},
+        {"xkcp_g64lc",     "xkcp", "xkcp_g64lc",     keccak_xkcp_g64lc_perm,     UINT64_MAX, 0},
     };
     int NC = NCONT;
     uint64_t sc_state[25];
@@ -151,19 +186,37 @@ int main(void){
     uc_med=median_u64(ucval,REPS);
     uc_min=robust_min(ucval,REPS,uc_med);
 
-    uint64_t best=UINT64_MAX; const char *bestname="";
-    printf("\n--- SUPERCOP scalar Keccak variants (cyc/perm, same freq) ---\n");
-    for(int c=0;c<NC;c++){
-        uint64_t v=C[c].min/BATCH;
-        printf("  %s %5" PRIu64 "\n", C[c].name, v);
-        if(v<best){best=v; bestname=C[c].name;}
-    }
     uint64_t uc=uc_min/BATCH;
-    printf("  >> fastest SUPERCOP: %s %5" PRIu64 " cyc/perm\n", bestname, best);
-    printf("microcode (looped):    %5" PRIu64 " cyc/perm\n", uc);
-    printf("ratio ucode/FASTEST:   %.3fx  (%s)\n",
+
+    /* Assemble all rows (every SUPERCOP variant + microcode), sort ascending by
+     * min cyc/perm, and print one aligned table. */
+    struct row { const char *name; const char *type; uint64_t min, med; int uco; };
+    struct row R[NCONT+1];
+    for(int c=0;c<NC;c++) R[c]=(struct row){C[c].name, C[c].type, C[c].min/BATCH, C[c].med/BATCH, 0};
+    R[NC]=(struct row){"microcode", "ucode", uc, uc_med/BATCH, 1};
+    int NR=NC+1;
+    for(int i=1;i<NR;i++){ struct row k=R[i]; int j=i-1;
+        while(j>=0 && R[j].min>k.min){ R[j+1]=R[j]; j--; } R[j+1]=k; }
+
+    /* fastest non-microcode contender = the baseline we must beat */
+    uint64_t best=UINT64_MAX; const char *bestname=""; const char *besttype="";
+    for(int c=0;c<NC;c++){ uint64_t v=C[c].min/BATCH;
+        if(v<best){best=v; bestname=C[c].name; besttype=C[c].type;} }
+
+    printf("\n--- Keccak-f[1600] head-to-head: same process & frequency (cyc/perm) ---\n");
+    printf("  %-15s %-5s %8s %8s   %s\n", "contender","type","min","median","x vs ucode");
+    printf("  %-15s %-5s %8s %8s   %s\n", "---------------","-----","--------","--------","----------");
+    for(int i=0;i<NR;i++){
+        double x=(double)R[i].min/(double)uc;
+        printf("  %-15s %-5s %8" PRIu64 " %8" PRIu64 "   %6.2fx%s\n",
+               R[i].name, R[i].type, R[i].min, R[i].med, x,
+               R[i].uco ? "  <== microcode" : (R[i].min<uc ? "  (beats ucode!)" : ""));
+    }
+    printf("\n  fastest non-microcode:   %s (%s) = %" PRIu64 " cyc/perm\n", bestname, besttype, best);
+    printf("  microcode (looped):      %" PRIu64 " cyc/perm\n", uc);
+    printf("  ratio microcode/fastest: %.3fx  (%s)\n",
            (double)uc/(double)best,
-           uc<best ? "*** microcode WINS vs the fastest ***" : "microcode loses");
+           uc<best ? "*** microcode WINS vs the fastest runnable variant ***" : "microcode loses");
     printf("\n(all measured back-to-back at the same CPU frequency -> ratios valid)\n");
 
     /* Machine-readable block scraped by bench_keccak_matrix.sh. One line per

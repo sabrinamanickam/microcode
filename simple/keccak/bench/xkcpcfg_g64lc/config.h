@@ -1,0 +1,2 @@
+#define KeccakP1600_plain64_useLaneComplementing
+#define KeccakP1600_plain64_fullUnrolling
