@@ -41,6 +41,11 @@
 #define M  30          /* chain length (~ a fe_mul's MUL count) */
 #define K  3           /* multiplier / addend constant */
 
+/* Stringize K's *value* for inline asm. The '#' operator only stringizes a
+ * macro parameter, so an object-like macro needs this two-level dance. */
+#define STR_(x) #x
+#define STR(x)  STR_(x)
+
 static ucode_t patch[256];
 
 /* Dependent chain on R9 (acc). MUL_DSZ64_DRR(hi, src0, src1): src0 preserved,
@@ -88,9 +93,9 @@ static int build_mul_indep(void) {
 /* acc = R9 = 1, K = RDX = 3, independent pool regs = K. Fire, store RDI. */
 #define FIRE \
     "mov r9, 1\n\t"               \
-    "mov rdx, " #K "\n\t"         \
-    "mov r8, "  #K "\n\t"  "mov r10, " #K "\n\t" "mov r11, " #K "\n\t" \
-    "mov r12, " #K "\n\t"  "mov r14, " #K "\n\t" "mov r15, " #K "\n\t" \
+    "mov rdx, " STR(K) "\n\t"         \
+    "mov r8, "  STR(K) "\n\t"  "mov r10, " STR(K) "\n\t" "mov r11, " STR(K) "\n\t" \
+    "mov r12, " STR(K) "\n\t"  "mov r14, " STR(K) "\n\t" "mov r15, " STR(K) "\n\t" \
     ".byte 0x0f, 0x78, 0xca\n\t"  /* vmread rdx,rcx -> patched */ \
     "mov [rbp + 0], rdi\n\t"
 
@@ -107,7 +112,7 @@ static int build_mul_indep(void) {
 #define REPMULQ_16 REPMULQ_8 REPMULQ_8
 #define REPMULQ_30 REPMULQ_16 REPMULQ_8 REPMULQ_4 REPMULQ_2   /* == M=30 */
 #define FIRE_MULQ \
-    "mov rax, 1\n\t"  "mov rcx, " #K "\n\t" \
+    "mov rax, 1\n\t"  "mov rcx, " STR(K) "\n\t" \
     REPMULQ_30                              \
     "mov [rbp + 0], rax\n\t"
 

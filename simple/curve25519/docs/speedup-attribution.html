@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where the Speed-up Comes From — Attributing the Microcode Field-Arithmetic Advantage on Goldmont</title>
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f4f6f9; --panel2:#eaeef3; --ink:#1c2530; --muted:#5a6675;
+    --accent:#0969da; --accent2:#1a7f37; --warn:#9a6700; --bad:#cf222e; --good:#1a7f37;
+    --line:#d6dce3; --code:#f3f5f8;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:900px; margin:0 auto; padding:48px 32px 120px;}
+  h1{font-size:31px; line-height:1.22; margin:0 0 6px; color:#0d1117; letter-spacing:-.01em;}
+  h2{font-size:23px; margin:50px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); color:#0d1117;}
+  h3{font-size:18px; margin:30px 0 8px; color:var(--accent);}
+  p{margin:12px 0;}
+  a{color:var(--accent);}
+  code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace; font-size:13.5px;
+    background:var(--code); padding:1.5px 6px; border-radius:5px; color:#0a3069; border:1px solid var(--line);}
+  var{font-style:italic; font-family:Georgia,"Times New Roman",serif;}
+  .eq{display:block; text-align:center; font-size:19px; font-family:Georgia,"Times New Roman",serif;
+    margin:22px 0; color:#0d1117;}
+  ul,ol{margin:12px 0; padding-left:26px;} li{margin:7px 0;}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:14px;}
+  th,td{border:1px solid var(--line); padding:8px 11px; text-align:left; vertical-align:top;}
+  th{background:var(--panel2); color:#0d1117; font-weight:600;}
+  tr:nth-child(even) td{background:rgba(0,0,0,.025);}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums;}
+  .lead{font-size:18px; color:var(--muted); margin:14px 0 8px;}
+  .headline{background:linear-gradient(135deg,#eaf6ee,#e7f0fb); border:1px solid #bfe3cc; border-radius:14px;
+    padding:20px 24px; margin:24px 0;}
+  .headline .thesis{font-size:17px; color:#0d1117; margin:0;}
+  .callout{border-left:4px solid var(--accent); background:var(--panel2); border-radius:0 10px 10px 0; padding:12px 18px; margin:18px 0;}
+  .callout.warn{border-color:var(--warn);} .callout.good{border-color:var(--good);}
+  .callout .tag{font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; color:var(--accent); display:block; margin-bottom:4px;}
+  .callout.warn .tag{color:var(--warn);} .callout.good .tag{color:var(--good);}
+  .win{color:var(--good); font-weight:700;} .no{color:var(--bad); font-weight:700;}
+  .small{font-size:13px; color:var(--muted);}
+  .footer{margin-top:56px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Where the Speed-up Comes From</h1>
+<p class="lead">Attributing the microcode field-arithmetic advantage on Intel Goldmont — a dispatch-floor effect, not an arithmetic-structure effect.</p>
+
+<div class="headline">
+  <p class="thesis"><b>Thesis.</b> A microcode field operation on this microarchitecture behaves, to first order, as a <b>fixed-latency primitive</b>. Its invocation cost is governed by microcode-invocation overhead together with a critical path fixed by the field <em>representation</em>, and is essentially independent of the micro-op schedule. The same-representation advantage over a native software baseline is therefore the position of this invocation floor relative to the native routine's latency — not the cleverness of the field-arithmetic encoding.</p>
+</div>
+
+<p>This note documents the experiments that localize the performance difference between our microcode field arithmetic for X25519 and the fastest native scalar baselines on the Intel Goldmont N3350 (Celeron). It is written to be lifted, with minor notational alignment, into a paper's analysis section. Absolute cycle figures below should be re-collected with the core frequency pinned for a camera-ready; the <em>ratios</em> and conclusions are stable across frequency.</p>
+
+<!-- ============================================================ -->
+<h2>1. A performance model for microcode field operations</h2>
+
+<p>We model the latency of a single field-operation invocation, measured in a <em>dependency chain</em> (each invocation consuming its predecessor's output, as in the Montgomery ladder), as</p>
+
+<span class="eq"><var>T</var><sub>fire</sub> &nbsp;=&nbsp; <var>O</var><sub>inv</sub> &nbsp;+&nbsp; <var>L</var><sub>crit</sub></span>
+
+<p>where <var>O</var><sub>inv</sub> is the fixed overhead of entering and leaving the patched microcode sequencer — decoding the hooking x86 instruction, sequencer entry and exit, micro-op issue, architectural write-back, and the stall incurred by the dependent consumer — and <var>L</var><sub>crit</sub> is the critical-path latency of the field operation's micro-op dataflow graph. A <em>triad</em> denotes a microcode word of three micro-operations issued as a unit.</p>
+
+<p>On the Goldmont N3350 we measure <var>T</var><sub>fire</sub> ≈ 123–127 cycles for both <code>fe_mul</code> and <code>fe_sq</code>, despite their differing sizes (66 vs. 42 triads). The near-equality of two operations of substantially different micro-op count is the first indication that <var>T</var><sub>fire</sub> is governed by <var>O</var><sub>inv</sub> together with a critical path <var>L</var><sub>crit</sub> that is fixed by the field representation rather than by the instruction schedule.</p>
+
+<div class="callout warn"><span class="tag">Measurement regime</span>
+Independent-invocation microbenchmarks report lower per-operation figures (e.g. ≈ 58 cyc for <code>fe_mul</code>) because successive firings pipeline. The Montgomery ladder is <em>dependency-bound</em> and exposes the full <var>T</var><sub>fire</sub>; we report the dependency-bound figure as the operationally relevant cost and state the regime for every number.</div>
+
+<!-- ============================================================ -->
+<h2>2. Isolating the source of the advantage</h2>
+
+<p>The same-representation speed-up of the microcode field arithmetic over the native baseline is a geometric-mean factor of <b>1.069</b> over the unsaturated 5×51 <code>amd64-51</code> routines, measured by substituting <em>only</em> the field-operation backend into a fixed ladder, inversion, and conditional-swap framework (a same-ladder design that isolates the field-op contribution). To attribute this factor, we performed three controlled ablations, each varying a single structural property of the patch while holding the field mathematics, the calling wrapper, and the dependency-bound harness constant.</p>
+
+<table>
+<tr><th>Hypothesised lever</th><th>Controlled comparison</th><th class="num">Measurement</th><th>Verdict</th></tr>
+<tr>
+  <td><b>The multiplier</b></td>
+  <td>Isolated dependent chain of 64×64→128 microcode multiplies vs. the native <code>mul</code> instruction, same harness</td>
+  <td class="num">5.463 vs. 5.464<br>cyc / multiply</td>
+  <td><span class="no">not the lever</span> — same execution unit, same latency</td>
+</tr>
+<tr>
+  <td><b>Carry topology</b></td>
+  <td>Two patches of identical micro-op and triad count, differing only in carry-dependency depth: one serial accumulator (depth <var>T</var>) vs. four independent flag-domain lanes (depth <var>T</var>/4)</td>
+  <td class="num">61.33 vs. 60.83<br>cyc / firing</td>
+  <td><span class="no">not the lever</span> — depth reduction yields no measurable change</td>
+</tr>
+<tr>
+  <td><b>Schedule density</b></td>
+  <td>The production <code>fe_mul</code> micro-op stream re-emitted at reduced packing (3→2 ops/triad), a 50% increase in issue slots, computation provably unchanged</td>
+  <td class="num">127.54 → 132.53<br>cyc / op&nbsp;(+4%)</td>
+  <td><span class="no">not the lever</span> — ≈ 0.15 cyc per added triad</td>
+</tr>
+</table>
+
+<h3>2.1 The multiplier</h3>
+<p>A microcode patch issuing an isolated dependent chain of multiplies reproduces the latency of the native <code>mul</code> instruction to within measurement error (5.463 vs. 5.464 cycles per multiply, identical results). The microcode and native paths invoke the same hardware multiplier at the same latency; the multiply primitive contributes no advantage.</p>
+
+<h3>2.2 Carry-propagation topology</h3>
+<p>A pair of patches equal in micro-op and triad count, differing only in carry-dependency depth — a single serial accumulator versus four independent accumulator lanes carried in the per-register flag domain — exhibit no measurable latency difference. The flag-domain carry handling, although it removes the architectural-flag (<code>adc</code>) serialization inherent to a native carry chain, does not lower the invocation latency.</p>
+
+<h3>2.3 Schedule density</h3>
+<p>Exploiting the fully sequential intra-triad execution semantics of the target, we re-emit the production <code>fe_mul</code> micro-op stream at reduced packing, increasing the issue-slot count by 50% while leaving the computation provably unchanged (verified differentially against an independent reference over 2000 inputs). Latency rises by only ≈ 4%.</p>
+
+<table>
+<tr><th>Variant</th><th class="num">triads</th><th class="num">cyc / op (dep.)</th><th>note</th></tr>
+<tr><td>PACKED (production)</td><td class="num">66</td><td class="num">127.54</td><td>3 ops / triad</td></tr>
+<tr><td>PACKED-regen</td><td class="num">66</td><td class="num">126.21</td><td>generator sanity check — matches PACKED</td></tr>
+<tr><td>SERIAL-2</td><td class="num">99</td><td class="num">132.53</td><td>2 ops / triad</td></tr>
+<tr><td>SERIAL-1</td><td class="num">198</td><td class="num">—</td><td>1 op / triad — <b>exceeds 128-triad patch RAM</b></td></tr>
+</table>
+
+<p class="small">PACKED-regen reproduces PACKED in both result and timing, confirming the re-emission preserves semantics; the SERIAL-2 figure is therefore a like-for-like measurement of packing density alone.</p>
+
+<div class="callout"><span class="tag">Common result</span>
+Across all three ablations, ∂<var>T</var><sub>fire</sub> / ∂(schedule) ≈ 0. The microcode field operation is, to first order, a fixed-latency primitive: its cost is set by the invocation overhead <var>O</var><sub>inv</sub> and by a critical path <var>L</var><sub>crit</sub> determined by the limb-carry recurrence of the chosen radix, and is essentially independent of the micro-op schedule that realizes it.</div>
+
+<!-- ============================================================ -->
+<h2>3. Interpretation: a single mechanism for both directions</h2>
+
+<p>The schedule-level techniques that distinguish our patches from a naïve encoding — progressive accumulation, parallel carry lanes, dense triad packing — operate exclusively on micro-operations that lie <em>off</em> the latency-critical path (the partial-product multiply–accumulates), which the wide microcode register file already overlaps beneath the carry recurrence and the invocation overhead. They reduce the number of issue slots, and hence the patch size, but not <var>T</var><sub>fire</sub>.</p>
+
+<p>Consequently, the performance difference between the microcode implementation and a native software field operation reduces to the position of the invocation floor relative to the native routine's latency:</p>
+
+<ul>
+  <li><b>Versus amd64-51</b>, which uses the <em>same</em> unsaturated 5×51 representation and therefore the same arithmetic critical path <var>L</var><sub>crit</sub>, the advantage is precisely that the microcode invocation floor <var>O</var><sub>inv</sub> + <var>L</var><sub>crit</sub> undercuts the cost of the native routine — function-call overhead plus an architectural-flag-serialized carry chain on a multiplier- and ADX-constrained Atom core. The <span class="win">6.9% same-ladder speed-up is a dispatch-floor effect, not an arithmetic-structure effect.</span></li>
+  <li><b>Versus amd64-64</b>, which uses a <em>saturated</em> 4×64 representation, the native field operation has a shorter carry recurrence (fewer, wider limbs) and pays no invocation overhead; its latency lies <em>below</em> our floor, and the microcode implementation does not win. The only levers that could close this gap are reducing <var>O</var><sub>inv</sub> — not exposed to the patch author — or shortening <var>L</var><sub>crit</sub> by changing the representation, i.e. the same lever that separates amd64-64 from amd64-51.</li>
+</ul>
+
+<div class="callout good"><span class="tag">Packing is a capacity constraint, not an optimization</span>
+Triad packing, although immaterial to latency, remains necessary: the fully unpacked <code>fe_mul</code> requires 198 triads and does not fit the 128-triad patch-RAM bound. Packing buys the ability to <em>fit</em> the operation (and to co-resident <code>fe_mul</code> with <code>fe_sq</code> under the cap), not speed — an observation we believe is characteristic of programming in patch RAM more generally.</div>
+
+<!-- ============================================================ -->
+<h2>4. Measurement methodology</h2>
+<ul>
+  <li><b>Same-ladder isolation.</b> Field-op backends are substituted into one fixed framework (ladder, inversion, conditional swap), so a measured difference reflects the field operation alone.</li>
+  <li><b>Differential verification.</b> Every patch is checked bit-for-bit against an independent schoolbook reference and an optimized <code>__uint128_t</code> implementation over hand-chosen edge vectors, thousands of random inputs, and an iterated chain, before any timing.</li>
+  <li><b>Timing.</b> Minimum of many same-process, back-to-back repetitions; contenders are compared within one process so they share a frequency. On Goldmont <code>rdtsc</code> advances at a fixed reference rate distinct from the (turbo-variable) core clock, so absolute tick counts are interpreted only relative to a pinned baseline, and cross-implementation <em>ratios</em> are treated as the primary result.</li>
+  <li><b>Regime.</b> Dependency-bound (ladder-representative) figures are reported for end-to-end relevance; throughput figures, where given, are labelled as such.</li>
+</ul>
+
+<div class="footer">
+  <p>Target hardware: Intel Goldmont, Celeron N3350. Field: GF(2<sup>255</sup>−19). Baselines: fiat-crypto (per-operation), <code>amd64-51</code> (unsaturated 5×51) and <code>amd64-64</code> (saturated 4×64) from SUPERCOP. Companion document: <code>curve25519-microcode-rundown.html</code> (the patch construction and triad-level walkthrough).</p>
+</div>
+
+</div>
+</body>
+</html>
