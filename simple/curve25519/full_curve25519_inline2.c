@@ -882,8 +882,10 @@ static void x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t poin
     fe_tobytes(out, st.x2);
 }
 
+
 /* ════════════════════════════════════════════════════════════════════
- * Verification + bench
+ * Shared utilities (hex, timing) — used by both the benchmark build and
+ * the INLINE2_PROFILE build.
  * ════════════════════════════════════════════════════════════════════ */
 
 static void hex_to_bytes(const char *hex, uint8_t *out, int len) {
@@ -906,6 +908,27 @@ static int memcmp_hex(const uint8_t *data, const char *hex, int len) {
     return memcmp(data, expected, len);
 }
 
+static inline uint64_t rdtsc_start(void) {
+    uint32_t lo, hi;
+    asm volatile("cpuid\n\trdtsc" : "=a"(lo), "=d"(hi) :: "rbx", "rcx", "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline uint64_t rdtsc_end(void) {
+    uint32_t lo, hi;
+    asm volatile("rdtscp" : "=a"(lo), "=d"(hi) :: "rcx", "memory");
+    asm volatile("cpuid" ::: "rax", "rbx", "rcx", "rdx", "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+
+#define BENCH_REPS 100
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+#if defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)
+/* Minimal RFC test for the per-op profiler build (only x25519 inline). */
 static int test_rfc7748(void) {
     int pass = 0, fail = 0;
     uint8_t scalar[32], point[32], r[32];
@@ -958,29 +981,1205 @@ static int test_rfc7748(void) {
     printf("\n=== %d / %d passed ===\n\n", pass, pass + fail);
     return fail;
 }
+#endif /* INLINE2_PROFILE */
 
-static inline uint64_t rdtsc_start(void) {
-    uint32_t lo, hi;
-    asm volatile("cpuid\n\trdtsc" : "=a"(lo), "=d"(hi) :: "rbx", "rcx", "memory");
-    return ((uint64_t)hi << 32) | lo;
+#if !defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)
+/* ════════════════════════════════════════════════════════════════════
+ * CONTENDER BACKENDS — copied verbatim from full_curve25519.c so the
+ * inline binary now hosts every X25519 contender. full_curve25519.c is
+ * kept on disk but no longer benched (its measurement left the table).
+ * The shared 5×51 field helpers (cswap/frombytes/tobytes/reduce/clamp)
+ * and the microcode patches above are reused as-is.
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* ════════════════════════════════════════════════════════════════════
+ * NATIVE C FIELD OPERATIONS (compiled with -O3)
+ * ════════════════════════════════════════════════════════════════════ */
+
+static void fe_mul_native(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    uint64_t a0=a[0], a1=a[1], a2=a[2], a3=a[3], a4=a[4];
+    uint64_t b0=b[0], b1=b[1], b2=b[2], b3=b[3], b4=b[4];
+    uint64_t r1=19*b1, r2=19*b2, r3=19*b3, r4=19*b4;
+
+    __uint128_t c0 = (__uint128_t)a0*b0 + (__uint128_t)a1*r4
+                   + (__uint128_t)a2*r3 + (__uint128_t)a3*r2 + (__uint128_t)a4*r1;
+    __uint128_t c1 = (__uint128_t)a0*b1 + (__uint128_t)a1*b0
+                   + (__uint128_t)a2*r4 + (__uint128_t)a3*r3 + (__uint128_t)a4*r2;
+    __uint128_t c2 = (__uint128_t)a0*b2 + (__uint128_t)a1*b1
+                   + (__uint128_t)a2*b0 + (__uint128_t)a3*r4 + (__uint128_t)a4*r3;
+    __uint128_t c3 = (__uint128_t)a0*b3 + (__uint128_t)a1*b2
+                   + (__uint128_t)a2*b1 + (__uint128_t)a3*b0 + (__uint128_t)a4*r4;
+    __uint128_t c4 = (__uint128_t)a0*b4 + (__uint128_t)a1*b3
+                   + (__uint128_t)a2*b2 + (__uint128_t)a3*b1 + (__uint128_t)a4*b0;
+
+    uint64_t carry;
+    carry = (uint64_t)(c0>>51); out[0] = (uint64_t)c0 & MASK51;
+    c1 += carry;
+    carry = (uint64_t)(c1>>51); out[1] = (uint64_t)c1 & MASK51;
+    c2 += carry;
+    carry = (uint64_t)(c2>>51); out[2] = (uint64_t)c2 & MASK51;
+    c3 += carry;
+    carry = (uint64_t)(c3>>51); out[3] = (uint64_t)c3 & MASK51;
+    c4 += carry;
+    carry = (uint64_t)(c4>>51); out[4] = (uint64_t)c4 & MASK51;
+    out[0] += carry * 19;
+    carry = out[0] >> 51; out[0] &= MASK51;
+    out[1] += carry;
 }
-static inline uint64_t rdtsc_end(void) {
-    uint32_t lo, hi;
-    asm volatile("rdtscp" : "=a"(lo), "=d"(hi) :: "rcx", "memory");
-    asm volatile("cpuid" ::: "rax", "rbx", "rcx", "rdx", "memory");
-    return ((uint64_t)hi << 32) | lo;
+
+static void fe_sq_native(const uint64_t *a, uint64_t *out) {
+    uint64_t a0=a[0], a1=a[1], a2=a[2], a3=a[3], a4=a[4];
+    uint64_t d0=2*a0, d1=2*a1, d2=2*a2, d3=2*a3;
+    uint64_t r3=19*a3, r4=19*a4;
+
+    __uint128_t c0 = (__uint128_t)a0*a0 + (__uint128_t)d1*r4 + (__uint128_t)d2*r3;
+    __uint128_t c1 = (__uint128_t)d0*a1 + (__uint128_t)r3*a3 + (__uint128_t)d2*r4;
+    __uint128_t c2 = (__uint128_t)d0*a2 + (__uint128_t)a1*a1 + (__uint128_t)d3*r4;
+    __uint128_t c3 = (__uint128_t)d0*a3 + (__uint128_t)d1*a2 + (__uint128_t)r4*a4;
+    __uint128_t c4 = (__uint128_t)d0*a4 + (__uint128_t)d1*a3 + (__uint128_t)a2*a2;
+
+    uint64_t carry;
+    carry = (uint64_t)(c0>>51); out[0] = (uint64_t)c0 & MASK51;
+    c1 += carry;
+    carry = (uint64_t)(c1>>51); out[1] = (uint64_t)c1 & MASK51;
+    c2 += carry;
+    carry = (uint64_t)(c2>>51); out[2] = (uint64_t)c2 & MASK51;
+    c3 += carry;
+    carry = (uint64_t)(c3>>51); out[3] = (uint64_t)c3 & MASK51;
+    c4 += carry;
+    carry = (uint64_t)(c4>>51); out[4] = (uint64_t)c4 & MASK51;
+    out[0] += carry * 19;
+    carry = out[0] >> 51; out[0] &= MASK51;
+    out[1] += carry;
 }
 
-#define BENCH_REPS 100
+/* ════════════════════════════════════════════════════════════════════
+ * MICROCODE C-WRAPPER FIELD OPS (the non-inline "ours/ucode" backend)
+ * ════════════════════════════════════════════════════════════════════ */
 
-static int cmp_u64(const void *a, const void *b) {
-    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
+void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    /* Pin args to their natural SysV-ABI registers — GCC won't emit
+     * extra reg-reg moves to relocate them. "+r" tells GCC the regs are
+     * both input and clobbered (no need to also list in clobber set). */
+    register const uint64_t *_a   asm("rdi") = a;
+    register const uint64_t *_b   asm("rsi") = b;
+    register       uint64_t *_out asm("rdx") = out;
+
+    asm volatile(
+        /* Stash out pointer in callee-saved rbp; survives the patch.
+         * Avoids the old inner `push r15 / pop rcx` pair. */
+        "mov rbp, rdx\n\t"
+
+        /* Load b[0..4] from rsi (rsi unchanged through these). */
+        "mov r15, [rsi]\n\t"
+        "mov r13, [rsi + 8]\n\t"
+        "mov r9,  [rsi + 16]\n\t"
+        "mov r10, [rsi + 24]\n\t"
+        "mov rbx, [rsi + 32]\n\t"
+
+        /* Load a[1..4] then a[0] last (a[0] destroys rdi's pointer). */
+        "mov rsi, [rdi + 8]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r14, [rdi + 32]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        /* Clear accumulators */
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* Fire fe_mul microcode via vmwrite */
+        "vmwrite rcx, rdx\n\t"
+
+        /* Store 5 result limbs via rbp */
+        "mov [rbp],      r15\n\t"
+        "mov [rbp + 8],  r13\n\t"
+        "mov [rbp + 16], r9\n\t"
+        "mov [rbp + 24], r10\n\t"
+        "mov [rbp + 32], rax\n\t"
+
+        : "+r"(_a), "+r"(_b), "+r"(_out)
+        :
+        : "rax", "rbx", "rcx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
 }
 
-#ifndef INLINE2_PROFILE
+void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
+    register const uint64_t *_a   asm("rdi") = a;
+    register       uint64_t *_out asm("rsi") = out;
+
+    asm volatile(
+        /* Stash out pointer in callee-saved rbp; survives the patch. */
+        "mov rbp, rsi\n\t"
+
+        /* Load a[1..4] then a[0] last (a[0] destroys rdi's pointer). */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov rsi, [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        /* Precompute doubled (2*a_i) and reduced (19*a_i) operands */
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+
+        /* Clear accumulators */
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* Fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        /* Store 5 result limbs via rbp */
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  r9\n\t"
+        "mov [rbp + 16], r10\n\t"
+        "mov [rbp + 24], rbx\n\t"
+        "mov [rbp + 32], rax\n\t"
+
+        : "+r"(_a), "+r"(_out)
+        :
+        : "rax", "rbx", "rcx", "rdx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+}
+
+/* fe_sq_ucode_n: square `a` `n` times in place (out = a^(2^n)).
+ *
+ * Keeps the running result in arch registers across iterations to
+ * skip the memory store/load and the precompute-from-memory cost each
+ * iteration. Saves ~10 cyc/iter vs n separate fe_sq_ucode calls.
+ *
+ * After each patch fire, the output lives in (rdi, r9, r10, rbx, rax)
+ * = (h0..h4). The next iter wants inputs in (rdi, rsi, r12, r11, r14).
+ * Only rdi is already in place; 4 reg-moves stage the next iter.
+ *
+ * n must be >= 1. */
+static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
+    register const uint64_t *_a   asm("rdi") = a;
+    register       uint64_t *_out asm("rsi") = out;
+    register int             _n   asm("edx") = n;
+
+    asm volatile(
+        /* Stash out ptr and counter on stack so they survive the
+         * patch's clobbering of every GP register. */
+        "sub rsp, 16\n\t"
+        "mov [rsp],   rsi\n\t"     /* save out ptr */
+        "mov [rsp+8], rdx\n\t"     /* save loop counter */
+
+        /* Load a[1..4] then a[0] (a[0] destroys rdi). */
+        "mov r14, [rdi + 32]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov rsi, [rdi + 8]\n\t"
+        "mov rdi, [rdi]\n\t"
+
+        "Lsqn%=:\n\t"
+        /* Precompute 2*a_i and 19*a_i for the patch */
+        "lea r15, [rdi + rdi]\n\t"
+        "lea r13, [rsi + rsi]\n\t"
+        "lea r9,  [r12 + r12]\n\t"
+        "lea r10, [r11 + r11]\n\t"
+        "imul rbx, r14, 19\n\t"
+        "imul rdx, r11, 19\n\t"
+        "xor eax, eax\n\t"
+        "xor r8d, r8d\n\t"
+
+        /* Fire fe_sq (vmread, 0f 78 ca) */
+        ".byte 0x0f, 0x78, 0xca\n\t"
+
+        /* After patch: rdi=h0, r9=h1, r10=h2, rbx=h3, rax=h4 */
+        /* Stage h[1..4] into the input regs for next iter.
+         * (rdi already has h0; need rsi=h1, r12=h2, r11=h3, r14=h4) */
+        "mov rsi, r9\n\t"
+        "mov r12, r10\n\t"
+        "mov r11, rbx\n\t"
+        "mov r14, rax\n\t"
+
+        "dec qword ptr [rsp+8]\n\t"
+        "jnz Lsqn%=\n\t"
+
+        /* Final result is now in rdi/rsi/r12/r11/r14 (h0..h4). */
+        "mov rbp, [rsp]\n\t"
+        "mov [rbp],      rdi\n\t"
+        "mov [rbp + 8],  rsi\n\t"
+        "mov [rbp + 16], r12\n\t"
+        "mov [rbp + 24], r11\n\t"
+        "mov [rbp + 32], r14\n\t"
+
+        "add rsp, 16\n\t"
+
+        : "+r"(_a), "+r"(_out), "+r"(_n)
+        :
+        : "rax", "rbx", "rcx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+}
+
+/* fe_add_sq_ucode: fused (x + y) → A_out, then A_out² → AA_out.
+ *
+ * EXPERIMENTAL: measured break-even with separate fe_add + fe_sq_ucode on
+ * Goldmont (2026-05-19). The memory roundtrip between the add and the
+ * patch fire is already hidden by OoO + store-to-load forwarding while
+ * the patch's ~37-cyc microcode block executes, so eliminating it via
+ * a fused wrapper yields no measurable gain. Kept here as documentation
+ * of the failed hypothesis; not used in the ladder.
+ *
+ * Register staging mirrors fe_sq_ucode after the add:
+ *   A[0]=RDI, A[1]=RSI, A[2]=R12, A[3]=R11, A[4]=R14
+ * Output of patch (h0..h4) goes through (RDI, R9, R10, RBX, RAX), stored to AA_out. */
+
+/* ════════════════════════════════════════════════════════════════════
+ * FIAT-CRYPTO FIELD OPERATIONS (SUPERCOP-style reference baseline)
+ *
+ * Both files share identical helper typedefs; C11 allows redundant
+ * typedef declarations of the same type, so including both compiles
+ * cleanly under -std=gnu11+. We only consume the two carry_* functions.
+ * ════════════════════════════════════════════════════════════════════ */
+
+#include "../../curvesC/curve25519_mul.c"
+#include "../../curvesC/curve25519_square.c"
+
+static inline void fe_mul_fiat(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    fiat_curve25519_carry_mul(out, a, b);
+}
+
+static inline void fe_sq_fiat(const uint64_t *a, uint64_t *out) {
+    fiat_curve25519_carry_square(out, a);
+}
+
+/* CryptOpt-tuned x86-64 asm (assembled from cryptopt_{mul,sq}.asm). Same
+ * fiat-style signature as the C version; symbols renamed at assemble
+ * time to avoid clashing. */
+extern void cryptopt_carry_mul(uint64_t out[5], const uint64_t a[5], const uint64_t b[5]);
+extern void cryptopt_carry_square(uint64_t out[5], const uint64_t a[5]);
+
+static inline void fe_mul_cryptopt(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    cryptopt_carry_mul(out, a, b);
+}
+
+static inline void fe_sq_cryptopt(const uint64_t *a, uint64_t *out) {
+    cryptopt_carry_square(out, a);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP donna_c64 (vendored from supercop-20260330)
+ *
+ * The entry point `crypto_scalarmult` in donna_c64/smult.c is renamed to
+ * x25519_donna_c64 via macro substitution before #include. The static
+ * helper functions (fmul, fexpand, crecip, ...) are self-contained and
+ * do not clash with our identifiers. The `crypto_scalarmult.h` stub at
+ * simple/include/ satisfies smult.c's only external include.
+ * ════════════════════════════════════════════════════════════════════ */
+
+#define crypto_scalarmult x25519_donna_c64
+#include "../supercop-20260330/crypto_scalarmult/curve25519/donna_c64/smult.c"
+#undef crypto_scalarmult
+
+/* Forward-declare with our public name for use below. */
+extern int x25519_donna_c64(unsigned char *mypublic,
+                            const unsigned char *secret,
+                            const unsigned char *basepoint);
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP amd64-51 (hand-tuned x86-64 assembly, Bernstein/Schwabe 2011)
+ *
+ * Compiled as separate .o files by the Makefile from the SUPERCOP tree.
+ * The entry point `crypto_scalarmult` in mont25519.c is renamed to
+ * x25519_amd64_51 via -include include/amd64_51_namespace.h. The static
+ * library libcryptoint.a provides supercop_int64_optblocker.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_51(unsigned char *out,
+                           const unsigned char *scalar,
+                           const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * SUPERCOP amd64-64 (4x64-bit saturated, Bernstein/Schwabe)
+ *
+ * Same author family as amd64-51 but uses radix 2^64 (saturated 4-limb
+ * representation). lib25519's autotuner selects this on Goldmont — its
+ * Goldmont measurement of ~280k cycles maps to this implementation,
+ * not amd64-51.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_64(unsigned char *out,
+                           const unsigned char *scalar,
+                           const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * Hybrid: amd64-51's driver/invert/pack + microcode field ops.
+ *
+ * Same SUPERCOP framework (mont25519/mladder/invert/pack/unpack/freeze/
+ * cswap) but with ladderstep + fe25519_mul + fe25519_square replaced by
+ * C versions that call our microcode wrappers. Isolates field-op cost
+ * from the surrounding ladder structure — see benchmark_review.md issue
+ * #1. Sources in simple/amd64-51-ucode/.
+ * ════════════════════════════════════════════════════════════════════ */
+
+extern int x25519_amd64_51_ucode(unsigned char *out,
+                                 const unsigned char *scalar,
+                                 const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * COMMON FIELD OPERATIONS (pure C, used by all backends)
+ * ════════════════════════════════════════════════════════════════════ */
+
+static inline void fe_add(fe out, const fe a, const fe b) {
+    out[0] = a[0] + b[0];
+    out[1] = a[1] + b[1];
+    out[2] = a[2] + b[2];
+    out[3] = a[3] + b[3];
+    out[4] = a[4] + b[4];
+}
+
+/*
+ * fe_sub: out = a - b, with bias to keep limbs positive.
+ * We add 2*p to a before subtracting b.
+ * 2*p = 2*(2^255 - 19) in 5-limb representation:
+ *   limb 0: 2*(2^51 - 19) = 0xFFFFFFFFFFFFDA
+ *   limbs 1-4: 2*(2^51 - 1) = 0xFFFFFFFFFFFFFE = 2*MASK51
+ */
+static inline void fe_sub(fe out, const fe a, const fe b) {
+    out[0] = (a[0] + 0xFFFFFFFFFFFDAULL) - b[0];
+    out[1] = (a[1] + 0xFFFFFFFFFFFFEULL) - b[1];
+    out[2] = (a[2] + 0xFFFFFFFFFFFFEULL) - b[2];
+    out[3] = (a[3] + 0xFFFFFFFFFFFFEULL) - b[3];
+    out[4] = (a[4] + 0xFFFFFFFFFFFFEULL) - b[4];
+}
+
+/* fe_mul121665: out = a * 121665 */
+static void fe_mul121665(fe out, const fe a) {
+    __uint128_t c;
+    c = (__uint128_t)a[0] * 121665;
+    out[0] = (uint64_t)c & MASK51; c >>= 51;
+    c += (__uint128_t)a[1] * 121665;
+    out[1] = (uint64_t)c & MASK51; c >>= 51;
+    c += (__uint128_t)a[2] * 121665;
+    out[2] = (uint64_t)c & MASK51; c >>= 51;
+    c += (__uint128_t)a[3] * 121665;
+    out[3] = (uint64_t)c & MASK51; c >>= 51;
+    c += (__uint128_t)a[4] * 121665;
+    out[4] = (uint64_t)c & MASK51; c >>= 51;
+    out[0] += (uint64_t)c * 19;
+    uint64_t carry = out[0] >> 51;
+    out[0] &= MASK51;
+    out[1] += carry;
+}
+
+/* constant-time conditional swap — scalar */
+
+static inline void fe_copy(fe out, const fe a) {
+    memcpy(out, a, 5 * sizeof(uint64_t));
+}
+
+/* fe_reduce: full reduction mod p = 2^255 - 19 */
+
+static void fe_invert_native(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_native(z, z2);
+    fe_sq_native(z2, t);
+    fe_sq_native(t, t);
+    fe_mul_native(t, z, z9);
+    fe_mul_native(z9, z2, z11);
+    fe_sq_native(z11, t);
+    fe_mul_native(t, z9, t0);
+
+    fe_sq_native(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_native(t1, t1);
+    fe_mul_native(t1, t0, t1);
+
+    fe_sq_native(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_native(t2, t2);
+    fe_mul_native(t2, t1, t2);
+
+    fe_sq_native(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_native(t3, t3);
+    fe_mul_native(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_native(t3, t3);
+    fe_mul_native(t3, t1, t1);
+
+    fe_sq_native(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_native(t2, t2);
+    fe_mul_native(t2, t1, t2);
+
+    fe_sq_native(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_native(t3, t3);
+    fe_mul_native(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_native(t3, t3);
+    fe_mul_native(t3, t1, t1);
+
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_sq_native(t1, t1);
+    fe_mul_native(t1, z11, out);
+}
+
+static void fe_invert_ucode(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+
+    fe_sq_ucode(z, z2);
+    fe_sq_ucode(z2, t);
+    fe_sq_ucode(t, t);
+    fe_mul_ucode(z, t, z9);
+    fe_mul_ucode(z9, z2, z11);
+    fe_sq_ucode(z11, t);
+    fe_mul_ucode(z9, t, t0);
+
+    fe_sq_ucode_n(t1, t0,   5);    /* 5 squarings */
+    fe_mul_ucode(t0, t1, t1);
+
+    fe_sq_ucode_n(t2, t1,  10);    /* 10 */
+    fe_mul_ucode(t1, t2, t2);
+
+    fe_sq_ucode_n(t3, t2,  20);    /* 20 */
+    fe_mul_ucode(t2, t3, t3);
+
+    fe_sq_ucode_n(t3, t3,  10);    /* 10 */
+    fe_mul_ucode(t1, t3, t1);
+
+    fe_sq_ucode_n(t2, t1,  50);    /* 50 */
+    fe_mul_ucode(t1, t2, t2);
+
+    fe_sq_ucode_n(t3, t2, 100);    /* 100 */
+    fe_mul_ucode(t2, t3, t3);
+
+    fe_sq_ucode_n(t3, t3,  50);    /* 50 */
+    fe_mul_ucode(t1, t3, t1);
+
+    fe_sq_ucode_n(t1, t1,   5);    /* final 5 */
+    fe_mul_ucode(z11, t1, out);
+}
+
+static void fe_invert_fiat(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_fiat(z, z2);
+    fe_sq_fiat(z2, t);
+    fe_sq_fiat(t, t);
+    fe_mul_fiat(t, z, z9);
+    fe_mul_fiat(z9, z2, z11);
+    fe_sq_fiat(z11, t);
+    fe_mul_fiat(t, z9, t0);
+
+    fe_sq_fiat(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_fiat(t1, t1);
+    fe_mul_fiat(t1, t0, t1);
+
+    fe_sq_fiat(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_fiat(t2, t2);
+    fe_mul_fiat(t2, t1, t2);
+
+    fe_sq_fiat(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t1, t1);
+
+    fe_sq_fiat(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_fiat(t2, t2);
+    fe_mul_fiat(t2, t1, t2);
+
+    fe_sq_fiat(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_fiat(t3, t3);
+    fe_mul_fiat(t3, t1, t1);
+
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_sq_fiat(t1, t1);
+    fe_mul_fiat(t1, z11, out);
+}
+
+static void fe_invert_cryptopt(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_cryptopt(z, z2);
+    fe_sq_cryptopt(z2, t);
+    fe_sq_cryptopt(t, t);
+    fe_mul_cryptopt(t, z, z9);
+    fe_mul_cryptopt(z9, z2, z11);
+    fe_sq_cryptopt(z11, t);
+    fe_mul_cryptopt(t, z9, t0);
+
+    fe_sq_cryptopt(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_cryptopt(t1, t1);
+    fe_mul_cryptopt(t1, t0, t1);
+
+    fe_sq_cryptopt(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_cryptopt(t2, t2);
+    fe_mul_cryptopt(t2, t1, t2);
+
+    fe_sq_cryptopt(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t1, t1);
+
+    fe_sq_cryptopt(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_cryptopt(t2, t2);
+    fe_mul_cryptopt(t2, t1, t2);
+
+    fe_sq_cryptopt(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_cryptopt(t3, t3);
+    fe_mul_cryptopt(t3, t1, t1);
+
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_sq_cryptopt(t1, t1);
+    fe_mul_cryptopt(t1, z11, out);
+}
+
+static void x25519_native(uint8_t out[32], const uint8_t scalar[32],
+                           const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_native(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_native(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_native(D, A, DA);
+        fe_mul_native(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_native(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_native(t0, z3);
+        fe_mul_native(x1, z3, z3);
+
+        fe_mul_native(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_native(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_native(z2, z2);
+    fe_mul_native(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+static void x25519_ucode(uint8_t out[32], const uint8_t scalar[32],
+                          const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_ucode(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_ucode(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_ucode(D, A, DA);
+        fe_mul_ucode(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_ucode(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_ucode(t0, z3);
+        fe_mul_ucode(x1, z3, z3);
+
+        fe_mul_ucode(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_ucode(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_ucode(z2, z2);
+    fe_mul_ucode(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+static void x25519_fiat(uint8_t out[32], const uint8_t scalar[32],
+                        const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_fiat(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_fiat(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_fiat(D, A, DA);
+        fe_mul_fiat(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_fiat(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_fiat(t0, z3);
+        fe_mul_fiat(x1, z3, z3);
+
+        fe_mul_fiat(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_fiat(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_fiat(z2, z2);
+    fe_mul_fiat(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+static void x25519_cryptopt(uint8_t out[32], const uint8_t scalar[32],
+                            const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_cryptopt(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_cryptopt(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_cryptopt(D, A, DA);
+        fe_mul_cryptopt(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_cryptopt(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_cryptopt(t0, z3);
+        fe_mul_cryptopt(x1, z3, z3);
+
+        fe_mul_cryptopt(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_cryptopt(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_cryptopt(z2, z2);
+    fe_mul_cryptopt(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * amd64-51/ucode ladderstep — REWRITTEN in the inline-asm style.
+ *
+ * The amd64-51-ucode hybrid (SUPERCOP amd64-51 driver/invert/pack +
+ * microcode field ops) used a C ladderstep with memory-roundtrip field
+ * ops. Here we replace it with the register-chained inline-asm ladder
+ * (ladder_step, above) so amd64-51/ucode and ours/ucode differ only in
+ * the surrounding framework, not the ladder coding style.
+ *
+ * mont25519.o calls this via the amd64-51-ucode namespace symbol; the C
+ * ladderstep.o is excluded from this binary's link (see Makefile). work
+ * is fe25519[5] = {x1,x2,z2,x3,z3}; ladder_step keeps x1 read-only and
+ * writes x2,z2,x3,z3, so we copy those four back. The per-step copy is
+ * hidden by store-to-load forwarding (≈45 movs vs 15 microcode firings).
+ * ════════════════════════════════════════════════════════════════════ */
+typedef struct { unsigned long long v[5]; } a51u_fe25519;
+
+void supercop_amd64_51_ucode_ladderstep(a51u_fe25519 *work) {
+    ladder_state_t st;
+    memcpy(st.x1, work[0].v, 5 * sizeof(uint64_t));
+    memcpy(st.x2, work[1].v, 5 * sizeof(uint64_t));
+    memcpy(st.z2, work[2].v, 5 * sizeof(uint64_t));
+    memcpy(st.x3, work[3].v, 5 * sizeof(uint64_t));
+    memcpy(st.z3, work[4].v, 5 * sizeof(uint64_t));
+
+    ladder_step(&st);
+
+    memcpy(work[1].v, st.x2, 5 * sizeof(uint64_t));
+    memcpy(work[2].v, st.z2, 5 * sizeof(uint64_t));
+    memcpy(work[3].v, st.x3, 5 * sizeof(uint64_t));
+    memcpy(work[4].v, st.z3, 5 * sizeof(uint64_t));
+}
+
+static void bench_stats(uint64_t *samples, int n, uint64_t *out_min, uint64_t *out_median) {
+    qsort(samples, n, sizeof(uint64_t), cmp_u64);
+    *out_min    = samples[0];
+    *out_median = samples[n / 2];
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * RFC 7748 TEST VECTORS — verifies every contender against the spec.
+ * ════════════════════════════════════════════════════════════════════ */
+
+static int test_rfc7748(void) {
+    int pass = 0, fail = 0;
+    uint8_t scalar[32], point[32], result_native[32], result_ucode[32];
+
+    printf("=== RFC 7748 Test Vectors ===\n\n");
+
+    /* --- Test vector 1 --- */
+    printf("--- Test vector 1 ---\n");
+    hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+                 scalar, 32);
+    hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+                 point, 32);
+    x25519_native(result_native, scalar, point);
+    x25519_ucode(result_ucode, scalar, point);
+
+    print_hex("native", result_native, 32);
+    print_hex("ucode ", result_ucode, 32);
+
+    if (memcmp_hex(result_native,
+                   "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+                   32) == 0) {
+        printf("  native: PASS\n"); pass++;
+    } else {
+        printf("  native: FAIL\n"); fail++;
+    }
+    if (memcmp_hex(result_ucode,
+                   "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+                   32) == 0) {
+        printf("  ucode:  PASS\n"); pass++;
+    } else {
+        printf("  ucode:  FAIL\n"); fail++;
+    }
+
+    /* --- Test vector 2 --- */
+    printf("\n--- Test vector 2 ---\n");
+    hex_to_bytes("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+                 scalar, 32);
+    hex_to_bytes("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+                 point, 32);
+    x25519_native(result_native, scalar, point);
+    x25519_ucode(result_ucode, scalar, point);
+
+    print_hex("native", result_native, 32);
+    print_hex("ucode ", result_ucode, 32);
+
+    if (memcmp_hex(result_native,
+                   "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
+                   32) == 0) {
+        printf("  native: PASS\n"); pass++;
+    } else {
+        printf("  native: FAIL\n"); fail++;
+    }
+    if (memcmp_hex(result_ucode,
+                   "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
+                   32) == 0) {
+        printf("  ucode:  PASS\n"); pass++;
+    } else {
+        printf("  ucode:  FAIL\n"); fail++;
+    }
+
+    /* --- Iterated test: 1 iteration --- */
+    printf("\n--- Iterated test (1 iteration) ---\n");
+    {
+        uint8_t k[32] = {0}, u[32] = {0}, r[32];
+        k[0] = 9;
+        u[0] = 9;
+
+        x25519_native(r, k, u);
+
+        print_hex("native after 1", r, 32);
+        if (memcmp_hex(r,
+                       "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079",
+                       32) == 0) {
+            printf("  native: PASS\n"); pass++;
+        } else {
+            printf("  native: FAIL\n"); fail++;
+        }
+
+        x25519_ucode(r, k, u);
+        print_hex("ucode  after 1", r, 32);
+        if (memcmp_hex(r,
+                       "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079",
+                       32) == 0) {
+            printf("  ucode:  PASS\n"); pass++;
+        } else {
+            printf("  ucode:  FAIL\n"); fail++;
+        }
+    }
+
+    /* --- Iterated test: 1000 iterations --- */
+    printf("\n--- Iterated test (1000 iterations) ---\n");
+    {
+        uint8_t k[32] = {0}, u[32] = {0}, r[32];
+        k[0] = 9;
+        u[0] = 9;
+
+        uint8_t kn[32], un[32];
+        memcpy(kn, k, 32);
+        memcpy(un, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_native(r, kn, un);
+            memcpy(un, kn, 32);
+            memcpy(kn, r, 32);
+        }
+        print_hex("native after 1000", kn, 32);
+        if (memcmp_hex(kn,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  native: PASS\n"); pass++;
+        } else {
+            printf("  native: FAIL\n"); fail++;
+        }
+
+        uint8_t ku[32], uu[32];
+        memcpy(ku, k, 32);
+        memcpy(uu, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_ucode(r, ku, uu);
+            memcpy(uu, ku, 32);
+            memcpy(ku, r, 32);
+        }
+        print_hex("ucode  after 1000", ku, 32);
+        if (memcmp_hex(ku,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  ucode:  PASS\n"); pass++;
+        } else {
+            printf("  ucode:  FAIL\n"); fail++;
+        }
+
+        uint8_t kf[32], uf[32];
+        memcpy(kf, k, 32);
+        memcpy(uf, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_fiat(r, kf, uf);
+            memcpy(uf, kf, 32);
+            memcpy(kf, r, 32);
+        }
+        print_hex("fiat   after 1000", kf, 32);
+        if (memcmp_hex(kf,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  fiat:   PASS\n"); pass++;
+        } else {
+            printf("  fiat:   FAIL\n"); fail++;
+        }
+
+        uint8_t kd[32], ud[32];
+        memcpy(kd, k, 32);
+        memcpy(ud, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_donna_c64(r, kd, ud);
+            memcpy(ud, kd, 32);
+            memcpy(kd, r, 32);
+        }
+        print_hex("donna  after 1000", kd, 32);
+        if (memcmp_hex(kd,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  donna:  PASS\n"); pass++;
+        } else {
+            printf("  donna:  FAIL\n"); fail++;
+        }
+
+        uint8_t ka[32], ua[32];
+        memcpy(ka, k, 32);
+        memcpy(ua, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51(r, ka, ua);
+            memcpy(ua, ka, 32);
+            memcpy(ka, r, 32);
+        }
+        print_hex("amd51  after 1000", ka, 32);
+        if (memcmp_hex(ka,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  amd51:  PASS\n"); pass++;
+        } else {
+            printf("  amd51:  FAIL\n"); fail++;
+        }
+
+        uint8_t kau[32], uau[32];
+        memcpy(kau, k, 32);
+        memcpy(uau, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51_ucode(r, kau, uau);
+            memcpy(uau, kau, 32);
+            memcpy(kau, r, 32);
+        }
+        print_hex("a51u   after 1000", kau, 32);
+        if (memcmp_hex(kau,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  a51u:   PASS\n"); pass++;
+        } else {
+            printf("  a51u:   FAIL\n"); fail++;
+        }
+
+        uint8_t ka4[32], ua4[32];
+        memcpy(ka4, k, 32);
+        memcpy(ua4, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_64(r, ka4, ua4);
+            memcpy(ua4, ka4, 32);
+            memcpy(ka4, r, 32);
+        }
+        print_hex("amd64  after 1000", ka4, 32);
+        if (memcmp_hex(ka4,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  amd64:  PASS\n"); pass++;
+        } else {
+            printf("  amd64:  FAIL\n"); fail++;
+        }
+
+        uint8_t kc[32], uc[32];
+        memcpy(kc, k, 32);
+        memcpy(uc, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_cryptopt(r, kc, uc);
+            memcpy(uc, kc, 32);
+            memcpy(kc, r, 32);
+        }
+        print_hex("crypto after 1000", kc, 32);
+        if (memcmp_hex(kc,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  crypto: PASS\n"); pass++;
+        } else {
+            printf("  crypto: FAIL\n"); fail++;
+        }
+
+        /* The canonical inline-asm 5×51 ladder (ours/ucode in the table;
+         * labeled "inline" here to distinguish from the legacy C-wrapper
+         * "ucode" cross-check above). */
+        uint8_t kil[32], uil[32];
+        memcpy(kil, k, 32);
+        memcpy(uil, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519(r, kil, uil);
+            memcpy(uil, kil, 32);
+            memcpy(kil, r, 32);
+        }
+        print_hex("inline after 1000", kil, 32);
+        if (memcmp_hex(kil,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  inline: PASS\n"); pass++;
+        } else {
+            printf("  inline: FAIL\n"); fail++;
+        }
+
+        if (memcmp(kn, ku, 32) == 0) {
+            printf("  native==ucode: PASS\n"); pass++;
+        } else {
+            printf("  native==ucode: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kf, 32) == 0) {
+            printf("  native==fiat:  PASS\n"); pass++;
+        } else {
+            printf("  native==fiat:  FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kd, 32) == 0) {
+            printf("  native==donna: PASS\n"); pass++;
+        } else {
+            printf("  native==donna: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, ka, 32) == 0) {
+            printf("  native==amd51: PASS\n"); pass++;
+        } else {
+            printf("  native==amd51: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kau, 32) == 0) {
+            printf("  native==a51u:  PASS\n"); pass++;
+        } else {
+            printf("  native==a51u:  FAIL\n"); fail++;
+        }
+        if (memcmp(kn, ka4, 32) == 0) {
+            printf("  native==amd64: PASS\n"); pass++;
+        } else {
+            printf("  native==amd64: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kc, 32) == 0) {
+            printf("  native==crypto: PASS\n"); pass++;
+        } else {
+            printf("  native==crypto: FAIL\n"); fail++;
+        }
+        if (memcmp(kn, kil, 32) == 0) {
+            printf("  native==inline: PASS\n"); pass++;
+        } else {
+            printf("  native==inline: FAIL\n"); fail++;
+        }
+    }
+
+    printf("\n=== RFC 7748: %d passed, %d failed ===\n\n", pass, fail);
+    return fail;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * BENCHMARK — every contender (amd64-64/ucode lives in its own binary)
+ * ════════════════════════════════════════════════════════════════════ */
+static void benchmark(void) {
+    uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
+    uint64_t t0, t1, mn, med;
+    uint64_t samples[BENCH_REPS];
+
+    hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scalar, 32);
+    hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", point, 32);
+
+    printf("=== X25519 Benchmark (%d repetitions) ===\n\n", BENCH_REPS);
+
+    /* Warm up every contender. */
+    x25519_native(out, scalar, point);
+    x25519_fiat(out, scalar, point);
+    x25519_cryptopt(out, scalar, point);
+    x25519_donna_c64(out, scalar, point);
+    x25519_amd64_51(out, scalar, point);
+    x25519_amd64_51_ucode(out, scalar, point);
+    x25519_amd64_64(out, scalar, point);
+    x25519_ucode(out, scalar, point);
+    x25519(out, scalar, point);
+
+#define BENCH_ONE(LABEL, CALL) do {                                         \
+        for (int r = 0; r < BENCH_REPS; r++) {                              \
+            t0 = rdtsc_start(); CALL; t1 = rdtsc_end();                     \
+            samples[r] = t1 - t0;                                           \
+        }                                                                   \
+        bench_stats(samples, BENCH_REPS, &mn, &med);                        \
+        printf("%-20s min %8" PRIu64 "  median %8" PRIu64 " cycles\n",      \
+               LABEL, mn, med);                                             \
+    } while (0)
+
+    BENCH_ONE("ours/hand-C:",       x25519_native(out, scalar, point));
+    BENCH_ONE("ours/fiat:",         x25519_fiat(out, scalar, point));
+    BENCH_ONE("ours/cryptopt:",     x25519_cryptopt(out, scalar, point));
+    BENCH_ONE("donna_c64:",         x25519_donna_c64(out, scalar, point));
+    BENCH_ONE("amd64-51/asm:",      x25519_amd64_51(out, scalar, point));
+    BENCH_ONE("amd64-51/ucode:",    x25519_amd64_51_ucode(out, scalar, point));
+    BENCH_ONE("amd64-64/asm:",      x25519_amd64_64(out, scalar, point));
+    /* "ours/ucode" is the inline-asm register-chained ladder (the canonical
+     * implementation). "ucode/C-ladder" is the SAME microcode field ops on
+     * the identical C ladder as ours/hand-C/fiat/cryptopt — it exists only
+     * to isolate the field-op backend end-to-end (the same-ladder field-op
+     * swap table), NOT as a headline contender. */
+    BENCH_ONE("ours/ucode:",        x25519(out, scalar, point));
+    BENCH_ONE("ucode/C-ladder:",    x25519_ucode(out, scalar, point));
+#undef BENCH_ONE
+
+    printf("\n");
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * MAIN — the inline-asm 5×51 ladder (x25519) is the canonical "ours".
+ * ════════════════════════════════════════════════════════════════════ */
 int main(void) {
-    printf("=== X25519 via inline-asm 5×51 ladder (register-chained) ===\n\n");
+    printf("=== Full X25519: every contender (inline-asm 5×51 is canonical ours) ===\n\n");
 
     assign_to_core(0);
     init_match_and_patch();
@@ -988,42 +2187,24 @@ int main(void) {
     install_field_patches();
     printf("\n");
 
-    if (test_rfc7748()) {
-        printf("Verification FAILED, aborting bench.\n");
-        init_match_and_patch(); do_fix_IN_patch();
+    int failures = test_rfc7748();
+    if (failures) {
+        printf("Test vectors FAILED (%d errors), skipping benchmark.\n", failures);
+        init_match_and_patch();
+        do_fix_IN_patch();
         return 1;
     }
 
-    uint8_t scalar[32], point[32], out[32];
-    hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scalar, 32);
-    hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", point, 32);
-
-    uint64_t samples[BENCH_REPS];
-    for (int i = 0; i < 5; i++) x25519(out, scalar, point);  /* warmup */
-
-    for (int r = 0; r < BENCH_REPS; r++) {
-        uint64_t t0 = rdtsc_start();
-        x25519(out, scalar, point);
-        uint64_t t1 = rdtsc_end();
-        samples[r] = t1 - t0;
-    }
-    qsort(samples, BENCH_REPS, sizeof(samples[0]), cmp_u64);
-
-    printf("--- Bench (%d reps) ---\n", BENCH_REPS);
-    printf("min:    %" PRIu64 " cyc\n", samples[0]);
-    printf("median: %" PRIu64 " cyc\n", samples[BENCH_REPS/2]);
-    printf("p90:    %" PRIu64 " cyc\n", samples[BENCH_REPS*9/10]);
-    printf("\nFor reference:\n");
-    printf("  5×51 microcode (production C-wrapper): ~312000 cyc\n");
-    printf("  amd64-64 (SUPERCOP, asm):              ~272000 cyc\n");
+    benchmark();
 
     init_match_and_patch();
     do_fix_IN_patch();
+    printf("Done.\n");
     return 0;
 }
 #endif /* !INLINE2_PROFILE */
 
-#ifdef INLINE2_PROFILE
+#if defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)
 /* ════════════════════════════════════════════════════════════════════
  * PER-OP COST PROFILER  (compiled via inline2_profile.c, which #includes
  * this file with -DINLINE2_PROFILE). Reuses the SAME patches + FE_* macros

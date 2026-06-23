@@ -22,9 +22,17 @@ all: $(PROG)_static
 # SUPERCOP tries: gcc -march=native -mtune=native -O{3,2,Os,O} -fwrapv -fPIC -fPIE -gdwarf-4 -Wall
 # We use the -O3 variant. Override CFLAGS BEFORE the amd64-51 block so derived
 # flag vars (AMD51_CFLAGS) inherit the new value.
-ifeq ($(PROG),full_curve25519)
+# full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
+# contender; full_curve25519 is kept on disk but no longer benched) and needs
+# the identical flags + external objects.
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop,$(PROG)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
+
+# bench_attrib.c #includes full_curve25519_inline2.c as a library (INLINE2_LIB),
+# so it needs no EXTRA_OBJS — just libmicro.a. Trick-attribution harness.
+# bench_fieldop.c also includes it as a library but additionally links the
+# CryptOpt asm to compare field-op backends per-op.
 
 # ---- SUPERCOP amd64-51 X25519 (linked into full_curve25519 only) ----
 AMD51_DIR  := ../supercop-20260330/crypto_scalarmult/curve25519/amd64-51
@@ -177,8 +185,22 @@ cryptopt_sq.o: cryptopt_sq.asm
 	$(NASM) -f elf64 -o $@ $@.tmp.asm
 	rm -f $@.tmp.asm
 
+# full_curve25519_inline2 hosts every contender, so it links the same external
+# objects as full_curve25519 (amd64-51 asm, amd64-51-ucode framework, amd64-64
+# asm, CryptOpt asm). amd64-64/ucode stays its own binary (4x64 patch can't
+# coexist with the 5x51 patches both of these install).
 ifeq ($(PROG),full_curve25519)
 EXTRA_OBJS := $(AMD51_OBJS) $(AMD51U_OBJS) $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# inline2 defines supercop_amd64_51_ucode_ladderstep itself (inline-asm style),
+# so the C ladderstep object is excluded — its other amd64-51-ucode framework
+# objects (mont25519/invert/pack/mul/square/...) are still linked.
+ifeq ($(PROG),full_curve25519_inline2)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
@@ -187,6 +209,13 @@ endif
 # 5x51 patches), so it's its own binary — same pattern as inline2.
 ifeq ($(PROG),full_curve25519_amd64_64_ucode)
 EXTRA_OBJS := $(AMD64U_OBJS)
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# bench_fieldop: per-op field-op comparison; links CryptOpt asm (fiat is a C
+# include, native is inline, microcode comes from the INLINE2_LIB include).
+ifeq ($(PROG),bench_fieldop)
+EXTRA_OBJS := cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 

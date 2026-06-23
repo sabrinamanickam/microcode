@@ -36,25 +36,23 @@ source lib/build_run.sh
 source lib/print_matrix.sh
 
 # ── Shared result tables (populated by record_result, read by the renderers) ──
-declare -A cell          # "cfg|label" -> min cycles
+# We track median cycles only.
 declare -A cell_med      # "cfg|label" -> median cycles
-declare -A best_min      # label -> best min cycles
-declare -A best_med      # label -> best median cycles
-declare -A best_cfg      # label -> winning config (for min)
+declare -A best_med      # label -> best (smallest) median cycles
 declare -A best_med_cfg  # label -> winning config (for median)
 declare -a ran_cfgs      # configs that produced a benchmark (excludes build failures)
 
-# ── How the report is grouped (reviewer-2 fix #1: separate matrices) ──
-#
-# (a) Same-ladder field-op comparison: the variants in each SAME_LADDER_*
-#     group share their ladder + invert + cswap + framework, so differences
-#     reflect the FIELD-OP backend only.
-# (b) End-to-end: differing whole-function implementations (own ladders, own
-#     invert chains, own cswap) — differences reflect total implementation.
-SAME_LADDER_OURS=("ours/hand-C" "ours/fiat" "ours/cryptopt" "ours/ucode")
-SAME_LADDER_A51=("amd64-51/asm" "amd64-51/ucode")
-SAME_LADDER_A64=("amd64-64/asm" "amd64-64/ucode")
-END_TO_END=("donna_c64" "amd64-51/asm" "amd64-51/ucode" "amd64-64/asm" "amd64-64/ucode" "ours/cryptopt" "ours/ucode" "ours/ucode-inline")
+# ── The single end-to-end table: every contender, median cycles, one matrix.
+# (Same-ladder sub-tables and ratio matrices were removed — the asm baselines
+#  amd64-51/asm and amd64-64/asm are already in this one table.)
+TABLE=("ours/ucode" "amd64-64/asm" "amd64-64/ucode" "amd64-51/asm" "amd64-51/ucode" "ours/cryptopt" "ours/fiat" "ours/hand-C" "donna_c64")
+
+# ── Same-ladder field-op isolation: these four use the IDENTICAL C Montgomery
+# ladder (driver/invert/cswap/pack all held constant); only fe_mul/fe_sq
+# differ. Attributes the microcode win end-to-end with zero confounds.
+# (ucode/C-ladder = microcode field ops on the C ladder, NOT the inline ladder
+#  that the headline ours/ucode uses.)
+FIELDOP_ISO=("ucode/C-ladder" "ours/cryptopt" "ours/fiat" "ours/hand-C")
 
 # ── Pipeline ──
 check_cpu_frequency

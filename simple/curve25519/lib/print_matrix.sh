@@ -1,25 +1,23 @@
-# lib/print_matrix.sh — all result rendering (terminal + markdown).
+# lib/print_matrix.sh — result rendering (terminal + markdown).
 #
 # Sourced by bench_supercop_matrix.sh. Reads the global result tables
-# (cell, cell_med, best_*) and the ran_cfgs list populated by run_matrix, plus
-# the comparison-group arrays (SAME_LADDER_OURS, …) defined in the orchestrator.
+# (cell_med, best_med, best_med_cfg) and the ran_cfgs list populated by
+# run_matrix, plus the TABLE array (the contenders to show) defined in the
+# orchestrator.
 #
-# Four primitives, each with a terminal and a markdown twin:
-#   print_matrix / md_matrix             — absolute cycle tables
-#   print_ratio_matrix / md_ratio_matrix — per-config ratios vs a reference col,
-#                                          plus a geomean summary
-# Two drivers wire those into the full report:
-#   report_terminal   — everything echoed to stdout
-#   emit_results_md    — the same content as a markdown file (for RESULTS.md)
+# One table only: median cycles, raw per-(config, contender) counts.
+#   print_matrix / md_matrix  — the table, terminal and markdown twins
+#   report_terminal           — echoed to stdout
+#   emit_results_md           — the same content as RESULTS.md
 
-# short_label <contender> — compact column header for the matrices.
+# short_label <contender> — compact column header for the matrix.
 short_label() {
     case "$1" in
         "ours/hand-C")       echo "hand-C"      ;;
         "ours/fiat")         echo "fiat"        ;;
         "ours/cryptopt")     echo "cryptopt"    ;;
         "ours/ucode")        echo "ucode"       ;;
-        "ours/ucode-inline") echo "ucode-inl"   ;;
+        "ucode/C-ladder")    echo "uc/Clad"     ;;
         "donna_c64")         echo "donna"       ;;
         "amd64-51/asm")      echo "a51/asm"     ;;
         "amd64-51/ucode")    echo "a51/ucode"   ;;
@@ -29,28 +27,19 @@ short_label() {
     esac
 }
 
-# ───────────────────────────── terminal tables ─────────────────────────────
+# ───────────────────────────── terminal table ──────────────────────────────
 
+# print_matrix <title> <contender...> — median cycles, one column per
+# contender, one row per config. '*' marks the best (lowest-median) config
+# for that contender.
 print_matrix() {
-    local metric="$1"; shift   # "min" or "median"
     local title="$1"; shift
     local cols=("$@")
 
-    # Pick the right associative arrays for the chosen metric.
-    local -n CELL_REF
-    local -n BEST_CFG_REF
-    if [ "$metric" = "median" ]; then
-        CELL_REF=cell_med
-        BEST_CFG_REF=best_med_cfg
-    else
-        CELL_REF=cell
-        BEST_CFG_REF=best_cfg
-    fi
-
     echo
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  $title  [metric: $metric cycles]"
-    echo "  * = winner for that column"
+    echo "  $title  [median cycles]"
+    echo "  * = best (lowest-median) config for that column"
     echo "═══════════════════════════════════════════════════════════════"
 
     printf "  %-12s" "Config"
@@ -65,10 +54,10 @@ print_matrix() {
     for cfg in "${ran_cfgs[@]}"; do
         printf "  %-12s" "$cfg"
         for label in "${cols[@]}"; do
-            val="${CELL_REF["$cfg|$label"]:-}"
+            val="${cell_med["$cfg|$label"]:-}"
             if [ -z "$val" ]; then
                 printf " | %9s" "—"
-            elif [ "$cfg" = "${BEST_CFG_REF[$label]}" ]; then
+            elif [ "$cfg" = "${best_med_cfg[$label]}" ]; then
                 printf " | %8s*" "$val"
             else
                 printf " | %9s" "$val"
@@ -78,215 +67,112 @@ print_matrix() {
     done
 }
 
-# Speedup ratio = cycles[contender] / cycles[reference], computed per-row.
-# Ratio > 1.000 → contender is slower than reference by (ratio-1)*100 %.
-# Ratio < 1.000 → contender is faster than reference.
-# Ratio = 1.000 → identical (always the case for the reference column).
+# print_ratio_matrix <focus> <contender...> — "does <focus> win?" table.
+# Each competitor column = median(competitor) / median(focus), so:
+#   ratio > 1  ⇒  focus is FASTER (fewer cycles) than that competitor — focus wins
+#   ratio < 1  ⇒  focus is slower — focus loses
+# The focus's own column is skipped. A geomean row collapses configs into one
+# number per competitor.
 print_ratio_matrix() {
-    local metric="$1"; shift
-    local title="$1"; shift
-    local ref_label="$1"; shift   # contender used as denominator
+    local focus="$1"; shift
     local cols=("$@")
-
-    local -n CELL_REF
-    if [ "$metric" = "median" ]; then
-        CELL_REF=cell_med
-    else
-        CELL_REF=cell
-    fi
+    local comps=() c
+    for c in "${cols[@]}"; do [ "$c" != "$focus" ] && comps+=("$c"); done
 
     echo
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  $title  [ratio = $metric cycles / cycles($(short_label "$ref_label"))]"
-    echo "  >1.000 = slower than $(short_label "$ref_label");  <1.000 = faster"
+    echo "  Does $(short_label "$focus") win?   [ratio = other ÷ $(short_label "$focus"), median cycles]"
+    echo "  >1 ⇒ $(short_label "$focus") is FASTER than that column;  <1 ⇒ slower"
     echo "═══════════════════════════════════════════════════════════════"
 
     printf "  %-12s" "Config"
-    for label in "${cols[@]}"; do
-        printf " | %9s" "$(short_label "$label")"
-    done
+    for label in "${comps[@]}"; do printf " | %9s" "$(short_label "$label")"; done
     echo
     printf "  %-12s" "------------"
-    for _ in "${cols[@]}"; do printf " + %9s" "---------"; done
+    for _ in "${comps[@]}"; do printf " + %9s" "---------"; done
     echo
 
     for cfg in "${ran_cfgs[@]}"; do
         printf "  %-12s" "$cfg"
-        local ref_val="${CELL_REF["$cfg|$ref_label"]:-}"
-        for label in "${cols[@]}"; do
-            local val="${CELL_REF["$cfg|$label"]:-}"
-            if [ -z "$val" ] || [ -z "$ref_val" ]; then
+        local fv="${cell_med["$cfg|$focus"]:-}"
+        for label in "${comps[@]}"; do
+            local v="${cell_med["$cfg|$label"]:-}"
+            if [ -z "$v" ] || [ -z "$fv" ]; then
                 printf " | %9s" "—"
             else
-                local r
-                r=$(awk -v a="$val" -v b="$ref_val" 'BEGIN{printf "%.3f", a/b}')
+                local r; r=$(awk -v a="$v" -v b="$fv" 'BEGIN{printf "%.3f", a/b}')
                 printf " | %9s" "$r"
             fi
         done
         echo
     done
 
-    # Per-table summary: the geometric mean of each non-reference column's
-    # ratio across configs. Useful when a paper quotes a single number per
-    # comparison.
+    # geomean across configs of (competitor / focus).
     echo
     printf "  %-12s" "geomean"
-    for label in "${cols[@]}"; do
-        if [ "$label" = "$ref_label" ]; then
-            printf " | %9s" "1.000"
-            continue
-        fi
+    for label in "${comps[@]}"; do
         local gm
         gm=$(
             for cfg in "${ran_cfgs[@]}"; do
-                local v="${CELL_REF["$cfg|$label"]:-}"
-                local rv="${CELL_REF["$cfg|$ref_label"]:-}"
-                [ -n "$v" ] && [ -n "$rv" ] && awk -v a="$v" -v b="$rv" 'BEGIN{printf "%.6f\n", a/b}'
-            done | awk '
-                { sum += log($1); n++ }
-                END { if (n > 0) printf "%.3f", exp(sum/n); else printf "—" }
-            '
+                local v="${cell_med["$cfg|$label"]:-}"
+                local fv="${cell_med["$cfg|$focus"]:-}"
+                [ -n "$v" ] && [ -n "$fv" ] && awk -v a="$v" -v b="$fv" 'BEGIN{printf "%.6f\n", a/b}'
+            done | awk '{ s += log($1); n++ } END { if (n>0) printf "%.3f", exp(s/n); else printf "—" }'
         )
         printf " | %9s" "$gm"
     done
     echo
 }
 
-# emit_row <contender> — one line of the terminal "best per contender" table.
-emit_row() {
-    local label="$1"
-    if [ -n "${best_min[$label]:-}" ]; then
-        printf "  %-22s %10d %-15s %10s %s\n" \
-            "$label" \
-            "${best_min[$label]}" "(${best_cfg[$label]})" \
-            "${best_med[$label]:-—}" \
-            "${best_med_cfg[$label]:+(${best_med_cfg[$label]})}"
-    else
-        printf "  %-22s %10s\n" "$label" "—"
-    fi
-}
-
-# report_terminal — the full stdout report: MIN cycle matrices, MIN ratio
-# matrices, MEDIAN cycle matrices, MEDIAN ratio matrices, then the SUPERCOP-
-# style "best per contender" table and the naming legend. Reads the
-# comparison-group arrays (SAME_LADDER_*, END_TO_END) defined by the orchestrator.
+# report_terminal — the stdout report: the median table, the three "does it
+# win?" ratio tables (ours/ucode, amd64-51/ucode, amd64-64/ucode), legend.
 report_terminal() {
-    echo
-    echo "###############################################################"
-    echo "#  MIN cycle matrices                                           "
-    echo "###############################################################"
-    print_matrix "min" "Same-ladder field-op comparison — OUR ladder (clean: only field ops differ)" \
-                 "${SAME_LADDER_OURS[@]}"
-    print_matrix "min" "Same-ladder field-op comparison — amd64-51 ladder (asm field ops vs microcode field ops)" \
-                 "${SAME_LADDER_A51[@]}"
-    print_matrix "min" "Same-ladder field-op comparison — amd64-64 ladder (asm field ops vs 4×64 microcode field ops)" \
-                 "${SAME_LADDER_A64[@]}"
-    print_matrix "min" "End-to-end implementation comparison (mixed ladders, mixed everything)" \
-                 "${END_TO_END[@]}"
+    print_matrix "X25519 end-to-end (all contenders)" "${TABLE[@]}"
 
     echo
     echo "###############################################################"
-    echo "#  MIN speedup-ratio matrices (slower/faster vs the microcode  #"
-    echo "#  variant in each table; >1 = slower than microcode)          #"
+    echo "#  Does microcode win?   ratio = other ÷ the ucode variant     #"
+    echo "#  >1 ⇒ the ucode variant is FASTER (fewer cycles) than that col#"
     echo "###############################################################"
-    print_ratio_matrix "min" "OUR ladder — ratios vs ours/ucode" \
-                       "ours/ucode" "${SAME_LADDER_OURS[@]}"
-    print_ratio_matrix "min" "amd64-51 ladder — ratios vs amd64-51/ucode" \
-                       "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-    print_ratio_matrix "min" "amd64-64 ladder — ratios vs amd64-64/ucode" \
-                       "amd64-64/ucode" "${SAME_LADDER_A64[@]}"
-    print_ratio_matrix "min" "End-to-end — ratios vs ours/ucode-inline" \
-                       "ours/ucode-inline" "${END_TO_END[@]}"
+    print_ratio_matrix "ours/ucode"     "${TABLE[@]}"
+    print_ratio_matrix "amd64-51/ucode" "${TABLE[@]}"
+    print_ratio_matrix "amd64-64/ucode" "${TABLE[@]}"
 
     echo
     echo "###############################################################"
-    echo "#  MEDIAN cycle matrices                                        "
+    echo "#  Same-ladder field-op isolation: IDENTICAL C ladder, only    #"
+    echo "#  fe_mul/fe_sq differ. Attributes the microcode win end-to-end #"
+    echo "#  with zero confound (driver/invert/cswap/pack held constant). #"
     echo "###############################################################"
-    print_matrix "median" "Same-ladder field-op comparison — OUR ladder" \
-                 "${SAME_LADDER_OURS[@]}"
-    print_matrix "median" "Same-ladder field-op comparison — amd64-51 ladder" \
-                 "${SAME_LADDER_A51[@]}"
-    print_matrix "median" "Same-ladder field-op comparison — amd64-64 ladder" \
-                 "${SAME_LADDER_A64[@]}"
-    print_matrix "median" "End-to-end implementation comparison" \
-                 "${END_TO_END[@]}"
+    print_matrix "Same C ladder — only the field op differs" "${FIELDOP_ISO[@]}"
+    print_ratio_matrix "ucode/C-ladder" "${FIELDOP_ISO[@]}"
 
     echo
-    echo "###############################################################"
-    echo "#  MEDIAN speedup-ratio matrices                                "
-    echo "###############################################################"
-    print_ratio_matrix "median" "OUR ladder — ratios vs ours/ucode" \
-                       "ours/ucode" "${SAME_LADDER_OURS[@]}"
-    print_ratio_matrix "median" "amd64-51 ladder — ratios vs amd64-51/ucode" \
-                       "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-    print_ratio_matrix "median" "amd64-64 ladder — ratios vs amd64-64/ucode" \
-                       "amd64-64/ucode" "${SAME_LADDER_A64[@]}"
-    print_ratio_matrix "median" "End-to-end — ratios vs ours/ucode-inline" \
-                       "ours/ucode-inline" "${END_TO_END[@]}"
-
-    echo
-    echo "═══════════════════════════════════════════════════════════════"
-    echo "  Best per contender (matches SUPERCOP's reporting style)"
-    echo "═══════════════════════════════════════════════════════════════"
-    printf "  %-22s %10s %-15s %10s %s\n" \
-           "Contender" "min" "(config)" "median" "(config)"
-    printf "  %-22s %10s %-15s %10s %s\n" \
-           "─────────" "──────" "──────────" "──────" "──────────"
-
-    echo "  -- Same-ladder, OUR ladder --"
-    for label in "${SAME_LADDER_OURS[@]}"; do emit_row "$label"; done
-    echo "  -- Same-ladder, amd64-51 ladder --"
-    for label in "${SAME_LADDER_A51[@]}"; do emit_row "$label"; done
-    echo "  -- Same-ladder, amd64-64 ladder (lib25519's Goldmont pick + 4×64 microcode) --"
-    for label in "${SAME_LADDER_A64[@]}"; do emit_row "$label"; done
-    echo "  -- End-to-end --"
-    for label in "${END_TO_END[@]}"; do
-        case "$label" in
-            "ours/cryptopt"|"ours/ucode"|"amd64-51/asm"|"amd64-51/ucode"|"amd64-64/asm"|"amd64-64/ucode") continue ;;
-        esac
-        emit_row "$label"
-    done
-    echo "  -- inline-asm ladder + microcode field ops --"
-    emit_row "ours/ucode-inline"
-    echo
-    echo "Naming legend (label = ladder / field-op-backend):"
-    echo "    ours/hand-C    — our ladder + hand-written C with __uint128_t"
-    echo "    ours/fiat      — our ladder + fiat-crypto autogen C"
-    echo "    ours/cryptopt  — our ladder + CryptOpt Goldmont-tuned asm field ops"
-    echo "    ours/ucode     — our ladder + microcode field ops"
-    echo "    ours/ucode-inline — all-in-one inline-asm 5×51 ladder + microcode field ops"
-    echo "    donna_c64      — donna's whole-stack portable C"
-    echo "    amd64-51/asm   — Bernstein/Schwabe whole-stack x86-64 asm (5x51 unsaturated)"
-    echo "    amd64-51/ucode — amd64-51's ladder + microcode field ops (hybrid)"
+    echo "Naming legend (label = ladder / field-op backend):"
+    echo "    ours/ucode     — all-in-one inline-asm register-chained 5×51 ladder + microcode field ops (canonical)"
+    echo "    ucode/C-ladder — microcode field ops on the SAME C ladder as hand-C/fiat/cryptopt (field-op isolation only)"
     echo "    amd64-64/asm   — Bernstein/Schwabe whole-stack x86-64 asm (4x64 saturated; lib25519's Goldmont pick)"
-    echo "    amd64-64/ucode — amd64-64's ladder + 4×64 microcode field ops (hybrid)"
+    echo "    amd64-64/ucode — amd64-64's framework + C ladder + 4×64 microcode field ops (hybrid)"
+    echo "    amd64-51/asm   — Bernstein/Schwabe whole-stack x86-64 asm (5x51 unsaturated)"
+    echo "    amd64-51/ucode — amd64-51's framework + inline-asm ladder + 5×51 microcode field ops (hybrid)"
+    echo "    ours/cryptopt  — our C ladder + CryptOpt Goldmont-tuned asm field ops"
+    echo "    ours/fiat      — our C ladder + fiat-crypto autogen C field ops"
+    echo "    ours/hand-C    — our C ladder + hand-written C with __uint128_t"
+    echo "    donna_c64      — donna's whole-stack portable C"
     echo
 }
 
-# ───────────────────────────── markdown tables ─────────────────────────────
-# md_matrix / md_ratio_matrix produce the same content as their print_*
-# twins but in markdown-table form (right-aligned numeric columns, **bold**
-# for the winning cell). Written to stdout so emit_results_md can redirect them.
+# ───────────────────────────── markdown table ──────────────────────────────
 
+# md_matrix <title> <contender...> — markdown twin of print_matrix.
 md_matrix() {
-    local metric="$1"; shift
     local title="$1"; shift
     local cols=("$@")
-
-    local -n CELL_REF
-    local -n BEST_CFG_REF
-    if [ "$metric" = "median" ]; then
-        CELL_REF=cell_med
-        BEST_CFG_REF=best_med_cfg
-    else
-        CELL_REF=cell
-        BEST_CFG_REF=best_cfg
-    fi
 
     echo
     echo "### $title"
     echo
-    echo "_metric: $metric cycles. **bold** = winning config in that column._"
+    echo "_median cycles. **bold** = best (lowest-median) config in that column._"
     echo
 
     printf "| Config |"
@@ -299,10 +185,10 @@ md_matrix() {
     for cfg in "${ran_cfgs[@]}"; do
         printf "| %s |" "$cfg"
         for label in "${cols[@]}"; do
-            local val="${CELL_REF["$cfg|$label"]:-}"
+            local val="${cell_med["$cfg|$label"]:-}"
             if [ -z "$val" ]; then
                 printf " — |"
-            elif [ "$cfg" = "${BEST_CFG_REF[$label]}" ]; then
+            elif [ "$cfg" = "${best_med_cfg[$label]}" ]; then
                 printf " **%s** |" "$val"
             else
                 printf " %s |" "$val"
@@ -312,73 +198,59 @@ md_matrix() {
     done
 }
 
+# md_ratio_matrix <focus> <contender...> — markdown twin of print_ratio_matrix.
+# ratio = median(competitor) / median(focus); >1 ⇒ focus is faster (wins).
 md_ratio_matrix() {
-    local metric="$1"; shift
-    local title="$1"; shift
-    local ref_label="$1"; shift
+    local focus="$1"; shift
     local cols=("$@")
-
-    local -n CELL_REF
-    if [ "$metric" = "median" ]; then
-        CELL_REF=cell_med
-    else
-        CELL_REF=cell
-    fi
+    local comps=() c
+    for c in "${cols[@]}"; do [ "$c" != "$focus" ] && comps+=("$c"); done
 
     echo
-    echo "### $title"
+    echo "### Does \`$(short_label "$focus")\` win?"
     echo
-    echo "_ratio = $metric cycles ÷ cycles($(short_label "$ref_label")). >1 = slower, <1 = faster, **bold** = geomean row._"
+    echo "_ratio = other ÷ $(short_label "$focus") (median cycles). **>1 ⇒ $(short_label "$focus") is faster** (wins); <1 ⇒ slower. **bold** = geomean._"
     echo
 
     printf "| Config |"
-    for label in "${cols[@]}"; do printf " %s |" "$(short_label "$label")"; done
+    for label in "${comps[@]}"; do printf " %s |" "$(short_label "$label")"; done
     echo
     printf "|---|"
-    for _ in "${cols[@]}"; do printf '%s' "---:|"; done
+    for _ in "${comps[@]}"; do printf '%s' "---:|"; done
     echo
 
     for cfg in "${ran_cfgs[@]}"; do
         printf "| %s |" "$cfg"
-        local ref_val="${CELL_REF["$cfg|$ref_label"]:-}"
-        for label in "${cols[@]}"; do
-            local val="${CELL_REF["$cfg|$label"]:-}"
-            if [ -z "$val" ] || [ -z "$ref_val" ]; then
+        local fv="${cell_med["$cfg|$focus"]:-}"
+        for label in "${comps[@]}"; do
+            local v="${cell_med["$cfg|$label"]:-}"
+            if [ -z "$v" ] || [ -z "$fv" ]; then
                 printf " — |"
             else
-                local r
-                r=$(awk -v a="$val" -v b="$ref_val" 'BEGIN{printf "%.3f", a/b}')
+                local r; r=$(awk -v a="$v" -v b="$fv" 'BEGIN{printf "%.3f", a/b}')
                 printf " %s |" "$r"
             fi
         done
         echo
     done
 
-    # Geomean row.
     printf "| **geomean** |"
-    for label in "${cols[@]}"; do
-        if [ "$label" = "$ref_label" ]; then
-            printf " **1.000** |"
-            continue
-        fi
+    for label in "${comps[@]}"; do
         local gm
         gm=$(
             for cfg in "${ran_cfgs[@]}"; do
-                local v="${CELL_REF["$cfg|$label"]:-}"
-                local rv="${CELL_REF["$cfg|$ref_label"]:-}"
-                [ -n "$v" ] && [ -n "$rv" ] && awk -v a="$v" -v b="$rv" 'BEGIN{printf "%.6f\n", a/b}'
-            done | awk '
-                { sum += log($1); n++ }
-                END { if (n > 0) printf "%.3f", exp(sum/n); else printf "—" }
-            '
+                local v="${cell_med["$cfg|$label"]:-}"
+                local fv="${cell_med["$cfg|$focus"]:-}"
+                [ -n "$v" ] && [ -n "$fv" ] && awk -v a="$v" -v b="$fv" 'BEGIN{printf "%.6f\n", a/b}'
+            done | awk '{ s += log($1); n++ } END { if (n>0) printf "%.3f", exp(s/n); else printf "—" }'
         )
         printf " **%s** |" "$gm"
     done
     echo
 }
 
-# emit_results_md <outfile> — write the whole markdown report (host info,
-# legend, every cycle/ratio matrix, best-per-contender table) to <outfile>.
+# emit_results_md <outfile> — write the markdown report (host info, legend,
+# the median table, and the three "does it win?" ratio tables) to <outfile>.
 emit_results_md() {
     local out="${1:-RESULTS.md}"
     local freq gov turbo cpu
@@ -395,73 +267,42 @@ emit_results_md() {
         echo "**CPU:** $cpu"
         echo "**Pinned freq:** $freq kHz   (governor: \`$gov\`, no_turbo: \`$turbo\`)"
         echo "**Configs that ran:** ${#ran_cfgs[@]} / ${#ACTIVE_CONFIGS[@]}"
-        echo "**Pipeline:** \`taskset -c 0 ./full_curve25519_static\` for each (compiler, -O) combo"
+        echo "**Pipeline:** \`taskset -c 0 ./full_curve25519_inline2_static\` (+ amd64-64/ucode) for each (compiler, -O) combo"
+        echo "**Metric:** median cycles per X25519 (best config per contender shown in **bold**)."
         echo
         echo "## Contender legend"
         echo
         echo "| label | backend |"
         echo "|---|---|"
-        echo "| ours/hand-C    | our ladder + hand-written C with \`__uint128_t\` |"
-        echo "| ours/fiat      | our ladder + fiat-crypto autogen C |"
-        echo "| ours/cryptopt  | our ladder + CryptOpt Goldmont-tuned asm field ops |"
-        echo "| ours/ucode     | our ladder + microcode field ops |"
-        echo "| ours/ucode-inline | all-in-one inline-asm 5×51 ladder + microcode field ops |"
-        echo "| donna_c64      | donna whole-stack portable C |"
-        echo "| amd64-51/asm   | Bernstein–Schwabe whole-stack x86-64 asm (5x51 unsaturated) |"
-        echo "| amd64-51/ucode | amd64-51's ladder + microcode field ops (hybrid) |"
+        echo "| ours/ucode     | all-in-one inline-asm register-chained 5×51 ladder + microcode field ops (the canonical implementation) |"
+        echo "| ucode/C-ladder | microcode field ops on the SAME C ladder as hand-C/fiat/cryptopt (field-op isolation only — not a headline contender) |"
         echo "| amd64-64/asm   | Bernstein–Schwabe whole-stack x86-64 asm (4x64 saturated; lib25519's Goldmont pick) |"
-        echo "| amd64-64/ucode | amd64-64's ladder + 4×64 microcode field ops (hybrid) |"
+        echo "| amd64-64/ucode | amd64-64's framework + C ladder + 4×64 microcode field ops (hybrid) |"
+        echo "| amd64-51/asm   | Bernstein–Schwabe whole-stack x86-64 asm (5x51 unsaturated) |"
+        echo "| amd64-51/ucode | amd64-51's framework + inline-asm ladder + 5×51 microcode field ops (hybrid) |"
+        echo "| ours/cryptopt  | our C ladder + CryptOpt Goldmont-tuned asm field ops |"
+        echo "| ours/fiat      | our C ladder + fiat-crypto autogen C field ops |"
+        echo "| ours/hand-C    | our C ladder + hand-written C with \`__uint128_t\` |"
+        echo "| donna_c64      | donna whole-stack portable C |"
         echo
-        echo "## How to read"
-        echo
-        echo "- **Same-ladder OUR / amd64-51** tables are apples-to-apples: only the field-op backend changes; ladder, invert, cswap, framework all held constant."
-        echo "- **End-to-end** mixes implementations top to bottom; differences include integration choices (struct layout, cross-TU inlining, invert chaining) on top of the field-op delta."
-        echo "- The **geomean** row in each ratio table collapses 24 configs into one number — that's the single ratio to quote in a paper."
+        echo "---"
+        md_matrix "X25519 end-to-end" "${TABLE[@]}"
         echo
         echo "---"
         echo
-        echo "## MIN cycles"
-        md_matrix "min" "Same-ladder OUR — only field-op differs" "${SAME_LADDER_OURS[@]}"
-        md_matrix "min" "Same-ladder amd64-51 — only field-op differs" "${SAME_LADDER_A51[@]}"
-        md_matrix "min" "Same-ladder amd64-64 — only field-op differs (4×64)" "${SAME_LADDER_A64[@]}"
-        md_matrix "min" "End-to-end — mixed implementations" "${END_TO_END[@]}"
+        echo "## Does microcode win?"
         echo
-        echo "## MIN speedup ratios"
-        md_ratio_matrix "min" "Same-ladder OUR — ratios vs ours/ucode" \
-                        "ours/ucode" "${SAME_LADDER_OURS[@]}"
-        md_ratio_matrix "min" "Same-ladder amd64-51 — ratios vs amd64-51/ucode" \
-                        "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-        md_ratio_matrix "min" "Same-ladder amd64-64 — ratios vs amd64-64/ucode" \
-                        "amd64-64/ucode" "${SAME_LADDER_A64[@]}"
-        md_ratio_matrix "min" "End-to-end — ratios vs ours/ucode-inline" \
-                        "ours/ucode-inline" "${END_TO_END[@]}"
+        echo "Ratio = other ÷ the ucode variant (median cycles). **>1 ⇒ the ucode variant is faster** than that competitor; the **geomean** row is the single number to quote."
+        md_ratio_matrix "ours/ucode"     "${TABLE[@]}"
+        md_ratio_matrix "amd64-51/ucode" "${TABLE[@]}"
+        md_ratio_matrix "amd64-64/ucode" "${TABLE[@]}"
         echo
-        echo "## MEDIAN cycles"
-        md_matrix "median" "Same-ladder OUR" "${SAME_LADDER_OURS[@]}"
-        md_matrix "median" "Same-ladder amd64-51" "${SAME_LADDER_A51[@]}"
-        md_matrix "median" "Same-ladder amd64-64 (4×64)" "${SAME_LADDER_A64[@]}"
-        md_matrix "median" "End-to-end" "${END_TO_END[@]}"
+        echo "---"
         echo
-        echo "## MEDIAN speedup ratios"
-        md_ratio_matrix "median" "Same-ladder OUR — ratios vs ours/ucode" \
-                        "ours/ucode" "${SAME_LADDER_OURS[@]}"
-        md_ratio_matrix "median" "Same-ladder amd64-51 — ratios vs amd64-51/ucode" \
-                        "amd64-51/ucode" "${SAME_LADDER_A51[@]}"
-        md_ratio_matrix "median" "Same-ladder amd64-64 — ratios vs amd64-64/ucode" \
-                        "amd64-64/ucode" "${SAME_LADDER_A64[@]}"
-        md_ratio_matrix "median" "End-to-end — ratios vs ours/ucode-inline" \
-                        "ours/ucode-inline" "${END_TO_END[@]}"
+        echo "## Same-ladder field-op isolation (attributes the win to microcode)"
         echo
-        echo "## Best per contender (SUPERCOP-style)"
-        echo
-        echo "| contender | best min | min config | best median | median config |"
-        echo "|---|---:|---|---:|---|"
-        for label in "${SAME_LADDER_OURS[@]}" "${SAME_LADDER_A51[@]}" "amd64-64/asm" "amd64-64/ucode" "donna_c64" "ours/ucode-inline"; do
-            local mn="${best_min[$label]:-—}"
-            local md="${best_med[$label]:-—}"
-            local mn_cfg="${best_cfg[$label]:-—}"
-            local md_cfg="${best_med_cfg[$label]:-—}"
-            echo "| $label | $mn | $mn_cfg | $md | $md_cfg |"
-        done
+        echo "All four use the **identical C Montgomery ladder** (driver, invert, cswap, pack held constant); only \`fe_mul\`/\`fe_sq\` differ. \`ucode/C-ladder\` is the microcode field ops on that same C ladder (NOT the inline ladder of the headline \`ours/ucode\`), so this isolates the field-op backend end-to-end with zero confounds. The ratio's **geomean** is the clean per-paper number."
+        md_matrix "Same C ladder — only the field op differs" "${FIELDOP_ISO[@]}"
+        md_ratio_matrix "ucode/C-ladder" "${FIELDOP_ISO[@]}"
     } > "$out"
 }

@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why microcode X25519 is faster — Goldmont N3350</title>
+<style>
+  :root{
+    --ink:#1a1d21; --muted:#5b6470; --line:#e3e7ec; --bg:#fbfcfd;
+    --uc:#1a7f5a; --uc-bg:#e6f5ee; --slow:#b4453a; --warn:#9a6b00;
+    --accent:#2a6fb0; --code:#f3f5f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px;margin:0 auto;padding:40px 24px 80px;}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px;letter-spacing:-.01em;}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 28px;}
+  h2{font-size:21px;margin:42px 0 12px;padding-top:14px;border-top:1px solid var(--line);letter-spacing:-.01em;}
+  h3{font-size:16px;margin:26px 0 8px;color:var(--accent);}
+  p{margin:12px 0;}
+  code,.mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.9em;}
+  code{background:var(--code);padding:.1em .35em;border-radius:4px;}
+  .tldr{background:var(--uc-bg);border:1px solid #bfe3d2;border-radius:12px;padding:18px 22px;margin:8px 0 8px;}
+  .tldr b{color:var(--uc);}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14.5px;}
+  th,td{padding:8px 12px;text-align:right;border-bottom:1px solid var(--line);}
+  th:first-child,td:first-child{text-align:left;}
+  thead th{border-bottom:2px solid #cdd4dc;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);}
+  tbody tr:hover{background:#f1f4f7;}
+  .win{color:var(--uc);font-weight:600;}
+  .lose{color:var(--slow);font-weight:600;}
+  .uc-row{background:var(--uc-bg);}
+  .uc-row td:first-child{font-weight:700;}
+  .bar{display:inline-block;height:11px;border-radius:3px;background:var(--accent);vertical-align:middle;}
+  .bar.uc{background:var(--uc);}
+  .bar.bad{background:var(--slow);}
+  .barwrap{display:flex;align-items:center;gap:8px;}
+  .barwrap .n{min-width:62px;text-align:right;font-variant-numeric:tabular-nums;}
+  .note{color:var(--muted);font-size:13.5px;}
+  .callout{border-left:3px solid var(--accent);padding:2px 0 2px 16px;margin:16px 0;color:#33414f;}
+  .chain{counter-reset:step;list-style:none;padding:0;margin:14px 0;}
+  .chain li{position:relative;padding:12px 12px 12px 52px;margin:10px 0;background:#fff;border:1px solid var(--line);border-radius:10px;}
+  .chain li::before{counter-increment:step;content:counter(step);position:absolute;left:14px;top:12px;
+    width:26px;height:26px;border-radius:50%;background:var(--uc);color:#fff;font-weight:700;font-size:14px;
+    display:flex;align-items:center;justify-content:center;}
+  .eq{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:14px 0;
+    font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:14px;color:#33414f;}
+  footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;}
+  .pill{display:inline-block;background:#eef2f6;border:1px solid var(--line);border-radius:999px;
+    padding:2px 10px;font-size:12.5px;color:var(--muted);margin:0 4px 4px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Why the microcode X25519 is faster</h1>
+  <p class="sub">Cycle-level attribution on the Intel Goldmont Celeron&nbsp;N3350 &middot; 5×51 unsaturated GF(2²⁵⁵−19) &middot; median cycles, <code>taskset&nbsp;-c&nbsp;0</code></p>
+
+  <div class="tldr">
+    <p style="margin:0"><b>The win is the microcode field operation, full stop.</b>
+    Replacing the compiled-C field <code>mul</code>/<code>sq</code> with a microcode patch makes each operation
+    ~1.1–1.3× cheaper. Because an X25519 is <b>~2,560 dependent field operations</b> and <b>~89% of its
+    cycles live in the ladder</b>, that per-op edge carries straight through to a <b>1.15× end-to-end win over
+    the fiat-crypto reference</b> (357,929 → 312,399 cyc on the <em>identical</em> ladder). The inline-asm
+    register-chaining adds only a further <b>~2%</b>. The microcode also <b>matches hand-tuned CryptOpt asm</b> —
+    without anyone writing asm.</p>
+  </div>
+
+  <p>
+    <span class="pill">microcode mul = 123.0 cyc</span>
+    <span class="pill">fiat mul = 141.3 cyc (1.15×)</span>
+    <span class="pill">ours/ucode X25519 = 304,467 cyc</span>
+    <span class="pill">RFC 7748: 23/23 ✓</span>
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>1. The cost model: X25519 is <em>firing-bound</em></h2>
+  <p>
+    The Montgomery ladder issues its field operations serially — each <code>mul</code>/<code>sq</code> feeds the
+    next, so what matters is <b>latency</b>, not throughput. Counting the operations actually executed:
+  </p>
+  <div class="eq">
+    X25519 ≈ 255 ladder steps × 9 firings &nbsp;+&nbsp; invert (254 sq + 11 mul) &nbsp;+&nbsp; 1 final mul<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= 2,295 + 265 + 1 &nbsp;≈&nbsp; <b>2,561 microcode firings</b><br>
+    cost ≈ 2,561 × ~120 cyc/firing &nbsp;≈&nbsp; <b>~307k cyc</b> &nbsp;(measured: 304,467) ✓
+  </div>
+  <p>Top-down, the measured budget of one X25519 splits as:</p>
+  <table>
+    <thead><tr><th>component</th><th>cyc</th><th>share</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>ladder (255 × 1,062.5)</td><td>270,938</td><td>89%</td>
+        <td><span class="bar" style="width:100%"></span></td></tr>
+      <tr><td>fe_invert</td><td>21,533</td><td>7%</td>
+        <td><span class="bar" style="width:8%"></span></td></tr>
+      <tr><td>cswap (×512)</td><td>~5,600</td><td>1.8%</td>
+        <td><span class="bar" style="width:2%"></span></td></tr>
+      <tr><td>pack / unpack / final mul</td><td>~6,000</td><td>2%</td>
+        <td><span class="bar" style="width:2%"></span></td></tr>
+    </tbody>
+  </table>
+  <p class="callout">
+    Because ~96% of the cycles are field operations (ladder + invert), <b>making one <code>mul</code>/<code>sq</code>
+    cheaper is the only lever that moves the end-to-end number.</b> Everything else (adds 10 cyc, cswap 11 cyc) is
+    in the noise.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>2. The field op itself: microcode vs every other backend</h2>
+  <p>
+    Measured in one identical dependent-chain harness (latency, memory-to-memory — exactly how the ladder uses
+    them), per single 5×51 operation:
+  </p>
+  <table>
+    <thead><tr><th>backend</th><th>mul (cyc)</th><th>vs µcode</th><th>sq (cyc)</th><th>vs µcode</th></tr></thead>
+    <tbody>
+      <tr class="uc-row"><td>microcode (patch RAM)</td><td>123.0</td><td>1.00×</td><td>122.8</td><td>1.00×</td></tr>
+      <tr><td>fiat-crypto (autogen C)</td><td>141.3</td><td class="win">1.15×</td><td>136.6</td><td class="win">1.11×</td></tr>
+      <tr><td>native (hand C, <code>__uint128</code>)</td><td>158.7</td><td class="win">1.29×</td><td>166.0</td><td class="win">1.35×</td></tr>
+      <tr><td>CryptOpt (tuned x86-64 asm)</td><td>142.4</td><td class="win">1.16×</td><td>122.0</td><td>0.99×</td></tr>
+    </tbody>
+  </table>
+  <p class="note">“vs µcode” = how many times slower that backend is than the microcode op. >1 means microcode wins.</p>
+
+  <h3>Why is the microcode op faster?</h3>
+  <p>
+    A 5×51 field multiply is 25 64-bit integer multiplies plus a serial carry/reduction chain mod 2²⁵⁵−19 —
+    about 50–70 machine instructions when compiled. The Goldmont N3350 is a <b>narrow, in-order Atom-class core</b>:
+    it decodes ~2 instructions/cycle and cannot reorder around the serial carry chain, so fiat/native bottleneck on
+    the <b>front-end and the dependency chain</b> at ~140–166 cyc.
+  </p>
+  <p>
+    The microcode patch encodes the same arithmetic as <b>triads</b> (3 micro-ops + a sequencing word each) that
+    execute directly in patch RAM, driving the hardware multiplier through a private register file and bypassing
+    the fetch/decode/dispatch front-end entirely. The catch is a fixed <b>“firing tax”</b> — the cost of the
+    hooked <code>vmwrite</code>/<code>vmread</code> trigger plus patch entry/exit.
+  </p>
+  <p class="callout">
+    <b>Evidence that the tax — not the work — dominates:</b> the <code>mul</code> patch is 66 triads and the
+    <code>sq</code> patch is 42 triads, yet both measure <b>~123 cyc</b>. The per-op cost is essentially
+    independent of how much arithmetic the patch does, which means a fixed per-firing overhead sets the floor and
+    the actual multiply/reduce is largely hidden behind it. Microcode reaches that floor (~123 cyc); compiled C
+    cannot, because it pays the front-end tax on every one of its ~60 instructions.
+  </p>
+  <p>
+    This also explains the two boundaries of the result: microcode beats portable C clearly (it removes the
+    front-end bottleneck) but only <b>ties hand-tuned CryptOpt asm</b> (sq is a dead heat) — both have reached the
+    practical floor for this operation on this core; the microcode just gets there without hand-written asm.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>3. The clean proof: same ladder, swap only the field op</h2>
+  <p>
+    The per-op numbers predict the end-to-end win, but to remove every confound we ran four X25519s on the
+    <b>identical C Montgomery ladder</b> (same driver, invert, cswap, pack) and changed <b>only</b>
+    <code>fe_mul</code>/<code>fe_sq</code>:
+  </p>
+  <table>
+    <thead><tr><th>field-op backend (same C ladder)</th><th>median cyc</th><th>ratio vs microcode</th><th></th></tr></thead>
+    <tbody>
+      <tr class="uc-row"><td>microcode (<code>ucode/C-ladder</code>)</td><td>312,399</td><td>1.00×</td>
+        <td><div class="barwrap"><span class="bar uc" style="width:80%"></span></div></td></tr>
+      <tr><td>fiat-crypto</td><td>357,929</td><td class="win">1.15× slower</td>
+        <td><div class="barwrap"><span class="bar" style="width:92%"></span></div></td></tr>
+      <tr><td>CryptOpt asm</td><td>385,497</td><td class="win">1.23× slower</td>
+        <td><div class="barwrap"><span class="bar" style="width:99%"></span></div></td></tr>
+      <tr><td>native (hand C)</td><td>389,137</td><td class="win">1.25× slower</td>
+        <td><div class="barwrap"><span class="bar" style="width:100%"></span></div></td></tr>
+    </tbody>
+  </table>
+  <p class="callout">
+    On a byte-for-byte identical ladder, the microcode field op alone takes X25519 from fiat's 357,929 to
+    <b>312,399 cyc — a 1.15× win with zero other variables.</b> That <b>1.15×</b> matches the per-op
+    <code>mul</code> ratio exactly, closing the loop: the field-op latency <em>is</em> the end-to-end win.
+  </p>
+  <p class="note">
+    (CryptOpt loses more end-to-end than its near-tied per-op cost suggests: in the full ladder it is an
+    <em>external</em> asm call per operation — call/return overhead that doesn't inline — whereas microcode and
+    fiat are emitted inline.)
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>4. The inline-asm coding tricks add only ~2%</h2>
+  <p>
+    Our headline <code>ours/ucode</code> (304,467 cyc) also uses two register-chaining tricks on top of the
+    microcode ops. Toggling each off shows they are a minor polish, not the source of the win:
+  </p>
+  <table>
+    <thead><tr><th>trick disabled</th><th>chained</th><th>plain (off)</th><th>cost of the trick</th></tr></thead>
+    <tbody>
+      <tr><td>ladder register-chaining</td><td>1,062.5/step</td><td>1,093.2/step</td><td class="win">~7.8k / X25519 (~2.5%)</td></tr>
+      <tr><td>invert squaring-chaining</td><td>21,532/op</td><td>22,135/op</td><td>~0.6k (~0.2%)</td></tr>
+      <tr class="uc-row"><td>both (full X25519)</td><td>305,151</td><td>311,704</td><td class="win">~6.6k (~2.1%)</td></tr>
+    </tbody>
+  </table>
+  <p class="callout">
+    The tricks only remove <code>mov</code>s <em>between</em> firings — but a <code>mov</code> is ~1 cyc and a
+    firing is ~123 cyc, so eliminating reloads buys almost nothing. <b>The ladder coding is a ~2% effect; the
+    microcode field op is the ~15% effect.</b>
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>5. Where it lands in the full field</h2>
+  <p>Every contender, end-to-end X25519, median cycles (lower is better):</p>
+  <table>
+    <thead><tr><th>implementation</th><th>median cyc</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>amd64-64/asm <span class="note">(4×64 sat; lib25519's Goldmont pick)</span></td><td>272,768</td>
+        <td><div class="barwrap"><span class="bar bad" style="width:70%"></span></div></td></tr>
+      <tr class="uc-row"><td>ours/ucode <span class="note">(inline 5×51 + microcode)</span></td><td>304,467</td>
+        <td><div class="barwrap"><span class="bar uc" style="width:78%"></span></div></td></tr>
+      <tr><td>ucode/C-ladder <span class="note">(microcode, plain C ladder)</span></td><td>312,399</td>
+        <td><div class="barwrap"><span class="bar" style="width:80%"></span></div></td></tr>
+      <tr><td>amd64-51/ucode <span class="note">(amd51 frame + microcode)</span></td><td>323,035</td>
+        <td><div class="barwrap"><span class="bar" style="width:83%"></span></div></td></tr>
+      <tr><td>donna_c64</td><td>335,764</td><td><div class="barwrap"><span class="bar" style="width:86%"></span></div></td></tr>
+      <tr><td>amd64-51/asm</td><td>356,938</td><td><div class="barwrap"><span class="bar" style="width:92%"></span></div></td></tr>
+      <tr><td>ours/fiat</td><td>357,929</td><td><div class="barwrap"><span class="bar" style="width:92%"></span></div></td></tr>
+      <tr><td>ours/cryptopt</td><td>385,497</td><td><div class="barwrap"><span class="bar" style="width:99%"></span></div></td></tr>
+      <tr><td>ours/hand-C</td><td>389,137</td><td><div class="barwrap"><span class="bar" style="width:100%"></span></div></td></tr>
+    </tbody>
+  </table>
+  <p class="callout" style="border-color:var(--warn)">
+    <b>Honest framing.</b> The microcode beats every <em>5×51</em> backend and matches tuned asm, but it does
+    <b>not</b> beat <code>amd64-64/asm</code> (272,768 cyc). That implementation uses a different representation —
+    <b>4×64 saturated (radix 2⁶⁴)</b> — which needs fewer, wider limbs and is what lib25519's autotuner selects on
+    Goldmont. The fair, like-for-like claim is: <b>among 5×51 implementations, the microcode field op is the
+    fastest, beating the fiat-crypto reference by 1.15× and matching hand-tuned asm.</b>
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>6. The attribution, in one chain</h2>
+  <ol class="chain">
+    <li><b>Per-op:</b> the microcode <code>mul</code>/<code>sq</code> is ~1.1–1.3× cheaper than compiled C
+      (123 cyc vs fiat 141 / native 159), because it bypasses the narrow Goldmont front-end and pays only a fixed
+      firing tax.</li>
+    <li><b>Structure:</b> X25519 is firing-bound — ~2,561 dependent field ops, ~89% of cycles in the ladder — so
+      a per-op win translates almost 1:1 to the end-to-end number.</li>
+    <li><b>End-to-end (zero confound):</b> on the identical C ladder, swapping in microcode field ops gives
+      312,399 vs fiat's 357,929 = <b>1.15×</b>, matching the per-op ratio.</li>
+    <li><b>Everything else is small:</b> the inline-asm register-chaining adds ~2%; cswap, pack, and adds are
+      negligible.</li>
+  </ol>
+
+  <footer>
+    <p><b>Reproduce</b> (Goldmont N3350, frequency-pinned, <code>sudo taskset -c 0</code>):</p>
+    <p class="mono">
+      make PROG=bench_fieldop &nbsp;→ per-op field-op cost (§2)<br>
+      make PROG=full_curve25519_inline2 &nbsp;→ end-to-end leaderboard + same-ladder isolation (§3, §5)<br>
+      make PROG=bench_attrib &nbsp;→ inline-chaining attribution (§4)<br>
+      ./bench_supercop_matrix.sh &nbsp;→ pinned per-(compiler,-O) sweep; geomean is the number to quote
+    </p>
+    <p>
+      Methodology: median cycles, <code>rdtsc</code>/<code>cpuid</code> fenced; per-op figures are min-of-trials of
+      a 16×-unrolled dependent chain (latency); C backends get a per-op compiler barrier so they pay the same
+      memory round-trip the microcode macro always does. All implementations verified against RFC 7748
+      (23/23 vectors, single shared process). Numbers shown are single-run and indicative; quote the matrix geomean
+      for the paper. fe_mul patch = 66 triads (vmwrite hook @ U7c00); fe_sq = 42 triads (vmread hook @ U7d08).
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>
