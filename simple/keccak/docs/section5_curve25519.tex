@@ -2,492 +2,389 @@
 % Section 5 — Curve25519 in Microcode
 % Draft for TCHES submission.
 %
-% Companion to Section 4 (Keccak): the second worked example that
-% instantiates the general methodology of Section 3. Where Keccak stressed
-% control flow and register residency, Curve25519 stresses the dense
-% multiply-accumulate-carry chain of reduced field arithmetic. All
-% Curve25519-specific detail lives here. Numbers and design rationale are
-% taken from the field-op patches (asm_op_curve25519.c / _mul.c), our
-% fastest X25519 implementation (full_curve25519_inline2.c, the
-% register-chained all-inline-assembly ladder = the "ucode-inline"
-% contender), the same-ladder isolation harness (full_curve25519.c), and
-% the recorded matrix scoreboard (RESULTS.md).
+% Written from the implementation: the two field-operation patches
+% (asm_op_curve25519.c = squaring, asm_op_curve25519_mul.c = multiplication),
+% the register-chained all-inline-assembly scalar multiplication
+% (full_curve25519_inline2.c, the "ucode-inline" contender), and the
+% measured 24-configuration matrix (curve25519/RESULTS.md). Cross-references
+% to other sections (Keccak, the findings, the triad/packing rules, the
+% budget) are retained; everything Curve25519-specific is derived here from
+% the code and the measurements.
 %
-% Assumes the Background has recalled X25519 / the Montgomery ladder and
-% the field GF(2^255-19); we restate only what the mapping needs.
+% Assumes the Background has recalled X25519, the Montgomery ladder, and the
+% field GF(2^255-19); only what the microcode mapping needs is restated.
 % =====================================================================
 
 \section{Curve25519 in Microcode}
 \label{sec:curve25519}
 
-The second worked example instantiates the methodology of
-\Cref{sec:ucode-layer} on the field arithmetic that underlies X25519.
-Whereas the Keccak permutation of \Cref{sec:keccak} was realised as a single
-large, control-flow-heavy patch that is looped in place, a Curve25519 field
-operation has the opposite character in every respect that matters to the
-layer. It is a small, straight-line, multiplication-dominated kernel, and it is
-invoked many hundreds of times within a single scalar multiplication rather
-than once. The primitive that we encode in microcode is consequently the field
-multiplication and the field squaring modulo the prime $2^{255}-19$, and the
-question that the section addresses is whether a microcode patch can evaluate
-these two operations more quickly than the best native code available on the
-platform. We interpret the phrase ``best available native code'' deliberately
-broadly, so that the comparison is made not against a single reference but
-against four qualitatively distinct classes of competitor: the output of a
-modern optimising compiler, an automatically generated and formally verified
-arithmetic backend, the output of a dedicated cryptographic superoptimiser, and
-expert hand-written assembly produced by the designers of the primitive
-themselves.
+The second worked example carries the methodology of \Cref{sec:ucode-layer} from
+a permutation onto field arithmetic. The Keccak study of \Cref{sec:keccak}
+concerned a single large kernel, evaluated once per message block, whose
+difficulty was that its state did not fit in the architectural register file. A
+Curve25519 field operation presents the opposite profile in every dimension that
+the microcode layer is sensitive to. It is small, it is straight-line, it is
+dominated by integer multiplication, its operands occupy only a handful of
+registers, and a single scalar multiplication invokes it on the order of a
+thousand times. The object we place in the patch RAM is therefore not the scalar
+multiplication but the two field operations beneath it, the multiplication and
+the squaring modulo the prime $p = 2^{255}-19$, and the experimental question is
+whether a hand-scheduled microcode encoding of those two operations can be made
+faster than the best native code that exists for them: a modern optimising
+compiler, a formally verified arithmetic generator, a dedicated cryptographic
+superoptimiser, and the hand-written assembly of the primitive's own designers.
 
-\paragraph{The structural advantage.}
-In this setting the advantage of the microcode layer is not register residency,
-which was the lever exploited by Keccak, because the five limbs of a field
-element occupy only a small fraction of the architectural register file and a
-native implementation is under no pressure to spill them. The advantage is
-located instead in the carry structure of reduced multiplication. The
-performance-critical path of such a multiplication is a sum of partial products
-that is accumulated into a small number of running totals and is then resolved
-into the canonical limb representation by the propagation of carries between
-limbs, and it is an empirical fact about this kernel on a two-issue in-order
-core that the limiting resource is the carry propagation rather than the
-multiplication itself. The reason is architectural. The x86-64 instruction set
-exposes a single carry flag, and multi-word carry propagation is therefore
-obliged to serialise through the add-with-carry instruction, \texttt{ADC},
-because each such instruction both reads and writes the one shared flag. A
-two-arithmetic-unit in-order pipeline cannot overlap this strictly serial
-dependent chain with the independent multiplications that feed it, and the
-multiplier throughput that the core nominally offers is left unrealised. The
-microcode layer removes this obstruction by two mechanisms, both of which are
-consequences of the micro-architectural properties established empirically in
-\Cref{sec:findings}. First, a single triad fuses a multiplication, an
-accumulation of a partial product, and the capture of the carry that the
-accumulation produces into one issue bundle, so that the carry capture costs
-nothing beyond the multiplication it accompanies. Second, the per-register
-\texttt{SETCC} flag domains permit several carry chains to advance concurrently,
-each writing its own private flag, without any of them contending for the one
-architectural carry flag. This concurrency of carry propagation is, for field
-arithmetic, the exact counterpart of the register residency that Keccak
-exploited: in both cases the layer performs work that the instruction set
-architecture is structurally unable to express, and in both cases that work is
-precisely the bottleneck of the native implementation.
+Because the field element fits comfortably in registers, the lever that drove
+the Keccak result --- whole-state residency --- is unavailable and unnecessary
+here. The lever instead is the structure of carry propagation, and the remainder
+of this section is organised around it: \Cref{sec:c25519-field} establishes why
+the carry chain, rather than the multiplication, is what binds a native
+implementation; \Cref{sec:c25519-kernel} describes the triad kernel that breaks
+that bind by maintaining three carry chains at once; \Cref{sec:c25519-coexist}
+and \Cref{sec:c25519-budget} treat the installation of the two patches together
+and the packing pressure peculiar to this primitive; \Cref{sec:c25519-assemble}
+describes how the inlined scalar multiplication is built around the two patches;
+and \Cref{sec:c25519-perf} reports the measurements and states plainly where the
+advantage ends.
 
 % ---------------------------------------------------------------------
-\subsection{Representation and Operations}
-\label{sec:c25519-rep}
+\subsection{The Field Operation and the Carry Bottleneck}
+\label{sec:c25519-field}
 
-We adopt the unsaturated radix-$2^{51}$ representation, in which a field element
-is stored as five 64-bit machine words, termed limbs, each of which carries only
-51 significant bits and is therefore free of the upper 13 bits. This is the
-representation emitted by fiat-crypto and the representation used by the
-Bernstein--Schwabe \texttt{amd64-51} implementation, and adopting it allows the
-microcode backend to be substituted for those native backends without any change
-to the surrounding scalar multiplication. A multiplication of two field elements
-is the $5\times5$ schoolbook expansion into twenty-five partial products, and
-the modular reduction implied by the congruence $2^{255}\equiv 19 \pmod{2^{255}-19}$
-is folded directly into the cross terms rather than being deferred to a separate
-pass, so that the limbs of the product are obtained as
+A field element is represented in the unsaturated radix-$2^{51}$ form: five
+64-bit words, each holding 51 significant bits and leaving the upper 13 bits
+free. This is the representation that fiat-crypto emits and that the
+Bernstein--Schwabe \texttt{amd64-51} code uses, and adopting it unchanged is what
+later permits the microcode field operations to be dropped into those native
+frameworks without disturbing anything around them. A multiplication is the
+$5\times5$ schoolbook of twenty-five partial products, and the reduction implied
+by $2^{255}\equiv 19 \pmod p$ is folded into the cross terms so that the wrapped
+products simply enter the lower output limbs scaled by $19$, with no separate
+reduction pass:
 \[
 c_i \;=\; \sum_{j\le i} a_{\,i-j}\,b_j \;+\; 19\!\!\sum_{j>i} a_{\,5+i-j}\,b_j ,
 \qquad 0 \le i < 5 .
 \]
-The terms of the second sum are the wrapped products, whose indices exceed the
-limb count and which are therefore multiplied by the folding constant $19$ to
-account for the reduction. Squaring is treated as a distinct operation rather
-than as a multiplication of an element by itself, because the symmetry
-$a_i a_j = a_j a_i$ collapses the twenty-five products of the general
-multiplication to the fifteen distinct products of a square, with the off
-diagonal products entering with a doubled coefficient. The doublings $2a_i$ that
-this coefficient requires, and the folds $19a_i$ that the reduction requires, are
-not recomputed inside the kernel; they are materialised once by the caller, by
-means of address-generation and integer-multiply instructions on the native
-side, and are delivered to the patch in registers, so that the microcode is
-presented with operands that are already in the form its partial products
-consume.
+Squaring is encoded as a separate patch rather than reusing the multiplication,
+because the symmetry $a_i a_j = a_j a_i$ collapses the twenty-five products to
+fifteen, with the off-diagonal terms taken with a coefficient of two. The
+coefficients this introduces --- the doublings $2a_i$ and the reduction folds
+$19a_i$ --- are not recomputed inside the patch. They are produced once by the
+caller using address-generation (\texttt{lea}) and integer-multiply
+(\texttt{imul}) instructions on the native side and handed to the patch in
+registers, so the kernel receives operands already shaped for its partial
+products and spends none of its triads forming them.
 
-The carries that arise during accumulation are, by construction, both short and
-mutually independent, and this is the property of the representation that makes
-it congenial to the layer. Because every limb is reduced to 51 bits, the value
-that must be carried from one limb into the next occupies at most the
-complementary 13 bits, which together with the 51-bit limb exactly fill a 64-bit
-word. A carry is therefore a narrow quantity that is propagated by a fixed
-sequence of shifts rather than a full-width addition, and the carry out of one
-limb does not depend on a carry deep within another. We return to the
-significance of this brevity and independence in \Cref{sec:c25519-perf}, because
-it is exactly the point at which the saturated $4\times64$ representation, whose
-carries are full-width and serially dependent, behaves in the opposite manner
-and where the comparative advantage of the layer is consequently reversed.
+The reason this kernel is hard for native code is not the multiplications, which
+a modern core issues at high throughput, but the carries that stitch the partial
+products into a canonical result. The x86-64 architecture exposes exactly one
+carry flag, and so a multi-word accumulation that must propagate carries is
+forced to serialise through the add-with-carry instruction, each instance of
+which both consumes and produces that single flag. On the two-arithmetic-unit
+in-order pipeline of the target core, this serial flag dependency cannot be
+overlapped with the independent multiplications that feed it; the multiplier sits
+idle behind the carry chain. The unsaturated representation softens the problem
+but does not remove it for native code: because each limb is reduced to 51 bits,
+the value carried into the next limb occupies at most the complementary 13 bits,
+so carries are short and, across limbs, largely independent of one another. It is
+this shortness and independence that the microcode layer is able to exploit and
+that the architectural single-flag discipline cannot. We will see in
+\Cref{sec:c25519-perf} that the moment the representation is changed to the
+saturated $4\times64$ form, whose carries are full-width and serially dependent,
+the same property reverses and the layer loses its footing.
 
 % ---------------------------------------------------------------------
-\subsection{The Patch: Fused Multiply--Accumulate and Parallel Carry Chains}
-\label{sec:c25519-patch}
+\subsection{The Kernel: One Firing, Three Carry Chains}
+\label{sec:c25519-kernel}
 
-A complete field multiplication, or a complete field squaring, is carried out by
-a single execution of one hooked macro-instruction, an event that we continue to
-term a firing. The native ladder requests the operation by issuing that one
-instruction, whereupon the corresponding patch evaluates the entire reduced
-product within the register file --- which is to say all twenty-five, or in the
-squaring case fifteen, partial products, together with the inter-limb carry
-propagation and the modular reduction --- and returns control to the native side
-with the five result limbs in place. There is in consequence neither any per-limb
-looping within the patch nor any repeated round trip between native code and
-microcode within a single field operation; the firing is atomic from the point of
-view of the caller.
+An entire field multiplication, or an entire field squaring, is performed by a
+single execution of one hooked macro-instruction --- one firing. The native side
+issues that instruction; the patch then computes every partial product, every
+inter-limb carry, and the final modular reduction within the register file, and
+returns with the five result limbs in place. Nothing about the operation loops
+inside the patch, and control never crosses back and forth between native code
+and microcode in the middle of an operation. The kernel is consequently a single
+flat schedule of triads, and its entire art lies in how densely the
+multiplications, accumulations, and carries are packed into the three operation
+slots of each triad.
 
-\paragraph{Coexistence of the two patches.}
-The multiplication and squaring patches reside in the patch RAM simultaneously,
-the multiplication occupying 66 triads from address \texttt{U7c00} and the
-squaring occupying 42 triads from \texttt{U7d08}, the latter address being the
-former advanced by the 66 triads of the multiplication. Because a single hooked
-macro-instruction can be redirected to only one patch entry point, installing
-both operations at once requires that each be reached through a distinct match
-register that intercepts a different macro-instruction, in the manner described
-in \Cref{sec:triads-packing}. We hook the multiplication to \texttt{vmwrite},
-whose opcode is \texttt{0x0cd8}, and the squaring to \texttt{vmread}, whose
-opcode is \texttt{0x0618}; the native ladder thereby fires a multiplication by
-issuing a \texttt{vmwrite} and a squaring by issuing a \texttt{vmread}. These
-two instructions are chosen because they are inert in the unprivileged context
-in which the ladder runs, so that their architectural effect is irrelevant and
-only the redirection to the patch is observed. The combined residency of $66+42$
-triads occupies $108$ of the $128$ available, which leaves the budget
-comfortably unexhausted and distinguishes this primitive sharply from Keccak.
-
-\paragraph{The kernel and its preparation.}
-The caller passes the five limbs of each operand in fixed registers, together,
-in the multiplication case, with the four precomputed folds $19b_1,\dots,19b_4$.
-A short preparation stage at the head of the multiplication patch materialises
-the remaining folds in place by three integer multiplications by $19$ packed
-into a single triad, a packing that is licensed by the slot-write rule of
-\Cref{sec:findings}, under which the latest write to a shared destination within
-a triad prevails. Thereafter the kernel traverses the five output limbs, and for
-each of them emits a chain of fused multiply--accumulate triads of the form shown
-in \Cref{lst:c25519-mac}. The single defining feature of these triads is that the
-double-width product is split at issue: the low half of the product is delivered
-into a working register, where it is immediately added into the low accumulator,
-while the high half is delivered into a second register, where it will be added
-into the high accumulator, and the carry produced by the low addition is captured
-into a per-register flag in the third slot. A multiplication, an accumulation, and
-a carry capture thus share one issue bundle, and the multiplication of the
-\emph{next} partial product is begun in the same triad in which the previous one
-is accumulated.
+\paragraph{Three accumulators that never share the carry flag.}
+The kernel forms each output limb as a sum of products held in three independent
+running totals, none of which uses the architectural carry flag. The low halves
+of the partial products accumulate into a register we will call the low
+accumulator (\texttt{TMP0}); the high halves accumulate into a high accumulator
+(\texttt{R8}); and the carries thrown off by the low-half additions are summed
+into a third register (\texttt{TMP9}). The double-width product itself is split
+at the multiply: the instruction is encoded so that its low half is written into
+the operand register, where it is read and added into the low accumulator in the
+very next slot, while its high half is written into a scratch register
+(\texttt{RCX}) to be added into the high accumulator. The carry produced by each
+low-half addition is captured by a \texttt{SETCC} into a per-register flag domain
+of the kind established in \Cref{sec:findings}, which is the property that makes
+the whole scheme possible: because each chain captures its carry into its own
+private flag, the carry capture fits in a spare slot of the same triad that
+issues the next multiplication, rather than serialising on one shared flag behind
+it. \Cref{lst:c25519-mac} shows the resulting motif, in which a multiplication,
+the accumulation of a partial product, and a carry capture co-reside in two
+triads while the next product is already in flight.
 
 \begin{lstlisting}[language=C,caption={The fused multiply--accumulate--carry
-core of the squaring kernel for a single limb. The register \texttt{TMP0} holds
-the low accumulator, \texttt{R8} the high accumulator, \texttt{TMP9} the running
-sum of accumulation carries, and \texttt{TMP15} the transient \texttt{SETCC}
-carry of the most recent accumulation. A double-width product reaches the kernel
-as a low half in a working register and a high half in \texttt{RCX}; one triad
-accumulates the low half, captures its carry, and folds in the high half of the
-previous product, while simultaneously launching the next
-product.},label={lst:c25519-mac},basicstyle=\ttfamily\footnotesize]
-{ ADD(TMP0,TMP0,RDI),  SETCC(TMP15,TMP0),  ADD(R8,R8,RCX),     NOP_SEQW } // acc low half; capture carry; acc previous high half
-{ ZEROEXT(TMP9,TMP15), MUL(RCX,RBX,R13),   ADD(TMP0,TMP0,R13), NOP_SEQW } // seed carry sum; next product; accumulate its low half
+motif, taken from the squaring kernel's first output limb. \texttt{TMP0} is the
+low accumulator, \texttt{R8} the high accumulator, \texttt{TMP9} the running sum
+of accumulation carries, \texttt{TMP15} the transient \texttt{SETCC} carry. The
+multiply writes its low half into the operand register (read on the same line)
+and its high half into \texttt{RCX} (added in
+later).},label={lst:c25519-mac},basicstyle=\ttfamily\footnotesize]
+{ ZEROEXT(TMP0,RAX),   MUL(RCX,RDI,RDI),    NOP,               NOP_SEQW } // TMP0:=0 ; product a0*a0 -> (hi=RCX, lo=RDI)
+{ ADD(TMP0,TMP0,RDI),  SETCC(TMP15,TMP0),   ADD(R8,R8,RCX),    NOP_SEQW } // acc low half ; capture carry ; acc previous high half
+{ ZEROEXT(TMP9,TMP15), MUL(RCX,RBX,R13),    ADD(TMP0,TMP0,R13),NOP_SEQW } // seed carry sum ; next product ; acc its low half
 \end{lstlisting}
 
-\paragraph{Three concurrent accumulators.}
-The decisive structural feature of the kernel is that the sum of partial products
-for a single limb is maintained not as one running total but as three independent
-running totals, no one of which ever touches the single architectural carry flag.
-The low halves of the products are accumulated into the register \texttt{TMP0},
-the high halves are accumulated into \texttt{R8}, and the carries that the
-individual low-half accumulations emit are summed into \texttt{TMP9}. Each of the
-three chains captures its own carry by a \texttt{SETCC} into a private per-register
-flag domain, as established in \Cref{sec:findings}, with the consequence that the
-carry capture occupies a spare slot of the multiplication's triad rather than
-serialising behind it on a shared flag. The arrangement is the exact realisation,
-in the field-arithmetic setting, of the abstract claim made in the introduction to
-this section, namely that the layer can advance several carry chains at once where
-the instruction set can advance only one.
+\paragraph{Resolving a limb and linking to the next.}
+At the end of a limb the three accumulators are reconciled into one canonical
+limb value and one carry into the following limb, by the short sequence of
+\Cref{lst:c25519-carry}. The carry sum is first folded into the high accumulator,
+so that \texttt{R8} then represents the entire contribution of weight $2^{64}$ and
+above and \texttt{TMP0} the contribution below it; the full accumulated value of
+the limb is $S = \texttt{TMP0} + 2^{64}\,\texttt{R8}$. The output limb is the
+residue $S \bmod 2^{51}$, and the carry into the next limb is the quotient
+$\lfloor S/2^{51}\rfloor$. The kernel exploits the identity
+$2^{64} = 2^{51}\cdot 2^{13}$ to compute both cheaply. The quotient separates into
+a low contribution $\texttt{TMP0} \gg 51$, which is at most 13 bits wide, and a
+high contribution $\texttt{R8} \ll 13$, whose low 13 bits are necessarily zero;
+the two are therefore disjoint in their bit positions, and their sum is realised
+by a single bitwise \texttt{OR}. That \texttt{OR} is the whole of the inter-limb
+link: it seeds the low accumulator of the next limb. The output limb itself,
+$\texttt{TMP0} \bmod 2^{51}$, is produced by shifting left by 13 and then right by
+13, which clears the upper bits with no mask constant and no spare register. After
+the last limb the remaining top carry is folded back into limb zero by a single
+multiplication by the constant $19$, one short propagation from limb zero into
+limb one completes the reduction modulo $p$, and the result is left lazily reduced
+to at most 52 bits in one limb, which the representation tolerates.
 
-\paragraph{Resolving and linking the carries.}
-The three accumulators are reconciled into one canonical limb, and a carry into the
-following limb, at the close of each limb by the short sequence shown in
-\Cref{lst:c25519-carry}. The accumulation-carry sum \texttt{TMP9} is first folded
-into the high accumulator, so that \texttt{R8} represents the entire contribution
-of weight $2^{64}$ and above and \texttt{TMP0} represents the contribution below
-$2^{64}$. The full accumulated value of the limb is then $S = \texttt{TMP0} +
-2^{64}\,\texttt{R8}$, from which the output limb is the residue $S \bmod 2^{51}$
-and the carry into the next limb is the quotient $\lfloor S / 2^{51}\rfloor$.
-Because $2^{64} = 2^{51}\cdot 2^{13}$, the quotient separates exactly into a low
-contribution $\lfloor \texttt{TMP0}/2^{51}\rfloor$, obtained by a right shift of
-\texttt{TMP0} by 51 and occupying at most 13 bits, and a high contribution
-$2^{13}\,\texttt{R8}$, obtained by a left shift of \texttt{R8} by 13 and having its
-low 13 bits necessarily zero. The two contributions are therefore disjoint in
-their bit positions, and the seemingly additive combination
-$\lfloor S/2^{51}\rfloor$ is realised by a single bitwise \texttt{OR} rather than
-an addition; this \texttt{OR} is the operation that seeds the low accumulator of
-the following limb, and it constitutes the entire inter-limb link. The output limb
-itself, the residue $S \bmod 2^{51} = \texttt{TMP0} \bmod 2^{51}$, is produced by
-the idiom of a left shift by 13 followed by a right shift by 13, which clears the
-upper 13 bits of the word without a mask constant. The final limb's carry is folded
-back into the lowest limb through one further multiplication by the constant $19$,
-which completes the reduction modulo $2^{255}-19$.
-
-\begin{lstlisting}[language=C,caption={Resolution of one limb and the link into the
-next, shown schematically; the exact register names of the output and the
-next-limb operands vary from limb to limb. The carry into the next limb is split
-into a 13-bit low part \texttt{TMP8} and a left-shifted high part \texttt{TMP1}
-whose bit positions are disjoint, so that the link is a bitwise \texttt{OR} rather
-than an addition.},label={lst:c25519-carry},basicstyle=\ttfamily\footnotesize]
-{ ADD(R8,R8,TMP9),    SHR(TMP8,TMP0,51),  SHL(TMP6,TMP0,13), NOP_SEQW } // fold carry sum into high acc; low carry; mask-prep
-{ SHR(out_i,TMP6,13), SHL(TMP1,R8,13),    ...,               NOP_SEQW } // out_i = TMP0 mod 2^51; high carry = R8 << 13
-// ... open the next limb ...
-{ OR(TMP0,TMP8,TMP1), MUL(RCX,a,b),       ADD(TMP0,TMP0,b),  NOP_SEQW } // TMP0 := low carry | high carry (bit-disjoint)
+\begin{lstlisting}[language=C,caption={Limb resolution and the inter-limb link.
+Because $2^{64}=2^{51}\cdot2^{13}$, the carry out of a limb splits into a 13-bit
+low part (\texttt{TMP8}) and a left-shifted high part (\texttt{TMP1}) whose bit
+ranges do not overlap, so the link that opens the next limb is an \texttt{OR},
+not an addition.},label={lst:c25519-carry},basicstyle=\ttfamily\footnotesize]
+{ ADD(R8,R8,TMP9),    SHL(TMP6,TMP0,13),   SHL(TMP1,R8,13),   NOP_SEQW } // fold carry sum ; mask-prep ; high carry = R8<<13
+{ SHR(out0,TMP6,13),  SHR(TMP8,TMP0,51),   NOTAND(R8,R8,R8),  NOP_SEQW } // out0 = TMP0 mod 2^51 ; low carry ; clear R8
+// ... the next limb opens with the link and its first product ...
+{ OR(TMP0,TMP8,TMP1), MUL(RCX,R15,R13),    ADD(TMP0,TMP0,R13),NOP_SEQW } // TMP0 := lowcarry | highcarry ; next product
 \end{lstlisting}
+
+This is the field-arithmetic realisation of the structural claim the paper makes
+for the layer as a whole. The native multiplication is bound by a single carry
+chain threaded through one flag; the microcode runs three accumulation chains in
+parallel on private flags and folds each carry capture into a multiplication's own
+triad. The work the layer performs --- concurrent carry propagation --- is exactly
+the work the instruction set cannot express, just as whole-state residency was for
+Keccak.
 
 \paragraph{Authoring and verification.}
-In contrast to the Keccak permutation, whose round body is emitted by a generator,
-the Curve25519 field patches are scheduled by hand. The kernels are small enough,
-at a few tens of triads, to lay out manually, and the dense and irregular
-interleaving of multiplications and carries leaves little scope for a generic
-packer to improve upon a careful hand schedule. They are nonetheless held to the
-same discipline of slot allocation and hazard avoidance described in
-\Cref{sec:triads-packing}. Each patch is verified against the fiat-crypto
-reference implementation, which is also the backend that the superoptimiser
-targets, over a large corpus of random inputs and a thousand-iteration squaring
-chain, and the assembled X25519 is checked against the known-answer test vectors
-of RFC~7748 before any performance claim is made of it.
+Unlike the generator-emitted Keccak round, these two kernels are scheduled by
+hand. At a few tens of triads each they are small enough to lay out manually, and
+their dense, irregular interleaving of multiplies and carries gives a generic
+packer little to improve; they are nonetheless held to the slot and hazard rules
+of \Cref{sec:triads-packing}. Each patch is checked against the fiat-crypto
+reference --- the same backend the superoptimiser targets --- over a large random
+corpus and a thousand-iteration self-chaining test, and the assembled scalar
+multiplication is checked against the RFC~7748 known-answer vectors before any
+timing is reported.
 
 % ---------------------------------------------------------------------
-\subsection{Triad Budget}
+\subsection{Installing Both Operations at Once}
+\label{sec:c25519-coexist}
+
+The multiplication and squaring patches reside in the patch RAM at the same time:
+the multiplication occupies 66 triads beginning at \texttt{U7c00}, and the squaring
+occupies 42 triads beginning immediately after it at \texttt{U7d08}. Since one
+hooked macro-instruction can be redirected to only a single patch entry point,
+holding two operations resident requires two match registers intercepting two
+different instructions, in the manner of \Cref{sec:triads-packing}. We hook the
+multiplication to \texttt{vmwrite} (opcode \texttt{0x0cd8}) and the squaring to
+\texttt{vmread} (opcode \texttt{0x0618}); the native side fires a multiplication by
+issuing a \texttt{vmwrite} and a squaring by issuing a \texttt{vmread}, the latter
+emitted as raw opcode bytes since the operation is otherwise inert in the
+unprivileged context. The combined $66+42 = 108$ triads sit within the 128-triad
+capacity with room to spare. This dual installation is not a convenience; it is
+what allows a single block of inline assembly to interleave squarings and
+multiplications freely, which is the foundation of the integration described in
+\Cref{sec:c25519-assemble}, since each kind of operation has its own dedicated
+entry instruction and the two never collide.
+
+% ---------------------------------------------------------------------
+\subsection{Triad Budget: Density, Not Capacity}
 \label{sec:c25519-budget}
 
-The squaring kernel compiles to 42 triads and the multiplication kernel to 66
-triads, and both therefore lie comfortably within the 128-triad capacity of the
-patch RAM established in \Cref{sec:budget}. This is the qualitative respect in
-which Curve25519 differs most sharply from Keccak. For Keccak the patch budget was
-the binding constraint and the governing question was how to make a single round
-body fit at all; for Curve25519 the budget is slack and the governing design
-variable is instead the density of the packing, because every
-multiply--accumulate--carry sequence that is folded into one triad shortens both
-the static length of the patch and the dynamic length of its critical path. The
-optimisation history of these kernels consists almost entirely of such merges. The
-multiplication, for instance, was reduced from 73 triads to 66 by two
-transformations alone: packing the three preparatory folds into a single triad, as
-described above, and drawing the per-product carry capture out of dedicated triads
-and into the otherwise free third slots of the multiply--accumulate triads. The
-squaring was tightened analogously, its final limb being compressed from eight
-triads to seven by exploiting a cross-slot read-after-write dependence within a
-single triad. In each case the merge is sound only because the intra-triad hazard
-behaviour catalogued in \Cref{sec:findings} guarantees that the slots of a triad
-observe one another's writes in program order.
+For Keccak the binding constraint of \Cref{sec:budget} was capacity: a single
+round body strained against the 128-triad ceiling. For Curve25519 the constraint
+is inverted. At 108 triads the two operations leave the budget unexhausted, and
+the design pressure is not whether the kernel fits but how tightly it packs,
+because every multiply--accumulate--carry sequence folded into a single triad
+shortens both the static patch and its dynamic critical path. The development of
+these kernels is largely a history of such merges. The multiplication began near
+88 triads and was brought to 73 and then to 66 by, among other steps, packing the
+three preparatory reduction folds into one triad and pulling each product's carry
+capture out of a dedicated triad and into the free third slot of a
+multiply--accumulate triad. The squaring's last output limb was compressed from
+eight triads to seven by exploiting a cross-slot dependence within a single triad.
+Each such merge is legitimate only because the intra-triad hazard behaviour
+recorded in \Cref{sec:findings} guarantees that the three slots of a triad observe
+one another's reads and writes in program order; the packing rests directly on
+that empirical result.
 
 % ---------------------------------------------------------------------
-\subsection{Integration into X25519}
-\label{sec:c25519-integration}
+\subsection{Assembling X25519 Around the Patches}
+\label{sec:c25519-assemble}
 
-A field multiplication or squaring is invoked several hundred times in the course
-of a single scalar multiplication. The computation comprises a 255-step Montgomery
-ladder, each step of which performs on the order of ten field operations, followed
-by a field inversion that is itself dominated by squarings, the inversion being
-computed by Fermat's little theorem as the power $z^{p-2}$. Because each invocation
-is realised as a single hooked firing --- a \texttt{vmwrite} for a multiplication
-and a \texttt{vmread} for a squaring --- the per-firing dispatch overhead of
-approximately four cycles established in \Cref{sec:keccak} is incurred once per
-field operation and is amortised against the arithmetic that the firing performs.
+A scalar multiplication invokes the field operations on the order of a thousand
+times: a 255-step Montgomery ladder with roughly ten field operations per step,
+followed by a Fermat inversion $z^{p-2}$ that is itself a long chain of squarings.
+The fastest implementation we built, which we call the inlined ladder, expresses
+this entire computation as inline assembly built directly on the two patches,
+rather than as portable C that reaches them through function wrappers. The fifteen
+field elements a ladder step manipulates live together in one stack-resident
+state structure at fixed byte offsets, addressed throughout the step through a
+base register pinned to that structure, and the firings are emitted within one
+large assembly block per step. The compiler is thus obliged to allocate and spill
+only around the block as a whole, never between individual field operations.
 
-\paragraph{The inlined ladder and register chaining.}
-Our complete implementation, which is the fastest that we constructed and which we
-denote the inlined ladder, realises the entire scalar multiplication as inline
-assembly built around these two patches, rather than as portable C that reaches
-them through function wrappers. The fifteen field elements that a single ladder
-step manipulates are held together in one stack-resident state structure at fixed
-byte offsets, and the assembly addresses each of them through a base register that
-is pinned to that structure for the duration of the step. The microcode firings are
-emitted inline within one large assembly block per ladder step, with the consequence
-that the compiler is obliged to spill registers only around the block as a whole and
-not at the boundary of every field operation. Within that block, consecutive
-operations are chained through registers wherever the dataflow permits: the output
-limbs of one operation are left in precisely the registers that the next operation
-expects as its inputs, and the reload from memory that would otherwise begin the
-second operation is omitted entirely. This co-design of the caller conventions is
-deliberate. The addition and subtraction macros are arranged to deposit their five
-result limbs in the same register set that the squaring and multiplication patches
-read as their first operand, so that an addition feeding a squaring, or a
-subtraction feeding a multiplication, becomes a single uninterrupted chain. The
-principal assembly block of a ladder step contains six such register chains, of
-which the simplest is the addition $A = x_2 + z_2$ feeding directly into the
-squaring $AA = A^2$; a further chain appears in the short tail block that completes
-the computation of $z_2$. Where the dataflow does not permit chaining --- because
-the register set in which a squaring leaves its result does not coincide with the
-set a following multiplication requires --- the operands are reloaded, and the
-schedule is reordered to expose chains in preference to reloads. The four operations
-that compute the products $DA$ and $CB$ are, for this reason, reordered from their
-textbook sequence so that the subtraction producing $D$ feeds the multiplication
-producing $DA$ and the addition producing $C$ feeds the multiplication producing
-$CB$, yielding two independent chains where the natural order would yield only one,
-without altering the dataflow of the step.
+\paragraph{Chaining through registers.}
+The decisive integration technique is to choose the caller conventions so that one
+operation's outputs land in exactly the registers the next operation reads as
+inputs, eliminating the store and reload that would otherwise separate them. The
+addition and subtraction macros are written to deposit their five result limbs in
+the same register set that the squaring and multiplication patches consume as
+their first operand. An addition that feeds a squaring, or a subtraction that feeds
+a multiplication, therefore becomes a single chain with no intervening memory
+traffic for the intermediate. The principal block of a ladder step contains six
+such chains; the simplest is the addition $A=x_2+z_2$ feeding the squaring
+$AA=A^2$, and the others are $B=x_2-z_2$ into $B^2$, $D=x_3-z_3$ into $D\!\cdot\!A$,
+$C=x_3+z_3$ into $C\!\cdot\!B$, and the sum and difference of $D\!\cdot\!A$ and
+$C\!\cdot\!B$ each into a squaring. Two of these chains exist only because the four
+operations forming $D\!\cdot\!A$ and $C\!\cdot\!B$ are reordered away from their
+textbook sequence so that each difference or sum feeds its multiplication
+immediately, turning one chain into two without altering the dataflow. The three
+operations whose producer and consumer register sets do not coincide --- the two
+final multiplications and the subtraction $E=AA-BB$ --- are left to reload from the
+state structure, and a short tail block, together with one multiplication by the
+curve constant performed in C, completes $z_2$ as a seventh chain.
 
-\paragraph{The inversion chain.}
-The Fermat inversion is realised in the same manner, as a single inlined assembly
-block within which the long sequence of squarings is chained through registers, so
-that across each run of consecutive squarings only the first loads its operand from
-memory and only the last stores its result. The addition chain that computes
-$z^{p-2}$ decomposes the $254$ squarings into eleven runs of lengths $1$, $2$, $1$,
-$5$, $10$, $20$, $10$, $50$, $100$, $50$, and $5$, separated by eleven
-multiplications that recombine the partial powers; the runs of length two and above
-are squaring chains, and the separating multiplications are standalone because the
+\paragraph{The inversion as one chained block.}
+The Fermat inversion is built the same way, as a single inline block in which the
+$254$ squarings are grouped into eleven runs of lengths
+$1,2,1,5,10,20,10,50,100,50,5$, separated by eleven multiplications that recombine
+the intermediate powers. Within a run, only the first squaring loads its operand
+from memory and only the last stores its result; between consecutive squarings the
+previous output is renamed into the input position by four register moves, the
+fifth limb needing no move because the lowest output limb already occupies the
+lowest input register. The separating multiplications stand alone, because the
 register set a squaring produces does not match the set a multiplication consumes.
-Within a squaring chain a single squaring's output is renamed into its input
-position by four register moves, the fifth limb requiring no move because the lowest
-output limb already occupies the lowest input register, after which the next squaring
-proceeds with no memory traffic whatsoever.
-
-\paragraph{The principle generalised.}
-This arrangement extends the principle of \Cref{sec:budget}, that data movement
-rather than arithmetic is the quantity to be minimised, from the interior of a single
-field operation, where the layer already eliminates the per-limb memory traffic that
-register-starved native code incurs, to the boundaries between successive operations,
-where the inlined ladder eliminates the reload that would otherwise separate them. It
-is the reason that the inlined ladder is measurably faster than the otherwise
-identical implementation that invokes the same microcode field operations through
-function calls, and it is the integration counterpart of the intra-operation packing
-of \Cref{sec:c25519-patch}.
-
-\paragraph{Isolating the field operation.}
-The inlined ladder, by its very construction, entangles the cost of the field
-operation with the cost of the integration, and so in order to measure the
-contribution of the field operation alone we additionally conduct a controlled
-comparison in which the ladder, the inversion chain, and the conditional swap are
-held fixed and only the field backend is varied. This same-ladder comparison is
-conducted against four alternatives: hand-written C using the compiler's native
-$128$-bit integer type, the automatically generated and formally verified C produced
-by fiat-crypto, the Goldmont-tuned assembly produced by the CryptOpt superoptimiser,
-and the hand-written \texttt{amd64-51} assembly of Bernstein and Schwabe. We perform
-the comparison both within our own ladder and within the \texttt{amd64-51} ladder, so
-that the microcode backend is evaluated against expert assembly not only on a
-framework of our own choosing but on the framework of the assembly's own authors,
-where the only component that differs between the two measured implementations is the
-field arithmetic itself.
+This is the same data-movement principle as \Cref{sec:budget}, extended from the
+interior of one field operation, where the layer already removes the per-limb
+memory traffic, to the seams between operations, where the inlined ladder removes
+the reloads.
 
 % ---------------------------------------------------------------------
 \subsection{Performance}
 \label{sec:c25519-perf}
 
 \paragraph{Methodology.}
-We follow the measurement discipline of \Cref{sec:keccak} in every respect. Timing is
-performed at the pinned base frequency and within a single process, so that the
-cycle counter and the core clock advance at the same rate, and we sweep over the
-twenty-four combinations of compiler and optimisation level, retaining for each
-contender the best result it achieves across the grid, in the same manner as the
-SUPERCOP autotuner from which the methodology is borrowed. Because the comparison is
-conducted at the level of a complete X25519, the headline figure for the same-ladder
-study is the geometric mean of the per-configuration ratios, which collapses the
-grid to a single comparable number for each backend.
+The measurements follow the discipline of \Cref{sec:keccak}. The core is pinned to
+its base frequency so that the cycle counter and the core clock advance together,
+timings are taken within a single process, and each contender is swept over the
+twenty-four combinations of compiler and optimisation level, the best result for
+each being retained, in the manner of the SUPERCOP autotuner. Since the comparison
+is made at the level of a complete scalar multiplication, the aggregate figure for
+a backend is the geometric mean of its per-configuration ratios against the
+microcode.
 
-\paragraph{The field-operation result.}
-When the ladder is held fixed, the microcode field operations are the fastest of the
-backends we measured. Within our own ladder the microcode is faster than hand-written
-C by a factor of $1.24$, faster than fiat-crypto by a factor of $1.20$, and faster
-than the CryptOpt superoptimiser by a factor of $1.22$, each expressed as a geometric
-mean over the twenty-four configurations and reported in
-\Cref{tab:c25519-sameladder}. The microcode therefore outperforms an optimising
-compiler, a formally verified automatically generated backend, and a state-of-the-art
-cryptographic superoptimiser, with every component of the scalar multiplication other
-than the field operation held constant between the two implementations under
-comparison. When the microcode is substituted for the hand-written assembly in the
-\texttt{amd64-51} framework of Bernstein and Schwabe, where again nothing but the
-field arithmetic differs, it remains faster by a factor of $1.07$, so that the
-advantage persists even against expert hand-tuned x86 assembly on its authors' own
-ladder. The aggregate improvement is governed by the squaring, which in isolation
-runs in $37$ cycles and is thereby $26\%$ faster than fiat-crypto, whereas the
-multiplication runs in $58$ cycles and is the narrower $3\%$ faster; since a Montgomery
-ladder with a Fermat inversion is dominated by squarings, the larger squaring advantage
-dominates the combined result.
+\paragraph{The field operation in isolation.}
+Timed on their own in a tight loop, the microcode field operations are faster than
+the fiat-crypto reference. The squaring completes in roughly 37 cycles, about
+$26\%$ faster than fiat, and the multiplication in roughly 58 cycles, about $3\%$
+faster. The asymmetry is intrinsic to the kernels: squaring issues fifteen
+products against multiplication's twenty-five, so it has proportionally more slack
+into which the carry work can be packed, whereas the multiplication is closer to
+multiplier-throughput bound and the layer's carry-concurrency advantage has less
+room to act. Because a ladder and a Fermat inversion are both squaring-dominated,
+the larger squaring advantage is what propagates into the end-to-end result.
 
-\begin{table}[t]
-\centering
-\caption{Same-ladder field-operation comparison, reported as the geometric mean of
-the per-configuration minimum-cycle ratios for a complete X25519, in which a smaller
-value indicates faster execution and the field-operation backend is the only component
-that varies within each block.}
-\label{tab:c25519-sameladder}
-\small
-\begin{tabular}{@{}llr@{}}
-\toprule
-ladder & field-operation backend & ratio vs.\ microcode \\
-\midrule
-ours        & hand-written \texttt{\_\_uint128\_t} C & $1.24\times$ \\
-ours        & fiat-crypto (autogenerated C)          & $1.20\times$ \\
-ours        & CryptOpt (superoptimised asm)          & $1.22\times$ \\
-ours        & \textbf{microcode}                     & $1.00\times$ \\[2pt]
-amd64-51    & Bernstein--Schwabe hand asm            & $1.07\times$ \\
-amd64-51    & \textbf{microcode}                     & $1.00\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{The integration result.}
-The inlined ladder of \Cref{sec:c25519-integration} is the fastest of our own
-implementations, completing X25519 in $300{,}197$ cycles, as against $304{,}897$ cycles
-for the otherwise identical implementation that invokes the same microcode field
-operations through function calls, as reported in \Cref{tab:c25519-e2e}. The register
-chaining and the inlining of the firings therefore account for the difference of
-approximately $1.5\%$ between the two, a margin that is consistent with the expectation
-that store-to-load forwarding on an out-of-order memory subsystem hides most, though
-not all, of the inter-operation memory traffic that the function-call implementation
-incurs and the inlined ladder removes.
-
-\paragraph{The limits of the result.}
-Considered end to end, however, the fastest X25519 on Goldmont is not our own. That
-position is held by the Bernstein--Schwabe \texttt{amd64-64} implementation, which
-employs the saturated $4\times64$ representation in radix $2^{64}$ and completes in
-$271{,}314$ cycles, ahead of our fastest implementation, the inlined microcode ladder,
-at approximately $300{,}000$ cycles, as reported in \Cref{tab:c25519-e2e}. A more
-searching observation for the layer is that when we port the microcode field operations
-themselves to that same $4\times64$ representation, they regress by roughly a factor of
-two relative to the native assembly, completing in $510{,}750$ cycles. The explanation
-lies precisely in the carry structure discussed in \Cref{sec:c25519-rep}. A saturated
-$4\times64$ multiplication requires long, full-width carry chains across 64-bit limbs,
-which is the pattern that the layer's flag model handles least well. Since \texttt{ADC}
-reads the architectural flag domain that is frozen at patch entry, as recorded in
-\Cref{sec:findings}, a four-deep saturated carry cannot be expressed with the
-architectural carry flag at all and must instead be emulated by serial \texttt{SETCC}
-operations, with the result that the advantage conferred by parallel carry propagation
-is forfeited and the kernel reverts to the very serialisation it was designed to escape.
-The unsaturated $5\times51$ representation is favourable to the microcode for the
-converse reason, that its 13-bit carries remain short and mutually independent and so
-admit the three concurrent accumulators of \Cref{sec:c25519-patch}. The representation
-that is most favourable to native assembly is consequently the one at which the layer
-is weakest, and, symmetrically, the representation at which the layer is strongest is
-not the one that yields the fastest scalar multiplication overall.
+\paragraph{End to end.}
+\Cref{tab:c25519-e2e} reports the best per-contender result across the sweep, in
+median cycles per scalar multiplication. The inlined microcode ladder completes in
+about $300{,}000$ cycles and is the fastest of every $5\times51$ contender we
+measured: against the field backends it is a geometric mean of roughly $1.25\times$
+faster than fiat-crypto, $1.30\times$ faster than hand-written
+\texttt{\_\_uint128\_t} C, $1.28\times$ faster than the CryptOpt superoptimiser,
+and $1.31\times$ faster than \texttt{donna\_c64}, and it is also faster than the
+hand-written \texttt{amd64-51} assembly stack. The field-operation advantage is
+not an artefact of our own ladder: when the microcode field operations are carried
+into the Bernstein--Schwabe \texttt{amd64-51} framework, that hybrid is a geometric
+mean of about $1.08\times$ faster than the same framework running its authors' own
+assembly field operations, so the advantage survives transplantation into an
+independently engineered scalar multiplication.
 
 \begin{table}[t]
 \centering
-\caption{End-to-end X25519 performance, given as the best result for each contender
-over the twenty-four configurations in minimum cycles. The field-operation advantage of
-the microcode does not overcome the representation-level advantage of \texttt{amd64-64},
-and the microcode $4\times64$ port is the point at which the layer's single-flag carry
-model is most clearly exposed.}
+\caption{End-to-end X25519, best configuration per contender over the
+twenty-four-configuration sweep, in median cycles. The inlined microcode ladder is
+the fastest $5\times51$ implementation but is overtaken by the hand-written
+$4\times64$ saturated assembly, and the microcode port to that same $4\times64$
+representation is the slowest entry by a wide margin.}
 \label{tab:c25519-e2e}
 \small
 \begin{tabular}{@{}llr@{}}
 \toprule
-contender & representation and backend & min (cyc) \\
+contender & representation and backend & median (cyc) \\
 \midrule
-amd64-64 / asm        & $4\times64$ saturated, hand asm        & 271\,314 \\
-ours / ucode-inline   & $5\times51$, microcode (inlined)       & 300\,197 \\
-ours / ucode          & $5\times51$, microcode                 & 304\,897 \\
-amd64-51 / ucode      & $5\times51$, microcode (B--S ladder)   & 332\,323 \\
-donna\_c64            & $5\times51$, portable C                & 335\,736 \\
-ours / fiat           & $5\times51$, fiat-crypto C             & 354\,874 \\
-amd64-51 / asm        & $5\times51$, hand asm                  & 355\,975 \\
-ours / cryptopt       & $5\times51$, CryptOpt asm              & 379\,941 \\
-amd64-64 / ucode      & $4\times64$ saturated, microcode       & 510\,750 \\
+amd64-64 / asm        & $4\times64$ saturated, hand asm           & 271\,326 \\
+ours / ucode-inline   & $5\times51$, microcode (inlined ladder)   & 299\,967 \\
+amd64-51 / ucode      & $5\times51$, microcode (B--S framework)   & 314\,416 \\
+donna\_c64            & $5\times51$, portable C                   & 335\,744 \\
+ours / fiat           & $5\times51$, fiat-crypto C                & 354\,851 \\
+amd64-51 / asm        & $5\times51$, hand asm                     & 356\,038 \\
+ours / hand-C         & $5\times51$, hand-written C               & 379\,433 \\
+ours / cryptopt       & $5\times51$, CryptOpt asm                 & 380\,361 \\
+amd64-64 / ucode      & $4\times64$ saturated, microcode          & 511\,017 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+\paragraph{Where the advantage ends.}
+The fastest scalar multiplication on this core is nonetheless not ours. It is the
+Bernstein--Schwabe \texttt{amd64-64} implementation, which uses the saturated
+$4\times64$ representation in radix $2^{64}$ and completes in $271{,}326$ cycles,
+roughly $11\%$ ahead of the inlined microcode ladder at about $300{,}000$. More
+revealing for the layer is what happens when we encode the field operations
+themselves in that $4\times64$ representation: the microcode port runs in
+$511{,}017$ cycles, a geometric mean of about $1.77\times$ slower than our
+$5\times51$ microcode and nearly twice the cost of the native $4\times64$ assembly.
+The cause is exactly the carry structure of \Cref{sec:c25519-field}. A saturated
+$4\times64$ multiplication produces long, full-width carry chains across 64-bit
+limbs, and the add-with-carry instruction those chains want reads the architectural
+flag domain that, as recorded in \Cref{sec:findings}, is frozen on entry to a
+patch and cannot be threaded through a sequence of dependent additions inside the
+microcode. The four-deep saturated carry must therefore be emulated by serial
+\texttt{SETCC} operations, which reintroduces precisely the serialisation that the
+$5\times51$ kernel's three parallel chains were built to avoid. The representation
+that suits the native core best is thus the one that suits the layer worst, and the
+representation at which the layer excels does not yield the fastest algorithm
+overall.
+
 \paragraph{Summary.}
-At the level at which the paper makes its claim, namely the field operation with the
-surrounding ladder, inversion, and conditional swap held fixed, the microcode is the
-fastest Curve25519 field backend that we measured on Goldmont, surpassing optimised C,
-the fiat-crypto autogenerated backend, the CryptOpt superoptimiser, and expert
-hand-written assembly. The result has the same character as that of Keccak in
-\Cref{sec:keccak}: it derives from a structural per-operation advantage that the
-instruction set architecture cannot reach, which in this instance is the fused
-multiply--accumulate combined with the parallel \texttt{SETCC} carry chains rather than
-the whole-state register residency that Keccak exploited. As with Keccak, the boundary
-of the result is stated without embellishment. The end-to-end advantage on this platform
-belongs to a different representation, the $4\times64$ saturated form, and that
-representation is precisely where the one structural weakness of the layer, the
-emulation of long carry chains under a single-flag model, becomes apparent.
+At the level at which the paper stakes its claim --- the field operation, with the
+ladder, inversion, and conditional swap held in common --- the microcode is the
+fastest Curve25519 field backend we measured on this core, ahead of an optimising
+compiler, a formally verified generator, a cryptographic superoptimiser, and expert
+hand assembly, and the advantage carries through both our own scalar multiplication
+and the Bernstein--Schwabe framework. The result has the same shape as the Keccak
+result of \Cref{sec:keccak}: it comes from a structural per-operation capability
+the instruction set cannot reach, here the fusion of multiply, accumulate, and
+carry capture into single triads together with three concurrent \texttt{SETCC}
+carry chains. And as with Keccak the limit is stated without softening. The fastest
+X25519 on this core belongs to a different number representation, the saturated
+$4\times64$ form, and that representation is exactly where the one structural
+weakness of the layer --- long carry chains under a frozen single-flag model ---
+is laid bare.
