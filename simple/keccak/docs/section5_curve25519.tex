@@ -48,7 +48,7 @@ and \Cref{sec:c25519-perf} reports the measurements and states plainly where the
 advantage ends.
 
 % ---------------------------------------------------------------------
-\subsection{The Field Operation and the Carry Bottleneck}
+\subsection{Representation and Layout}
 \label{sec:c25519-field}
 
 A field element is represented in the unsaturated radix-$2^{51}$ form: five
@@ -75,23 +75,68 @@ caller using address-generation (\texttt{lea}) and integer-multiply
 registers, so the kernel receives operands already shaped for its partial
 products and spends none of its triads forming them.
 
-The reason this kernel is hard for native code is not the multiplications, which
-a modern core issues at high throughput, but the carries that stitch the partial
-products into a canonical result. The x86-64 architecture exposes exactly one
-carry flag, and so a multi-word accumulation that must propagate carries is
-forced to serialise through the add-with-carry instruction, each instance of
-which both consumes and produces that single flag. On the two-arithmetic-unit
-in-order pipeline of the target core, this serial flag dependency cannot be
-overlapped with the independent multiplications that feed it; the multiplier sits
-idle behind the carry chain. The unsaturated representation softens the problem
-but does not remove it for native code: because each limb is reduced to 51 bits,
-the value carried into the next limb occupies at most the complementary 13 bits,
-so carries are short and, across limbs, largely independent of one another. It is
-this shortness and independence that the microcode layer is able to exploit and
-that the architectural single-flag discipline cannot. We will see in
-\Cref{sec:c25519-perf} that the moment the representation is changed to the
-saturated $4\times64$ form, whose carries are full-width and serially dependent,
-the same property reverses and the layer loses its footing.
+\paragraph{Register layout.}
+A field operation is carried out entirely in registers. The caller loads the five
+limbs of each operand into a fixed set of general-purpose registers immediately
+before the triggering instruction, and reads the five result limbs from a fixed set
+of registers afterwards, so a field element is never spilled to memory while the
+operation runs. The two operations differ only in what the caller must prepare in
+advance. For squaring, the four doublings $2a_0,\dots,2a_3$ and the two folds
+$19a_3$ and $19a_4$ are formed on the native side with address-generation and
+integer-multiply instructions and delivered alongside the five limbs, and the result
+returns in $\texttt{RDI},\texttt{R9},\texttt{R10},\texttt{RBX},\texttt{RAX}$. For
+multiplication the caller delivers the second operand unmodified, and a three-triad
+preparation stage at the head of the patch forms the folds $19b_1,\dots,19b_4$ in
+place while parking the original limbs in temporary registers for the cross terms
+that still require them, the result returning in
+$\texttt{R15},\texttt{R13},\texttt{R9},\texttt{R10},\texttt{RAX}$. Throughout the
+kernel a small, fixed set of temporary registers holds the running state of the
+accumulation: one register accumulates the low halves of the partial products
+(\texttt{TMP0}), a second accumulates their high halves (\texttt{R8}), a third sums
+the carries that the low-half additions produce (\texttt{TMP9}), and two further
+registers hold the low and high pieces of the carry passed from one limb to the next
+(\texttt{TMP8} and \texttt{TMP1}). The kernel of \Cref{sec:c25519-kernel} is written
+against exactly this layout, and it is this register-resident discipline that later
+permits successive field operations to be chained to one another without a return to
+memory, as \Cref{sec:c25519-assemble} describes.
+
+A consequence of leaving thirteen bits free in every limb is that the carries
+produced while the partial products are summed are short and mutually independent.
+Because each limb is reduced to 51 bits, the value carried into the next limb
+occupies at most the complementary 13 bits, and the carry out of one limb does not
+depend on a carry buried inside another. This is a property of the layout itself,
+independent of any particular implementation, and the kernel of
+\Cref{sec:c25519-kernel} is built around exploiting it.
+
+\paragraph{Where the advantage comes from, and where it stops.}
+It is worth stating precisely what this representation buys the microcode, because
+the point is easy to overstate. Within the $5\times51$ representation the binding
+resource for native code is carry propagation, not multiplication. The x86-64
+architecture exposes a single carry flag, so a native accumulation must serialise
+its carries through the add-with-carry instruction, each instance of which both
+reads and writes that one flag, and the two-arithmetic-unit in-order target core
+cannot overlap that dependent flag chain with the independent multiplications that
+feed it. The microcode layer's advantage lies exactly here: it advances several
+carry chains at once, each on its own private flag, in the manner that
+\Cref{sec:c25519-kernel} describes, and this is what makes it the fastest
+$5\times51$ field backend we measured (\Cref{sec:c25519-perf}). It is not, however,
+a claim that carry propagation is the bottleneck of X25519 in general, and a single
+observation makes the limit plain: the fastest implementation on this core,
+\texttt{amd64-64}, is itself built on long add-with-carry chains and still wins.
+It does so for two reasons that have nothing to do with carry handling. First, its
+saturated $4\times64$ algorithm performs fewer multiplications --- sixteen partial
+products against our twenty-five --- on a core whose multiplier, not its carry
+logic, is the scarce resource. Second, being ordinary native code it pays none of
+the per-firing dispatch overhead that our hooked operations incur on the order of
+two and a half thousand times per scalar multiplication. The honest measure of the
+layer's advantage is therefore the comparison in which only the field operations
+change: with the microcode substituted into the \texttt{amd64-51} framework, leaving
+the ladder, inversion, and swap untouched, it is about eight percent faster end to
+end, and the squaring and multiplication on their own are roughly twenty-six and
+three percent faster than fiat-crypto. The microcode is, in short, the fastest
+$5\times51$ X25519 we measured; it is not the fastest X25519, remaining about eleven
+percent behind \texttt{amd64-64}, whose advantage is one of algorithm and native
+execution rather than of carries.
 
 % ---------------------------------------------------------------------
 \subsection{The Kernel: One Firing, Three Carry Chains}
