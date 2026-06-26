@@ -602,8 +602,82 @@ square. So we use <b>two</b> hooks on two different harmless instructions:</p>
 <tr><td>square</td><td class="r">42</td><td class="mono">U7d08</td><td class="mono">vmread (0x0618)</td></tr>
 </table>
 
+<figure>
+<svg viewBox="0 0 820 250" width="820" role="img" aria-label="Two-patch dispatch">
+  <!-- instructions -->
+  <rect x="24" y="44" width="186" height="56" rx="8" fill="#1d2130" stroke="#5cc8ff"/>
+  <text x="117" y="70" fill="#5cc8ff" font-size="15" text-anchor="middle" font-family="monospace">vmwrite</text>
+  <text x="117" y="89" fill="#9aa3b2" font-size="11" text-anchor="middle">native code issues this</text>
+  <rect x="24" y="150" width="186" height="56" rx="8" fill="#1d2130" stroke="#7ee787"/>
+  <text x="117" y="176" fill="#7ee787" font-size="15" text-anchor="middle" font-family="monospace">vmread</text>
+  <text x="117" y="195" fill="#9aa3b2" font-size="11" text-anchor="middle">native code issues this</text>
+
+  <!-- hook table -->
+  <rect x="312" y="40" width="196" height="170" rx="8" fill="#171a23" stroke="#2a3040"/>
+  <text x="410" y="62" fill="#e6e9ef" font-size="13" text-anchor="middle">microcode hook table</text>
+  <rect x="326" y="74" width="168" height="52" rx="6" fill="#13202b" stroke="#5cc8ff"/>
+  <text x="410" y="96" fill="#5cc8ff" font-size="12" text-anchor="middle" font-family="monospace">match 0x0cd8</text>
+  <text x="410" y="115" fill="#9aa3b2" font-size="11" text-anchor="middle">→ jump to U7c00</text>
+  <rect x="326" y="138" width="168" height="52" rx="6" fill="#13251c" stroke="#7ee787"/>
+  <text x="410" y="160" fill="#7ee787" font-size="12" text-anchor="middle" font-family="monospace">match 0x0618</text>
+  <text x="410" y="179" fill="#9aa3b2" font-size="11" text-anchor="middle">→ jump to U7d08</text>
+
+  <!-- patches -->
+  <rect x="610" y="44" width="186" height="56" rx="8" fill="#1a3a4a" stroke="#5cc8ff"/>
+  <text x="703" y="69" fill="#e6e9ef" font-size="13" text-anchor="middle">fe_mul patch</text>
+  <text x="703" y="89" fill="#9aa3b2" font-size="11" text-anchor="middle" font-family="monospace">@ U7c00 · 66 triads</text>
+  <rect x="610" y="150" width="186" height="56" rx="8" fill="#13251c" stroke="#7ee787"/>
+  <text x="703" y="175" fill="#e6e9ef" font-size="13" text-anchor="middle">fe_sq patch</text>
+  <text x="703" y="195" fill="#9aa3b2" font-size="11" text-anchor="middle" font-family="monospace">@ U7d08 · 42 triads</text>
+
+  <!-- arrows -->
+  <path d="M210 72 L322 98"  stroke="#5cc8ff" stroke-width="2" fill="none" marker-end="url(#mb)"/>
+  <path d="M494 98 L608 72"  stroke="#5cc8ff" stroke-width="2" fill="none" marker-end="url(#mb)"/>
+  <path d="M210 178 L322 162" stroke="#7ee787" stroke-width="2" fill="none" marker-end="url(#mg)"/>
+  <path d="M494 162 L608 178" stroke="#7ee787" stroke-width="2" fill="none" marker-end="url(#mg)"/>
+  <defs>
+    <marker id="mb" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#5cc8ff"/></marker>
+    <marker id="mg" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7ee787"/></marker>
+  </defs>
+</svg>
+<figcaption>A hook maps <em>one</em> instruction to <em>one</em> patch entry. Two
+hooks on two harmless instructions keep both field operations installed at once: a
+<code>vmwrite</code> fires the multiply, a <code>vmread</code> fires the square. One
+asm block can mix them freely because each has its own trigger.</figcaption>
+</figure>
+
 <p>That's 66 + 42 = <b>108 triads</b>, comfortably under the 128-triad limit of the
-patch RAM. Having two separate trigger instructions is what lets a single block of
+patch RAM. The two patches simply sit next to each other in that RAM:</p>
+
+<figure>
+<svg viewBox="0 0 820 180" width="820" role="img" aria-label="Patch RAM layout">
+  <text x="40" y="26" fill="#9aa3b2" font-size="13">Patch RAM — 128 triad slots, U7c00 … U7dfc:</text>
+  <!-- segments, widths proportional to triad counts (66 / 42 / 20 of 128) -->
+  <rect x="40"  y="48" width="393" height="56" fill="#1a3a4a" stroke="#5cc8ff"/>
+  <text x="236" y="74" fill="#e6e9ef" font-size="14" text-anchor="middle">fe_mul</text>
+  <text x="236" y="93" fill="#9aa3b2" font-size="11" text-anchor="middle">66 triads</text>
+  <rect x="433" y="48" width="249" height="56" fill="#13251c" stroke="#7ee787"/>
+  <text x="557" y="74" fill="#e6e9ef" font-size="14" text-anchor="middle">fe_sq</text>
+  <text x="557" y="93" fill="#9aa3b2" font-size="11" text-anchor="middle">42 triads</text>
+  <rect x="682" y="48" width="118" height="56" fill="#1d2130" stroke="#2a3040"/>
+  <text x="741" y="74" fill="#9aa3b2" font-size="13" text-anchor="middle">free</text>
+  <text x="741" y="93" fill="#9aa3b2" font-size="11" text-anchor="middle">20 triads</text>
+  <!-- address ticks -->
+  <g stroke="#39414f" stroke-width="1"><line x1="40" y1="104" x2="40" y2="118"/><line x1="433" y1="104" x2="433" y2="118"/><line x1="682" y1="104" x2="682" y2="118"/><line x1="800" y1="104" x2="800" y2="118"/></g>
+  <g font-size="11" fill="#9aa3b2" font-family="monospace">
+    <text x="40"  y="132" text-anchor="start">U7c00</text>
+    <text x="433" y="132" text-anchor="middle">U7d08</text>
+    <text x="682" y="132" text-anchor="middle">U7db0</text>
+    <text x="800" y="132" text-anchor="end">U7dfc</text>
+  </g>
+  <text x="420" y="162" fill="#ffd479" font-size="13" text-anchor="middle">Both patches resident at the same time — 108 of 128 slots used.</text>
+</svg>
+<figcaption>Multiply takes the first 66 triads from <span class="mono">U7c00</span>;
+square takes the next 42 from <span class="mono">U7d08</span>; 20 triads are left
+spare. Neither has to be unloaded to run the other.</figcaption>
+</figure>
+
+<p>Having two separate trigger instructions is what lets a single block of
 assembly freely mix squares (<code>vmread</code>) and multiplies (<code>vmwrite</code>)
 without them stepping on each other — which matters a lot in §13.</p>
 
