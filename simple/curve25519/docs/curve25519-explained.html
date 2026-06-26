@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curve25519 in Microcode — explained from the ground up</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1d2130; --ink:#e6e9ef; --dim:#9aa3b2;
+    --accent:#5cc8ff; --accent2:#ffd479; --good:#7ee787; --bad:#ff7b72; --line:#2a3040;
+    --kw:#ff9d6b; --reg:#9ad; --com:#6f7a8c;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 22px 120px}
+  h1{font-size:2rem;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:1.5rem;margin:2.4em 0 .4em;padding-top:.4em;border-top:1px solid var(--line)}
+  h3{font-size:1.15rem;margin:1.6em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .sub{color:var(--dim);font-size:1.05rem;margin-top:.2em}
+  code{font-family:"SF Mono",ui-monospace,"Cascadia Code",Consolas,monospace;
+    background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:.9em}
+  pre{background:#0b0d13;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+    overflow:auto;font-family:"SF Mono",ui-monospace,Consolas,monospace;font-size:13.5px;line-height:1.55}
+  pre .com{color:var(--com)}
+  pre .kw{color:var(--kw)}
+  pre .reg{color:var(--reg)}
+  pre .hl{color:var(--accent2)}
+  .eq{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:8px;padding:10px 16px;margin:14px 0;font-family:ui-monospace,Consolas,monospace;
+    font-size:15px;overflow-x:auto}
+  .note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent2);
+    border-radius:8px;padding:12px 16px;margin:16px 0}
+  .note b{color:var(--accent2)}
+  .key{background:#13251c;border:1px solid #1f4030;border-left:3px solid var(--good);
+    border-radius:8px;padding:12px 16px;margin:16px 0}
+  .key b{color:var(--good)}
+  .warn{background:#2a1718;border:1px solid #4a2422;border-left:3px solid var(--bad);
+    border-radius:8px;padding:12px 16px;margin:16px 0}
+  .warn b{color:var(--bad)}
+  sup,sub{font-size:.72em}
+  figure{margin:22px 0;text-align:center}
+  figcaption{color:var(--dim);font-size:.9rem;margin-top:8px}
+  svg{max-width:100%;height:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:var(--panel2);color:var(--accent)}
+  td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+  .win{color:var(--good)} .lose{color:var(--bad)}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 22px;margin:24px 0}
+  .toc ol{margin:.3em 0;padding-left:1.2em}
+  .toc a{color:var(--ink)}
+  .mono{font-family:ui-monospace,Consolas,monospace}
+  .tag{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:20px;
+    padding:1px 10px;font-size:12px;color:var(--dim);margin-right:6px}
+  hr{border:none;border-top:1px solid var(--line);margin:30px 0}
+  .small{font-size:.9rem;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Curve25519 in Microcode</h1>
+<p class="sub">How a key-exchange algorithm turns into a pile of multiply-and-carry,
+why the number format matters so much, and how we pushed the hot loop <em>below</em>
+the instruction set — into the CPU's own microcode. Written to be read top to bottom,
+no crypto background assumed.</p>
+<p class="small">Code referenced: <code>asm_op_curve25519_mul.c</code> (multiply),
+<code>asm_op_curve25519.c</code> (square),
+<code>full_curve25519_inline2.c</code> (the whole X25519). Chip: Intel Goldmont (Celeron N3350).</p>
+
+<div class="toc">
+<b>Contents</b>
+<ol>
+  <li><a href="#what">What Curve25519 is actually for</a></li>
+  <li><a href="#ladder">The only thing that runs hot: the ladder</a></li>
+  <li><a href="#field">The field: numbers modulo 2<sup>255</sup>−19</a></li>
+  <li><a href="#rep">The representation: 5 limbs of 51 bits (and why)</a></li>
+  <li><a href="#mul">Multiplication: the 5×5 grid and the ×19 fold</a></li>
+  <li><a href="#sq">Squaring: the same grid, folded in half</a></li>
+  <li><a href="#carry">Carrying: getting back to neat 51-bit limbs</a></li>
+  <li><a href="#why-hard">Why a normal CPU struggles with this</a></li>
+  <li><a href="#ucode">The microcode idea: triads, hooks, one "firing"</a></li>
+  <li><a href="#three">The core trick #1: three carry chains at once</a></li>
+  <li><a href="#split">The core trick #2: 2<sup>64</sup> = 2<sup>51</sup>·2<sup>13</sup></a></li>
+  <li><a href="#assemble">Bolting it into X25519: register chaining</a></li>
+  <li><a href="#perf">Does it win? The numbers</a></li>
+</ol>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="what">1. What Curve25519 is actually for</h2>
+
+<p>When two computers that have never met want to agree on a secret key over a
+public wire, they use a <b>Diffie–Hellman key exchange</b>. <b>X25519</b> is the
+modern, fast, widely-deployed version of that handshake — it's inside TLS (so,
+inside almost every HTTPS connection), SSH, Signal, WireGuard, and more.</p>
+
+<p>The whole thing rests on one operation that is easy to do and practically
+impossible to undo:</p>
+
+<div class="eq">shared_secret = <span class="hl">scalar</span> · <span class="hl">point</span></div>
+
+<p>Here <code>scalar</code> is your 32-byte private key (just a big number), and
+<code>point</code> is a position on a specific curve called <b>Curve25519</b>.
+"Multiplying" a point by a number means <em>adding the point to itself that many
+times</em>, using the curve's special addition rule. Given the scalar and the
+point, computing the result is fast. Given only the result and the point,
+recovering the scalar is the "elliptic-curve discrete log problem" — believed to
+take longer than the age of the universe. That asymmetry is the whole game.</p>
+
+<div class="note">
+<b>The punchline for this document:</b> that "·" — the scalar multiplication — is
+<em>99%</em> of the CPU time. And almost all of <em>that</em> is just multiplying
+and adding big numbers modulo a specific prime. So if you want a fast X25519, you
+need a fast <b>big-number multiply</b>. Everything below is about making that one
+multiply as fast as physically possible.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="ladder">2. The only thing that runs hot: the ladder</h2>
+
+<p>To compute <code>scalar · point</code>, X25519 uses the <b>Montgomery
+ladder</b>. You don't need the geometry — just the shape of the work. The scalar
+is 255 bits. The ladder walks those bits one at a time, top to bottom, and at
+<em>every single bit</em> it does a fixed little routine called a <b>ladder
+step</b>:</p>
+
+<figure>
+<svg viewBox="0 0 860 230" width="860" role="img" aria-label="Ladder loop diagram">
+  <rect x="20" y="20" width="200" height="60" rx="8" fill="#1d2130" stroke="#2a3040"/>
+  <text x="120" y="46" fill="#e6e9ef" font-size="14" text-anchor="middle">private scalar</text>
+  <text x="120" y="66" fill="#9aa3b2" font-size="12" text-anchor="middle">255 bits: b₂₅₄ … b₁ b₀</text>
+
+  <text x="120" y="120" fill="#9aa3b2" font-size="12" text-anchor="middle">for each bit, top → bottom</text>
+  <path d="M120 80 L120 110" stroke="#5cc8ff" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="300" y="95" width="240" height="100" rx="8" fill="#171a23" stroke="#5cc8ff"/>
+  <text x="420" y="120" fill="#5cc8ff" font-size="14" text-anchor="middle" font-weight="bold">one ladder step</text>
+  <text x="420" y="143" fill="#e6e9ef" font-size="13" text-anchor="middle">≈ 5 squarings</text>
+  <text x="420" y="161" fill="#e6e9ef" font-size="13" text-anchor="middle">≈ 4 multiplications</text>
+  <text x="420" y="179" fill="#e6e9ef" font-size="13" text-anchor="middle">+ a few add/sub</text>
+
+  <path d="M540 145 L600 145" stroke="#5cc8ff" stroke-width="2" marker-end="url(#a)"/>
+  <text x="700" y="120" fill="#9aa3b2" font-size="12" text-anchor="middle">repeat 255×</text>
+  <rect x="600" y="130" width="200" height="36" rx="8" fill="#1d2130" stroke="#2a3040"/>
+  <text x="700" y="153" fill="#e6e9ef" font-size="13" text-anchor="middle">then one inversion</text>
+
+  <path d="M700 128 C700 40, 420 40, 420 92" stroke="#39414f" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#5cc8ff"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Each of the 255 bits triggers one ladder step. A step is a handful of
+field multiplications and squarings. That's the entire compute budget.</figcaption>
+</figure>
+
+<p>So one X25519 ≈ <b>255 ladder steps</b> ≈ roughly <b>1280 multiplications + 1270
+squarings</b>, plus a final "inversion" at the end (which is itself ~254 more
+squarings and 11 multiplications). Each of those mul/sq operations works on numbers
+modulo the prime <code>2<sup>255</sup>−19</code>. Make that one operation faster and
+<em>everything</em> gets faster, proportionally.</p>
+
+<!-- ===================================================================== -->
+<h2 id="field">3. The field: numbers modulo 2<sup>255</sup>−19</h2>
+
+<p>All the arithmetic happens in a <b>finite field</b>: the integers from 0 up to
+<code>p−1</code>, where</p>
+
+<div class="eq">p = 2<sup>255</sup> − 19</div>
+
+<p>"Modulo p" just means: do normal integer math, then take the remainder after
+dividing by <code>p</code>. Every number stays a ~255-bit value. Addition,
+subtraction, multiplication, and even division (multiply by an inverse) all work,
+and results always wrap back into the range <code>0 … p−1</code>.</p>
+
+<p>The prime <code>2<sup>255</sup>−19</code> was chosen <em>on purpose</em> to make
+the wrap-around cheap. Here is the one identity that the whole implementation leans
+on. Since <code>p = 2<sup>255</sup> − 19</code>, we have <code>2<sup>255</sup> ≡ 19
+(mod p)</code>. In words:</p>
+
+<div class="key">
+<b>The magic reduction:</b> any time a bit lands at position 255 or higher, you can
+slide it 255 positions down and multiply it by <b>19</b>. A "huge" overflow doesn't
+need a real division — it just becomes "× 19, added back into the bottom." This one
+fact is why Curve25519 is fast, and you'll see it appear everywhere below.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="rep">4. The representation: 5 limbs of 51 bits (and why)</h2>
+
+<p>A 255-bit number is too big for one 64-bit CPU register. The obvious choice is
+to use four 64-bit registers (4 × 64 = 256 bits). That's called the
+<b>saturated</b> representation, because every register is packed full.</p>
+
+<p>We use something different and, for this job, smarter: <b>five</b> registers, each
+holding only <b>51</b> bits of the number. The top 13 bits of each 64-bit register
+are left <em>empty</em>. This is the <b>unsaturated radix-2<sup>51</sup></b>
+representation:</p>
+
+<div class="eq">value = a₀ + a₁·2<sup>51</sup> + a₂·2<sup>102</sup> + a₃·2<sup>153</sup> + a₄·2<sup>204</sup></div>
+
+<figure>
+<svg viewBox="0 0 860 210" width="860" role="img" aria-label="Five-limb layout">
+  <text x="20" y="24" fill="#9aa3b2" font-size="13">Each limb = one 64-bit register. 51 bits used (filled), 13 bits free (striped):</text>
+  <defs>
+    <pattern id="stripe" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#1d2130"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#39414f" stroke-width="3"/>
+    </pattern>
+  </defs>
+  <!-- 5 limbs -->
+  <g font-size="12" text-anchor="middle">
+  <!-- limb boxes: free part (13b) then used part (51b) -->
+  <g>
+    <rect x="20"  y="44" width="40"  height="44" fill="url(#stripe)" stroke="#2a3040"/>
+    <rect x="60"  y="44" width="130" height="44" fill="#1a3a4a" stroke="#5cc8ff"/>
+    <text x="125" y="71" fill="#e6e9ef">a₄ · 2²⁰⁴</text>
+  </g>
+  <g>
+    <rect x="195" y="44" width="40"  height="44" fill="url(#stripe)" stroke="#2a3040"/>
+    <rect x="235" y="44" width="130" height="44" fill="#1a3a4a" stroke="#5cc8ff"/>
+    <text x="300" y="71" fill="#e6e9ef">a₃ · 2¹⁵³</text>
+  </g>
+  <g>
+    <rect x="370" y="44" width="40"  height="44" fill="url(#stripe)" stroke="#2a3040"/>
+    <rect x="410" y="44" width="130" height="44" fill="#1a3a4a" stroke="#5cc8ff"/>
+    <text x="475" y="71" fill="#e6e9ef">a₂ · 2¹⁰²</text>
+  </g>
+  <g>
+    <rect x="545" y="44" width="40"  height="44" fill="url(#stripe)" stroke="#2a3040"/>
+    <rect x="585" y="44" width="130" height="44" fill="#1a3a4a" stroke="#5cc8ff"/>
+    <text x="650" y="71" fill="#e6e9ef">a₁ · 2⁵¹</text>
+  </g>
+  <g>
+    <rect x="720" y="44" width="40"  height="44" fill="url(#stripe)" stroke="#2a3040"/>
+    <rect x="760" y="44" width="80"  height="44" fill="#1a3a4a" stroke="#5cc8ff"/>
+    <text x="800" y="71" fill="#e6e9ef">a₀</text>
+  </g>
+  </g>
+  <text x="40"  y="108" fill="#9aa3b2" font-size="11" text-anchor="middle">13 free</text>
+  <text x="125" y="108" fill="#9aa3b2" font-size="11" text-anchor="middle">51 used</text>
+  <text x="430" y="150" fill="#ffd479" font-size="13" text-anchor="middle">The 13 free bits at the top of each limb are "headroom".</text>
+  <text x="430" y="172" fill="#9aa3b2" font-size="12" text-anchor="middle">You can add a bunch of numbers into a limb before it overflows — carries can wait.</text>
+</svg>
+<figcaption>Five limbs, 51 bits each. The empty top 13 bits are the whole point.</figcaption>
+</figure>
+
+<h3>Why leave bits empty? Three reasons.</h3>
+
+<p><b>(1) Carries can be delayed.</b> When you add two limbs, the result might be a
+little bigger than 51 bits — but it fits in the 13 bits of headroom without
+overflowing the 64-bit register. So you can add several things into a limb
+<em>before</em> you ever have to clean up. In the saturated 4×64 format, every
+single add can overflow, so you must handle the carry immediately, every time.</p>
+
+<p><b>(2) The carries stay small and independent.</b> Because each limb is only 51
+bits, the amount that "spills" into the next limb is at most 13 bits. Small spills.
+And one limb's spill doesn't depend on a spill buried deep inside another. (Hold
+onto this — it's the reason the microcode trick works.)</p>
+
+<p><b>(3) The ×19 reduction drops in for free.</b> Limb 4 sits at weight
+<code>2<sup>204</sup></code>. A product of two limb-4 values lands at weight
+<code>2<sup>408</sup></code>. Watch:</p>
+
+<div class="eq">2<sup>408</sup> = 2<sup>153</sup> · 2<sup>255</sup> ≡ 2<sup>153</sup> · 19  (mod p)</div>
+
+<p>So a product that "falls off the top" comes right back as "× 19, into a lower
+limb." No division, no separate reduction pass — just a multiply by 19 folded into
+the sum. This is the magic reduction from §3, made concrete.</p>
+
+<!-- ===================================================================== -->
+<h2 id="mul">5. Multiplication: the 5×5 grid and the ×19 fold</h2>
+
+<p>To multiply two field elements <code>a</code> and <code>b</code>, you multiply
+every limb of <code>a</code> by every limb of <code>b</code> — 5 × 5 = 25 small
+products. Product <code>aᵢ · bⱼ</code> has weight <code>2<sup>51(i+j)</sup></code>,
+so it belongs to output limb <code>i+j</code>. When <code>i+j ≥ 5</code> it falls
+off the top and comes back × 19 into limb <code>i+j−5</code>:</p>
+
+<figure>
+<svg viewBox="0 0 720 360" width="720" role="img" aria-label="Multiply grid">
+  <text x="360" y="22" fill="#9aa3b2" font-size="13" text-anchor="middle">
+    cell = aᵢ·bⱼ → lands in output limb (i+j). Orange cells wrap around → ×19.</text>
+  <!-- column headers b0..b4 -->
+  <g font-size="13" text-anchor="middle" fill="#9ad">
+    <text x="160" y="58">b₀</text><text x="260" y="58">b₁</text><text x="360" y="58">b₂</text>
+    <text x="460" y="58">b₃</text><text x="560" y="58">b₄</text>
+  </g>
+  <!-- row headers a0..a4 -->
+  <g font-size="13" text-anchor="middle" fill="#9ad">
+    <text x="70" y="100">a₀</text><text x="70" y="160">a₁</text><text x="70" y="220">a₂</text>
+    <text x="70" y="280">a₃</text><text x="70" y="340">a₄</text>
+  </g>
+  <!-- grid cells -->
+  <g font-size="12" text-anchor="middle">
+  <!-- helper: for each i (row) j (col), x=110+j*100, y=78+i*60 ; sum=i+j -->
+  <!-- row0 -->
+  <g><rect x="110" y="78"  width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="160" y="105" fill="#7ee787">c₀</text></g>
+  <g><rect x="210" y="78"  width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="260" y="105" fill="#7ee787">c₁</text></g>
+  <g><rect x="310" y="78"  width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="360" y="105" fill="#7ee787">c₂</text></g>
+  <g><rect x="410" y="78"  width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="460" y="105" fill="#7ee787">c₃</text></g>
+  <g><rect x="510" y="78"  width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="560" y="105" fill="#7ee787">c₄</text></g>
+  <!-- row1 -->
+  <g><rect x="110" y="138" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="160" y="165" fill="#7ee787">c₁</text></g>
+  <g><rect x="210" y="138" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="260" y="165" fill="#7ee787">c₂</text></g>
+  <g><rect x="310" y="138" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="360" y="165" fill="#7ee787">c₃</text></g>
+  <g><rect x="410" y="138" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="460" y="165" fill="#7ee787">c₄</text></g>
+  <g><rect x="510" y="138" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="560" y="160" fill="#ff9d6b">c₀</text><text x="560" y="176" fill="#ff9d6b" font-size="10">×19</text></g>
+  <!-- row2 -->
+  <g><rect x="110" y="198" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="160" y="225" fill="#7ee787">c₂</text></g>
+  <g><rect x="210" y="198" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="260" y="225" fill="#7ee787">c₃</text></g>
+  <g><rect x="310" y="198" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="360" y="225" fill="#7ee787">c₄</text></g>
+  <g><rect x="410" y="198" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="460" y="220" fill="#ff9d6b">c₀</text><text x="460" y="236" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="510" y="198" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="560" y="220" fill="#ff9d6b">c₁</text><text x="560" y="236" fill="#ff9d6b" font-size="10">×19</text></g>
+  <!-- row3 -->
+  <g><rect x="110" y="258" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="160" y="285" fill="#7ee787">c₃</text></g>
+  <g><rect x="210" y="258" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="260" y="285" fill="#7ee787">c₄</text></g>
+  <g><rect x="310" y="258" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="360" y="280" fill="#ff9d6b">c₀</text><text x="360" y="296" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="410" y="258" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="460" y="280" fill="#ff9d6b">c₁</text><text x="460" y="296" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="510" y="258" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="560" y="280" fill="#ff9d6b">c₂</text><text x="560" y="296" fill="#ff9d6b" font-size="10">×19</text></g>
+  <!-- row4 -->
+  <g><rect x="110" y="318" width="100" height="44" fill="#13251c" stroke="#2a3040"/><text x="160" y="345" fill="#7ee787">c₄</text></g>
+  <g><rect x="210" y="318" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="260" y="340" fill="#ff9d6b">c₀</text><text x="260" y="356" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="310" y="318" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="360" y="340" fill="#ff9d6b">c₁</text><text x="360" y="356" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="410" y="318" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="460" y="340" fill="#ff9d6b">c₂</text><text x="460" y="356" fill="#ff9d6b" font-size="10">×19</text></g>
+  <g><rect x="510" y="318" width="100" height="44" fill="#2a1c12" stroke="#ff9d6b"/><text x="560" y="340" fill="#ff9d6b">c₃</text><text x="560" y="356" fill="#ff9d6b" font-size="10">×19</text></g>
+  </g>
+</svg>
+<figcaption>The 25 partial products. Green stays in place; orange wrapped around the
+top and came back × 19. Read each output limb cₖ by collecting all cells labelled cₖ.</figcaption>
+</figure>
+
+<p>Collecting the cells gives the five output limbs. This is exactly the C
+"reference" code we test against — it reads just like the grid:</p>
+
+<pre><span class="com">/* from full_curve25519_inline2.c — the plain-C multiply we verify against */</span>
+r1=<span class="hl">19</span>*b1; r2=<span class="hl">19</span>*b2; r3=<span class="hl">19</span>*b3; r4=<span class="hl">19</span>*b4;   <span class="com">// pre-scale the wrap-around limbs</span>
+
+c0 = a0*b0 + a1*r4 + a2*r3 + a3*r2 + a4*r1;   <span class="com">// the ×19 cells folded in</span>
+c1 = a0*b1 + a1*b0 + a2*r4 + a3*r3 + a4*r2;
+c2 = a0*b2 + a1*b1 + a2*b0 + a3*r4 + a4*r3;
+c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + a4*r4;
+c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0;</pre>
+
+<p>Each <code>cᵢ</code> is a sum of five 64×64→128-bit products, so it needs a
+128-bit accumulator. Five sums, twenty-five products. That's the multiply.</p>
+
+<!-- ===================================================================== -->
+<h2 id="sq">6. Squaring: the same grid, folded in half</h2>
+
+<p>Squaring is <code>a · a</code>, so the grid is symmetric: <code>aᵢ·aⱼ</code> is the
+same product as <code>aⱼ·aᵢ</code>. Instead of computing both, you compute it once
+and <b>double</b> it. That cuts 25 products down to 15. The doublings (like
+<code>2·a₁</code>) and the ×19 folds (like <code>19·a₃</code>) are computed
+<em>once, up front</em> — in the real implementation the caller prepares them with
+cheap <code>lea</code> and <code>imul</code> instructions before handing the limbs
+to the kernel:</p>
+
+<pre><span class="com">/* from FE_SQ — operands are pre-shaped before the field op runs */</span>
+<span class="kw">lea</span>  <span class="reg">r15</span>, [<span class="reg">rdi</span> + <span class="reg">rdi</span>]   <span class="com">; r15 = 2·a0</span>
+<span class="kw">lea</span>  <span class="reg">r13</span>, [<span class="reg">rsi</span> + <span class="reg">rsi</span>]   <span class="com">; r13 = 2·a1</span>
+<span class="kw">lea</span>  <span class="reg">r9</span>,  [<span class="reg">r12</span> + <span class="reg">r12</span>]   <span class="com">; r9  = 2·a2</span>
+<span class="kw">lea</span>  <span class="reg">r10</span>, [<span class="reg">r11</span> + <span class="reg">r11</span>]   <span class="com">; r10 = 2·a3</span>
+<span class="kw">imul</span> <span class="reg">rbx</span>, <span class="reg">r14</span>, <span class="hl">19</span>        <span class="com">; rbx = 19·a4</span>
+<span class="kw">imul</span> <span class="reg">rdx</span>, <span class="reg">r11</span>, <span class="hl">19</span>        <span class="com">; rdx = 19·a3</span></pre>
+
+<p>The squaring formula then has only 15 products spread across the five limbs (this
+is the C we verify against):</p>
+
+<pre><span class="com">/* d_i = 2·a_i (doublings), r3 = 19·a3, r4 = 19·a4 */</span>
+c0 = a0*a0 + d1*r4 + d2*r3;
+c1 = d0*a1 + r3*a3 + d2*r4;
+c2 = d0*a2 + a1*a1 + d3*r4;
+c3 = d0*a3 + d1*a2 + r4*a4;
+c4 = d0*a4 + d1*a3 + a2*a2;</pre>
+
+<div class="note">
+Squaring is cheaper than multiplication (15 products vs 25), and a ladder does
+<em>more squarings than multiplications</em>. So squaring is the operation worth
+optimizing hardest — and, as you'll see in §13, it's where we win the most.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="carry">7. Carrying: getting back to neat 51-bit limbs</h2>
+
+<p>After the grid, each <code>cᵢ</code> is a fat number (up to ~107 bits in the
+128-bit accumulator). We need to squeeze it back into five tidy 51-bit limbs. The
+overflow above bit 51 is the <b>carry</b> — it gets added into the next limb up:</p>
+
+<pre><span class="com">/* the carry chain, plain C */</span>
+carry = c0 >> 51;  out0 = c0 &amp; MASK51;   c1 += carry;
+carry = c1 >> 51;  out1 = c1 &amp; MASK51;   c2 += carry;
+carry = c2 >> 51;  out2 = c2 &amp; MASK51;   c3 += carry;
+carry = c3 >> 51;  out3 = c3 &amp; MASK51;   c4 += carry;
+carry = c4 >> 51;  out4 = c4 &amp; MASK51;
+out0 += carry * <span class="hl">19</span>;   <span class="com">// top carry wraps: ×19 back into limb 0  (magic reduction again!)</span>
+carry = out0 >> 51; out0 &amp;= MASK51; out1 += carry;</pre>
+
+<p>Notice the last two lines: the carry out of the <em>top</em> limb doesn't have a
+"next limb" — it has fallen off the top at weight <code>2<sup>255</sup></code>, so it
+comes back as <code>× 19</code> into limb 0. The magic reduction, one more time.</p>
+
+<p>That <code>&amp; MASK51</code> / <code>&gt;&gt; 51</code> dance is the carry propagation. It
+is dead simple in C. The next two sections are about why it is <em>not</em> simple
+for the CPU, and how microcode beats it.</p>
+
+<!-- ===================================================================== -->
+<h2 id="why-hard">8. Why a normal CPU struggles with this</h2>
+
+<p>Look at the carry chain again. <code>c1 += carry</code> can't start until
+<code>carry = c0 >> 51</code> is done. <code>c2 += carry</code> waits on
+<code>c1</code>. It's a <b>chain</b> — each step depends on the one before. Chains
+can't be parallelized.</p>
+
+<p>Worse, on x86 the natural way to add multi-word numbers is the <b>add-with-carry</b>
+instruction (<code>ADC</code>), and there is exactly <b>one carry flag</b> in the whole
+CPU. Every <code>ADC</code> reads it and writes it. So a long carry chain is forced to
+run one instruction at a time, single-file, through that one shared flag.</p>
+
+<p>The target chip (Intel Goldmont) is a small <b>in-order, 2-ALU</b> core. It
+<em>can</em> do two simple operations per cycle — but only if they're independent.
+The multiplications in our grid are independent and fast. The carry chain is a
+single-file dependent line. So the chip ends up waiting on carries while the
+multiplier sits idle.</p>
+
+<div class="warn">
+<b>The bottleneck in one line:</b> the multiplies are not the problem — the
+<b>carries</b> are, because they're forced to go single-file through one carry flag.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="ucode">9. The microcode idea: triads, hooks, one "firing"</h2>
+
+<p>x86 instructions don't run directly on the silicon. Each one is decoded into
+tiny internal steps called <b>micro-ops</b>, and on this chip those come from a
+patchable <b>microcode</b> RAM. With the right "red unlock" you can write your own
+micro-ops into that RAM. That's the layer we're working at — <em>below</em> the
+instruction set.</p>
+
+<p>The micro-ops are grouped into <b>triads</b>: a bundle of up to <b>3 micro-ops</b>
+that issue together, plus a "sequence word" controlling flow. Our entire field
+operation is just a list of triads (66 for multiply, 42 for square).</p>
+
+<h3>How we get our code to run: a hook</h3>
+
+<p>We pick an x86 instruction that's harmless in our context — <code>vmwrite</code> —
+and <b>hook</b> it: we tell the microcode "when you see <code>vmwrite</code>, jump
+into our patch instead." Now the native code triggers a whole field multiply by
+issuing a single <code>vmwrite</code>. We call that one event a <b>firing</b>.</p>
+
+<div class="key">
+<b>One firing = one whole field operation.</b> No loop inside, no bouncing back and
+forth between normal code and microcode mid-operation. The native side fires once;
+the patch computes all 25 products, all the carries, the reduction; control returns
+with the 5 result limbs sitting in registers.
+</div>
+
+<h3>Two operations resident at once</h3>
+
+<p>A hook maps one instruction to one patch. We need both multiply <em>and</em>
+square. So we use <b>two</b> hooks on two different harmless instructions:</p>
+
+<table>
+<tr><th>operation</th><th>triads</th><th>lives at</th><th>fired by</th></tr>
+<tr><td>multiply</td><td class="r">66</td><td class="mono">U7c00</td><td class="mono">vmwrite (0x0cd8)</td></tr>
+<tr><td>square</td><td class="r">42</td><td class="mono">U7d08</td><td class="mono">vmread (0x0618)</td></tr>
+</table>
+
+<p>That's 66 + 42 = <b>108 triads</b>, comfortably under the 128-triad limit of the
+patch RAM. Having two separate trigger instructions is what lets a single block of
+assembly freely mix squares (<code>vmread</code>) and multiplies (<code>vmwrite</code>)
+without them stepping on each other — which matters a lot in §12.</p>
+
+<!-- ===================================================================== -->
+<h2 id="three">10. Core trick #1: three carry chains at once</h2>
+
+<p>Here's the first real win. Inside one triad we can issue up to 3 micro-ops, and
+crucially they can use <b>per-register carry flags</b> (via an op called
+<code>SETCC</code>) — not just the one shared CPU flag. So instead of one single-file
+carry chain, we run <b>three independent running totals at the same time</b>:</p>
+
+<figure>
+<svg viewBox="0 0 820 280" width="820" role="img" aria-label="Three accumulators">
+  <!-- a product -->
+  <rect x="30" y="120" width="150" height="44" rx="6" fill="#1d2130" stroke="#5cc8ff"/>
+  <text x="105" y="140" fill="#5cc8ff" font-size="13" text-anchor="middle">one product</text>
+  <text x="105" y="157" fill="#9aa3b2" font-size="12" text-anchor="middle">aᵢ · bⱼ (128-bit)</text>
+
+  <!-- split lo / hi -->
+  <path d="M180 132 L250 92"  stroke="#7ee787" stroke-width="2" marker-end="url(#g)"/>
+  <path d="M180 152 L250 200" stroke="#9ad" stroke-width="2" marker-end="url(#b2)"/>
+
+  <rect x="250" y="70" width="220" height="44" rx="6" fill="#13251c" stroke="#7ee787"/>
+  <text x="360" y="90" fill="#7ee787" font-size="13" text-anchor="middle">TMP0 += low half</text>
+  <text x="360" y="107" fill="#9aa3b2" font-size="11" text-anchor="middle">"low accumulator"</text>
+
+  <rect x="250" y="180" width="220" height="44" rx="6" fill="#0f2030" stroke="#9ad"/>
+  <text x="360" y="200" fill="#9ad" font-size="13" text-anchor="middle">R8 += high half</text>
+  <text x="360" y="217" fill="#9aa3b2" font-size="11" text-anchor="middle">"high accumulator"</text>
+
+  <!-- carry out of low add -> TMP9 -->
+  <path d="M470 92 C540 92, 540 150, 540 150" stroke="#ffd479" stroke-width="2" fill="none" marker-end="url(#y)"/>
+  <rect x="560" y="128" width="230" height="44" rx="6" fill="#2a2412" stroke="#ffd479"/>
+  <text x="675" y="148" fill="#ffd479" font-size="13" text-anchor="middle">TMP9 += that carry</text>
+  <text x="675" y="165" fill="#9aa3b2" font-size="11" text-anchor="middle">"carry-sum accumulator"</text>
+
+  <text x="410" y="258" fill="#9aa3b2" font-size="12" text-anchor="middle">
+    Three chains, three private flags. They advance in parallel — none waits on the single CPU carry flag.</text>
+  <defs>
+    <marker id="g" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7ee787"/></marker>
+    <marker id="b2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9ad"/></marker>
+    <marker id="y" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#ffd479"/></marker>
+  </defs>
+</svg>
+<figcaption>Every 128-bit product splits into a low half and a high half. The lows
+pile into TMP0, the highs into R8, and the little carries that TMP0 throws off pile
+into TMP9 — all three running side by side.</figcaption>
+</figure>
+
+<p>And because a triad bundles 3 micro-ops, we <b>fuse</b> the work: one triad can
+do a multiply, an add into an accumulator, and capture a carry — all together —
+while the <em>next</em> product is already starting. Here are two real triads from
+the squaring patch (op names simplified for readability):</p>
+
+<pre><span class="com">// TMP0 = low accumulator, R8 = high accumulator,</span>
+<span class="com">// TMP9 = carry-sum, TMP15 = the just-captured carry bit, RCX = a product's high half</span>
+{ <span class="kw">ADD</span>(<span class="reg">TMP0</span>,<span class="reg">TMP0</span>,<span class="reg">RDI</span>),  <span class="kw">SETCC</span>(<span class="reg">TMP15</span>,<span class="reg">TMP0</span>), <span class="kw">ADD</span>(<span class="reg">R8</span>,<span class="reg">R8</span>,<span class="reg">RCX</span>)      }  <span class="com">// add a low half ; grab its carry ; add a high half</span>
+{ <span class="kw">ZEROEXT</span>(<span class="reg">TMP9</span>,<span class="reg">TMP15</span>), <span class="kw">MUL</span>(<span class="reg">RCX</span>,<span class="reg">RBX</span>,<span class="reg">R13</span>),  <span class="kw">ADD</span>(<span class="reg">TMP0</span>,<span class="reg">TMP0</span>,<span class="reg">R13</span>) }  <span class="com">// stash the carry ; start NEXT product ; add its low half</span></pre>
+
+<p>The first triad does <b>three</b> dependent-but-bundled things in one shot: add a
+low half, snapshot the carry it produced, and fold in a high half. The second triad
+launches the <em>next</em> multiply while still accumulating — so a multiply, an add,
+and a carry capture all overlap. A normal CPU
+would spend separate instructions and serialize the carry through its one
+flag. <b>This fusion + the three parallel chains is the whole structural
+advantage.</b></p>
+
+<!-- ===================================================================== -->
+<h2 id="split">11. Core trick #2: 2<sup>64</sup> = 2<sup>51</sup> · 2<sup>13</sup></h2>
+
+<p>At the end of a limb we have to turn those three accumulators back into one limb
+value plus a carry into the next limb. First we fold the carry-sum into the high
+accumulator, so the limb's true value is:</p>
+
+<div class="eq">S = TMP0 + 2<sup>64</sup> · R8</div>
+
+<p>We need two things from <code>S</code>: the bottom 51 bits (the output limb), and
+everything above bit 51 (the carry into the next limb). The clever part is the
+carry. Watch what <code>2<sup>64</sup></code> does when you divide by
+<code>2<sup>51</sup></code>:</p>
+
+<div class="eq">carry = ⌊S / 2<sup>51</sup>⌋ = (TMP0 &gt;&gt; 51) + 2<sup>13</sup>·R8 = (TMP0 &gt;&gt; 51) | (R8 &lt;&lt; 13)</div>
+
+<p>Why does <code>+</code> become <code>|</code> (a bitwise OR)? Because the two
+pieces never touch the same bits:</p>
+
+<figure>
+<svg viewBox="0 0 820 220" width="820" role="img" aria-label="Carry split is bit-disjoint">
+  <text x="20" y="26" fill="#9aa3b2" font-size="13">The carry into the next limb, by bit position:</text>
+
+  <!-- TMP0>>51 occupies bits 0..12 -->
+  <rect x="60" y="50" width="120" height="40" fill="#13251c" stroke="#7ee787"/>
+  <text x="120" y="75" fill="#7ee787" font-size="12" text-anchor="middle">TMP0 >> 51</text>
+  <rect x="180" y="50" width="600" height="40" fill="none" stroke="#2a3040" stroke-dasharray="4 4"/>
+  <text x="120" y="108" fill="#9aa3b2" font-size="11" text-anchor="middle">bits 0–12</text>
+  <text x="480" y="108" fill="#9aa3b2" font-size="11" text-anchor="middle">(zeros)</text>
+
+  <!-- R8<<13 occupies bits 13.. -->
+  <rect x="60" y="130" width="120" height="40" fill="none" stroke="#2a3040" stroke-dasharray="4 4"/>
+  <text x="120" y="155" fill="#9aa3b2" font-size="11" text-anchor="middle">(zeros)</text>
+  <rect x="180" y="130" width="600" height="40" fill="#0f2030" stroke="#9ad"/>
+  <text x="480" y="155" fill="#9ad" font-size="12" text-anchor="middle">R8 &lt;&lt; 13</text>
+  <text x="120" y="188" fill="#9aa3b2" font-size="11" text-anchor="middle">bits 0–12</text>
+  <text x="480" y="188" fill="#9aa3b2" font-size="11" text-anchor="middle">bits 13 and up</text>
+
+  <text x="420" y="212" fill="#ffd479" font-size="13" text-anchor="middle">
+    No overlap → adding them is the same as OR-ing them. The link between limbs is a single cheap OR.</text>
+</svg>
+<figcaption><code>TMP0 >> 51</code> is at most 13 bits wide (lives in bits 0–12).
+<code>R8 &lt;&lt; 13</code> has its bottom 13 bits forced to zero (lives in bits 13+).
+Disjoint, so OR = add.</figcaption>
+</figure>
+
+<p>And the output limb? It's just <code>S mod 2<sup>51</sup></code>, which (since the
+<code>R8</code> part is a multiple of <code>2<sup>51</sup></code>) equals
+<code>TMP0 mod 2<sup>51</sup></code> — done with a shift-left-13 then shift-right-13
+(clears the top, no mask constant needed). Here is the real closing sequence and the
+one-OR link that opens the next limb:</p>
+
+<pre>{ <span class="kw">ADD</span>(<span class="reg">R8</span>,<span class="reg">R8</span>,<span class="reg">TMP9</span>),  <span class="kw">SHL</span>(<span class="reg">TMP6</span>,<span class="reg">TMP0</span>,13),  <span class="kw">SHL</span>(<span class="reg">TMP1</span>,<span class="reg">R8</span>,13)  }  <span class="com">// fold carry-sum ; mask-prep ; high carry = R8&lt;&lt;13</span>
+{ <span class="kw">SHR</span>(<span class="reg">out0</span>,<span class="reg">TMP6</span>,13), <span class="kw">SHR</span>(<span class="reg">TMP8</span>,<span class="reg">TMP0</span>,51), ...            }  <span class="com">// out0 = TMP0 mod 2⁵¹ ; low carry = TMP0>>51</span>
+<span class="com">// ... next limb begins:</span>
+{ <span class="kw">OR</span>(<span class="reg">TMP0</span>,<span class="reg">TMP8</span>,<span class="reg">TMP1</span>), <span class="kw">MUL</span>(...), <span class="kw">ADD</span>(<span class="reg">TMP0</span>,...) }  <span class="com">// LINK: TMP0 = lowcarry | highcarry, then start accumulating again</span></pre>
+
+<p>The very last carry, off the top of limb 4, wraps with the magic reduction: one
+multiply by 19 back into limb 0, one short propagation, done.</p>
+
+<!-- ===================================================================== -->
+<h2 id="assemble">12. Bolting it into X25519: register chaining</h2>
+
+<p>Now we have two fast field ops, each fired by one instruction. The naive way to
+build X25519 is to call them like functions, bouncing every intermediate result out
+to memory and back. We do better: the <b>whole</b> scalar multiplication is written
+as inline assembly in one block, with all 15 working values living in a fixed
+stack structure, and consecutive operations <b>chained through registers</b>.</p>
+
+<div class="key">
+<b>Register chaining:</b> we arranged the add/subtract helpers to leave their results
+in <em>exactly the registers the next multiply or square wants as input</em>. So
+"add, then square the sum" hands off register-to-register — no store, no reload, no
+memory bounce for the intermediate.
+</div>
+
+<p>For example, the add helper leaves its 5 result limbs in
+<code>{rdi, rsi, r12, r11, r14}</code> — which is precisely the input register set
+for the square. So this pair chains for free:</p>
+
+<pre><span class="com">// one piece of a ladder step: A = x2 + z2, then AA = A²</span>
+FE_ADD(A_OFF, X2_OFF, Z2_OFF)      <span class="com">// result lands in {rdi,rsi,r12,r11,r14}</span>
+FE_SQ_FROM_REGS(AA_OFF)            <span class="com">// reads those same regs directly — no reload</span></pre>
+
+<p>A single ladder step has <b>six</b> such register chains. We even reorder
+operations so independent chains line up and run back-to-back. The Montgomery step
+dataflow looks like this:</p>
+
+<figure>
+<svg viewBox="0 0 820 250" width="820" role="img" aria-label="Ladder step dataflow">
+  <g font-size="12" text-anchor="middle">
+  <!-- inputs -->
+  <rect x="30" y="20" width="90" height="32" rx="6" fill="#1d2130" stroke="#2a3040"/><text x="75" y="41" fill="#e6e9ef">x2, z2</text>
+  <rect x="30" y="170" width="90" height="32" rx="6" fill="#1d2130" stroke="#2a3040"/><text x="75" y="191" fill="#e6e9ef">x3, z3</text>
+
+  <!-- A,B from x2,z2 -->
+  <rect x="170" y="10" width="80" height="30" rx="6" fill="#13251c" stroke="#7ee787"/><text x="210" y="30" fill="#7ee787">A=x2+z2</text>
+  <rect x="170" y="60" width="80" height="30" rx="6" fill="#13251c" stroke="#7ee787"/><text x="210" y="80" fill="#7ee787">B=x2−z2</text>
+  <!-- AA,BB -->
+  <rect x="300" y="10" width="80" height="30" rx="6" fill="#0f2030" stroke="#9ad"/><text x="340" y="30" fill="#9ad">AA=A²</text>
+  <rect x="300" y="60" width="80" height="30" rx="6" fill="#0f2030" stroke="#9ad"/><text x="340" y="80" fill="#9ad">BB=B²</text>
+
+  <!-- C,D from x3,z3 -->
+  <rect x="170" y="150" width="80" height="30" rx="6" fill="#13251c" stroke="#7ee787"/><text x="210" y="170" fill="#7ee787">C=x3+z3</text>
+  <rect x="170" y="195" width="80" height="30" rx="6" fill="#13251c" stroke="#7ee787"/><text x="210" y="215" fill="#7ee787">D=x3−z3</text>
+  <!-- DA, CB -->
+  <rect x="300" y="150" width="90" height="30" rx="6" fill="#0f2030" stroke="#9ad"/><text x="345" y="170" fill="#9ad">CB=C·B</text>
+  <rect x="300" y="195" width="90" height="30" rx="6" fill="#0f2030" stroke="#9ad"/><text x="345" y="215" fill="#9ad">DA=D·A</text>
+
+  <!-- outputs -->
+  <rect x="470" y="20" width="120" height="30" rx="6" fill="#1d2130" stroke="#5cc8ff"/><text x="530" y="40" fill="#5cc8ff">x2′ = AA·BB</text>
+  <rect x="470" y="80" width="160" height="30" rx="6" fill="#1d2130" stroke="#5cc8ff"/><text x="550" y="100" fill="#5cc8ff">z2′ via (AA−BB)…</text>
+  <rect x="470" y="150" width="160" height="30" rx="6" fill="#1d2130" stroke="#5cc8ff"/><text x="550" y="170" fill="#5cc8ff">x3′ = (DA+CB)²</text>
+  <rect x="470" y="195" width="160" height="30" rx="6" fill="#1d2130" stroke="#5cc8ff"/><text x="550" y="215" fill="#5cc8ff">z3′ = x1·(DA−CB)²</text>
+
+  <!-- arrows (chains) -->
+  <g stroke="#39414f" stroke-width="1.5" fill="none">
+    <path d="M120 32 L168 24"/><path d="M120 40 L168 72"/>
+    <path d="M250 24 L298 24"/><path d="M250 75 L298 75"/>
+    <path d="M120 182 L168 165"/><path d="M120 190 L168 208"/>
+    <path d="M250 208 L298 208"/><path d="M250 165 L298 165"/>
+    <path d="M380 24 L468 33"/><path d="M380 80 L468 92"/>
+    <path d="M390 208 L468 208"/><path d="M390 165 L468 168"/>
+  </g>
+  </g>
+</svg>
+<figcaption>Green = add/sub (cheap), blue = square/multiply (the firings). Each green→blue
+arrow into a square or multiply is a register chain: the green result is consumed
+straight out of registers.</figcaption>
+</figure>
+
+<h3>The inversion: 254 squarings, almost all chained</h3>
+
+<p>At the very end, X25519 needs one division, done as <code>z<sup>p−2</sup></code>
+via Fermat's little theorem. That's an <b>addition chain</b>: 254 squarings broken
+into runs of <code>1, 2, 1, 5, 10, 20, 10, 50, 100, 50, 5</code>, with 11 multiplies
+splicing the runs together. Inside a run, each square's output is renamed straight
+into the next square's input (4 register moves — the lowest limb already lines up),
+so a run of 100 squarings touches memory only at its two ends. That single block is
+hundreds of firings with almost no memory traffic in between.</p>
+
+<!-- ===================================================================== -->
+<h2 id="perf">13. Does it win? The numbers</h2>
+
+<p>Measured on the Goldmont N3350, pinned to base clock, best of a 24-way sweep over
+compilers and optimization levels (the way SUPERCOP measures).</p>
+
+<h3>The field operations, timed alone</h3>
+<table>
+<tr><th>operation</th><th class="r">microcode</th><th class="r">vs fiat-crypto (the real baseline)</th></tr>
+<tr><td>squaring</td><td class="r">≈ 37 cyc</td><td class="r win">≈ 26% faster</td></tr>
+<tr><td>multiplication</td><td class="r">≈ 58 cyc</td><td class="r win">≈ 3% faster</td></tr>
+</table>
+<p class="small">Squaring wins big (fewer products → more room to pack carries).
+Multiply is closer to multiplier-throughput-bound, so there's less to gain. Since a
+ladder is squaring-heavy, the squaring win is what carries through.</p>
+
+<h3>The whole X25519, end to end</h3>
+<table>
+<tr><th>contender</th><th>what it is</th><th class="r">median cycles</th></tr>
+<tr><td>amd64-64 / asm</td><td>4×64 saturated, hand assembly</td><td class="r lose">271,326</td></tr>
+<tr><td><b>ours / ucode-inline</b></td><td><b>5×51, microcode (chained ladder)</b></td><td class="r"><b>299,967</b></td></tr>
+<tr><td>amd64-51 / ucode</td><td>5×51 microcode in Bernstein–Schwabe's framework</td><td class="r">314,416</td></tr>
+<tr><td>donna_c64</td><td>5×51 portable C</td><td class="r">335,744</td></tr>
+<tr><td>ours / fiat</td><td>5×51 fiat-crypto C</td><td class="r">354,851</td></tr>
+<tr><td>amd64-51 / asm</td><td>5×51 hand assembly</td><td class="r">356,038</td></tr>
+<tr><td>ours / hand-C</td><td>5×51 hand-written C</td><td class="r">379,433</td></tr>
+<tr><td>ours / cryptopt</td><td>5×51 CryptOpt superoptimizer asm</td><td class="r">380,361</td></tr>
+<tr><td>amd64-64 / ucode</td><td>4×64 saturated, microcode port</td><td class="r">511,017</td></tr>
+</table>
+
+<div class="key">
+<b>The win:</b> our microcode field ops make X25519 faster than every other 5×51
+implementation — beating optimized C, the formally-verified fiat-crypto, the CryptOpt
+superoptimizer, donna, and even Bernstein–Schwabe's hand-written 5×51 assembly. The
+field-op advantage even survives being transplanted into someone else's framework
+(amd64-51/ucode beats amd64-51/asm).
+</div>
+
+<div class="warn">
+<b>The honest catch:</b> the <em>fastest X25519 overall</em> is still
+<code>amd64-64</code> hand assembly (271k vs our 300k, ~11% ahead). It uses a
+<em>different number format</em> — the saturated 4×64 — that happens to suit a normal
+CPU better. And when we port <em>our</em> microcode to that 4×64 format, it collapses
+to 511k (nearly 2× slower than the asm). Why? The 4×64 format needs long, full-width
+carry chains — and our microcode can't thread the CPU carry flag through a dependent
+chain inside a patch, so it has to fake it with slow serial steps. The exact thing the
+5×51 format let us avoid (§8) comes roaring back. <b>The format that's best for normal
+CPUs is the one our trick is worst at — and vice versa.</b>
+</div>
+
+<hr>
+<p class="small">That's the whole story: a key exchange → a scalar multiply → a ladder
+of field ops → big-number multiply mod 2<sup>255</sup>−19 → a 5-limb format whose
+spare bits make carries small and the ×19 reduction free → microcode that runs three
+carry chains at once and links limbs with a single OR → a register-chained ladder
+that never bounces intermediates through memory. Fast where the format cooperates,
+honestly bounded where it doesn't.</p>
+
+</div>
+</body>
+</html>
