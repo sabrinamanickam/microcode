@@ -205,12 +205,12 @@ accumulator before the next limb's products begin. The finished limb itself is
 isolated by a shift up followed by a shift back down, which discards the spare bits
 without a mask constant or a register to hold one.
 
-After the last limb, the carry that remains has run off the top of the field. It is
-folded back into the lowest limb by a single multiplication by $19$, the same
-reduction identity used throughout, followed by one short carry from the lowest limb
-into its neighbour. The result is left lazily reduced --- a single limb is permitted
-to be one bit wider than usual --- which the unsaturated representation absorbs at no
-cost.
+Even after the last limb, one final carry is left over. It has run off the top of
+the field, so the reduction identity brings it back to the bottom: the kernel
+multiplies it by $19$, adds it to the lowest limb, and passes one short carry into
+the next limb up. It then stops. The result is not fully tidied --- one limb may end
+up a single bit too wide --- but every limb has spare room, so the next operation
+reads it unchanged and the shortcut costs nothing.
 
 \begin{lstlisting}[language=C,caption={Limb resolution and the inter-limb link.
 Because $2^{64}=2^{51}\cdot2^{13}$, the carry out of a limb splits into a 13-bit
