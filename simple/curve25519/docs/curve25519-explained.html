@@ -80,6 +80,7 @@ no crypto background assumed.</p>
   <li><a href="#ladder">The only thing that runs hot: the ladder</a></li>
   <li><a href="#field">The field: numbers modulo 2<sup>255</sup>−19</a></li>
   <li><a href="#rep">The representation: 5 limbs of 51 bits (and why)</a></li>
+  <li><a href="#limbs">Wait — what gets split into limbs <code>a</code> and <code>b</code>?</a></li>
   <li><a href="#mul">Multiplication: the 5×5 grid and the ×19 fold</a></li>
   <li><a href="#sq">Squaring: the same grid, folded in half</a></li>
   <li><a href="#carry">Carrying: getting back to neat 51-bit limbs</a></li>
@@ -276,7 +277,135 @@ limb." No division, no separate reduction pass — just a multiply by 19 folded 
 the sum. This is the magic reduction from §3, made concrete.</p>
 
 <!-- ===================================================================== -->
-<h2 id="mul">5. Multiplication: the 5×5 grid and the ×19 fold</h2>
+<h2 id="limbs">5. Wait — what gets split into limbs <code>a</code> and <code>b</code>?</h2>
+
+<p>This is the step that trips everyone up. The headline back in §1 was
+<code>shared_secret = scalar · point</code>, and the multiply (next section) works on
+two numbers <code>a</code> and <code>b</code> chopped into limbs. So it's natural to
+guess <code>a = scalar</code> and <code>b = point</code>. <b>That is not what
+happens.</b></p>
+
+<div class="note">
+<b>The scalar is the recipe, not an ingredient.</b> Its 255 bits are read one at a
+time, and each bit only decides <em>which way the ladder steps</em> (a conditional
+swap of two working values). The scalar is <b>never</b> fed into a multiply. What the
+multiplies actually crunch are <b>coordinates</b>: the point you started from, plus
+all the running intermediates the ladder builds out of it.
+</div>
+
+<figure>
+<svg viewBox="0 0 820 250" width="820" role="img" aria-label="What feeds the multiply">
+  <!-- scalar -->
+  <rect x="30" y="22" width="200" height="58" rx="8" fill="#1d2130" stroke="#2a3040"/>
+  <text x="130" y="46" fill="#e6e9ef" font-size="13" text-anchor="middle">scalar — your private key</text>
+  <text x="130" y="66" fill="#9aa3b2" font-size="12" text-anchor="middle">32 bytes = 255 control bits</text>
+  <!-- point -->
+  <rect x="30" y="168" width="200" height="58" rx="8" fill="#1d2130" stroke="#2a3040"/>
+  <text x="130" y="192" fill="#e6e9ef" font-size="13" text-anchor="middle">point — an x-coordinate</text>
+  <text x="130" y="212" fill="#9aa3b2" font-size="12" text-anchor="middle">32 bytes → one field element</text>
+  <!-- ladder -->
+  <rect x="350" y="82" width="180" height="84" rx="8" fill="#171a23" stroke="#5cc8ff"/>
+  <text x="440" y="116" fill="#5cc8ff" font-size="14" text-anchor="middle" font-weight="bold">Montgomery ladder</text>
+  <text x="440" y="138" fill="#e6e9ef" font-size="12" text-anchor="middle">255 steps</text>
+  <!-- callout -->
+  <rect x="600" y="78" width="200" height="92" rx="8" fill="#13251c" stroke="#7ee787"/>
+  <text x="700" y="104" fill="#7ee787" font-size="13" text-anchor="middle">every step calls</text>
+  <text x="700" y="126" fill="#e6e9ef" font-size="13" text-anchor="middle" font-family="monospace">fe_mul(a, b)</text>
+  <text x="700" y="146" fill="#9aa3b2" font-size="11" text-anchor="middle">a, b = field elements</text>
+  <text x="700" y="161" fill="#9aa3b2" font-size="11" text-anchor="middle">(coordinates, 5 limbs each)</text>
+  <!-- arrows -->
+  <path d="M230 50 C300 50, 320 100, 348 112" stroke="#9aa3b2" stroke-width="1.5" fill="none" marker-end="url(#fa)"/>
+  <text x="300" y="44" fill="#9aa3b2" font-size="11" text-anchor="middle">bits pick the route</text>
+  <path d="M230 198 C300 198, 320 150, 348 138" stroke="#9aa3b2" stroke-width="1.5" fill="none" marker-end="url(#fa)"/>
+  <text x="300" y="212" fill="#9aa3b2" font-size="11" text-anchor="middle">starting number</text>
+  <path d="M530 124 L598 124" stroke="#7ee787" stroke-width="2" fill="none" marker-end="url(#fg)"/>
+  <text x="420" y="242" fill="#ffd479" font-size="13" text-anchor="middle">a and b are coordinates the ladder builds — never the scalar.</text>
+  <defs>
+    <marker id="fa" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9aa3b2"/></marker>
+    <marker id="fg" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7ee787"/></marker>
+  </defs>
+</svg>
+<figcaption>The scalar steers; the point and its descendants get multiplied. The
+operands <code>a</code>, <code>b</code> of any field multiply are two of those
+~255-bit coordinates, each held as 5 limbs.</figcaption>
+</figure>
+
+<h3>A "point" is really just a number</h3>
+<p>On Curve25519 a point is pinned down by a single number — its
+<code>x</code>-coordinate, usually written <code>u</code>. That number lives in the
+field: an integer somewhere between <code>0</code> and <code>p−1</code>, i.e. a
+~255-bit value. The 32-byte public key that arrives on the wire <em>is</em> that
+number, just written out as bytes. Everything the ladder then computes — the working
+values <code>A, B, AA, BB, …</code> from §2 — is another field element of exactly the
+same kind. So when a step runs <code>fe_mul(a, b)</code>, <b><code>a</code> and
+<code>b</code> are simply two of these field elements</b>, each already stored as
+5 limbs.</p>
+
+<h3>Unpacking 32 bytes into 5 limbs (this is the actual "split")</h3>
+<p>The split into limbs happens <em>once</em>, when a 32-byte value is first read in.
+32 bytes is 256 bits; we take the bottom 255 and cut them into five 51-bit slices.
+The wrinkle: 51 is not a multiple of 8, so the slices don't land on byte boundaries —
+four bytes end up <b>straddling</b> two limbs:</p>
+
+<figure>
+<svg viewBox="0 0 820 250" width="820" role="img" aria-label="Bytes to limbs">
+  <text x="40" y="22" fill="#9aa3b2" font-size="13">The 255 bits, cut into five 51-bit limbs:</text>
+  <!-- limb blocks -->
+  <g font-size="13" text-anchor="middle">
+    <rect x="40"  y="40" width="152" height="46" fill="#1a3a4a" stroke="#5cc8ff"/><text x="116" y="60" fill="#e6e9ef">a₀</text><text x="116" y="78" fill="#9aa3b2" font-size="10">bits 0–50</text>
+    <rect x="192" y="40" width="152" height="46" fill="#0f2030" stroke="#5cc8ff"/><text x="268" y="60" fill="#e6e9ef">a₁</text><text x="268" y="78" fill="#9aa3b2" font-size="10">bits 51–101</text>
+    <rect x="344" y="40" width="152" height="46" fill="#1a3a4a" stroke="#5cc8ff"/><text x="420" y="60" fill="#e6e9ef">a₂</text><text x="420" y="78" fill="#9aa3b2" font-size="10">bits 102–152</text>
+    <rect x="496" y="40" width="152" height="46" fill="#0f2030" stroke="#5cc8ff"/><text x="572" y="60" fill="#e6e9ef">a₃</text><text x="572" y="78" fill="#9aa3b2" font-size="10">bits 153–203</text>
+    <rect x="648" y="40" width="152" height="46" fill="#1a3a4a" stroke="#5cc8ff"/><text x="724" y="60" fill="#e6e9ef">a₄</text><text x="724" y="78" fill="#9aa3b2" font-size="10">bits 204–254</text>
+  </g>
+  <!-- boundary drop lines -->
+  <g stroke="#ffd479" stroke-width="1.5" stroke-dasharray="3 3">
+    <line x1="192" y1="86" x2="192" y2="150"/><line x1="344" y1="86" x2="344" y2="150"/>
+    <line x1="496" y1="86" x2="496" y2="150"/><line x1="648" y1="86" x2="648" y2="150"/>
+  </g>
+  <!-- byte ruler -->
+  <text x="40" y="118" fill="#9aa3b2" font-size="13">The 32 bytes, laid over the same range:</text>
+  <rect x="40" y="128" width="760" height="18" fill="#1d2130" stroke="#2a3040"/>
+  <!-- straddling bytes in orange, crossing the dashed boundaries -->
+  <g fill="#2a1c12" stroke="#ff9d6b">
+    <rect x="183" y="126" width="24" height="22"/><rect x="326" y="126" width="24" height="22"/>
+    <rect x="493" y="126" width="24" height="22"/><rect x="636" y="126" width="24" height="22"/>
+  </g>
+  <g font-size="10" fill="#ff9d6b" text-anchor="middle">
+    <text x="195" y="141">b6</text><text x="338" y="141">b12</text><text x="505" y="141">b19</text><text x="648" y="141">b25</text>
+  </g>
+  <!-- a few byte labels -->
+  <g font-size="10" fill="#9aa3b2" text-anchor="middle">
+    <text x="44" y="162">byte 0</text><text x="779" y="162">byte 31</text>
+  </g>
+  <text x="420" y="190" fill="#ffd479" font-size="13" text-anchor="middle">
+    Bytes 6, 12, 19, 25 each sit across a limb boundary.</text>
+  <text x="420" y="210" fill="#9aa3b2" font-size="12" text-anchor="middle">
+    That is exactly why the unpacking code shifts and masks: low bits go in one limb, high bits into the next.</text>
+</svg>
+<figcaption>One 256-bit value → five 51-bit limbs. The orange bytes are the ones that
+have to be split with shifts and masks.</figcaption>
+</figure>
+
+<p>Here is the real unpacking (<code>fe_frombytes</code>), shortened. Watch byte 6:
+its low 3 bits (<code>&amp; 0x07</code>) finish off limb 0, and its remaining bits
+(<code>&gt;&gt; 3</code>) start limb 1:</p>
+
+<pre><span class="com">/* fe_frombytes: 32 input bytes  ->  5 limbs of 51 bits */</span>
+t[0] =  in[0]      | in[1]&lt;&lt;8  | in[2]&lt;&lt;16 | in[3]&lt;&lt;24
+      | in[4]&lt;&lt;32 | in[5]&lt;&lt;40 | (in[6]  &amp; <span class="hl">0x07</span>) &lt;&lt; 48;   <span class="com">// limb a0 : bits 0–50</span>
+t[1] = (in[6]&gt;&gt;3)  | in[7]&lt;&lt;5  | ...        | (in[12] &amp; <span class="hl">0x3f</span>) &lt;&lt; 45;   <span class="com">// limb a1 : bits 51–101</span>
+t[2] = (in[12]&gt;&gt;6) | in[13]&lt;&lt;2 | ...        | (in[19] &amp; <span class="hl">0x01</span>) &lt;&lt; 50;   <span class="com">// limb a2 : bits 102–152</span>
+t[3] = (in[19]&gt;&gt;1) | in[20]&lt;&lt;7 | ...        | (in[25] &amp; <span class="hl">0x0f</span>) &lt;&lt; 47;   <span class="com">// limb a3 : bits 153–203</span>
+t[4] = (in[25]&gt;&gt;4) | in[26]&lt;&lt;4 | ...        | (in[31] &amp; <span class="hl">0x7f</span>) &lt;&lt; 44;   <span class="com">// limb a4 : bits 204–254</span></pre>
+
+<p>After this, <code>a</code> (and likewise <code>b</code>) is five 64-bit registers,
+51 bits used in each. That is the form the multiply grid in the next section expects.
+The reverse — packing 5 limbs back into 32 bytes for the wire — happens just once at
+the very end (<code>fe_tobytes</code>).</p>
+
+<!-- ===================================================================== -->
+<h2 id="mul">6. Multiplication: the 5×5 grid and the ×19 fold</h2>
 
 <p>To multiply two field elements <code>a</code> and <code>b</code>, you multiply
 every limb of <code>a</code> by every limb of <code>b</code> — 5 × 5 = 25 small
@@ -353,7 +482,7 @@ c4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0;</pre>
 128-bit accumulator. Five sums, twenty-five products. That's the multiply.</p>
 
 <!-- ===================================================================== -->
-<h2 id="sq">6. Squaring: the same grid, folded in half</h2>
+<h2 id="sq">7. Squaring: the same grid, folded in half</h2>
 
 <p>Squaring is <code>a · a</code>, so the grid is symmetric: <code>aᵢ·aⱼ</code> is the
 same product as <code>aⱼ·aᵢ</code>. Instead of computing both, you compute it once
@@ -384,11 +513,11 @@ c4 = d0*a4 + d1*a3 + a2*a2;</pre>
 <div class="note">
 Squaring is cheaper than multiplication (15 products vs 25), and a ladder does
 <em>more squarings than multiplications</em>. So squaring is the operation worth
-optimizing hardest — and, as you'll see in §13, it's where we win the most.
+optimizing hardest — and, as you'll see in §14, it's where we win the most.
 </div>
 
 <!-- ===================================================================== -->
-<h2 id="carry">7. Carrying: getting back to neat 51-bit limbs</h2>
+<h2 id="carry">8. Carrying: getting back to neat 51-bit limbs</h2>
 
 <p>After the grid, each <code>cᵢ</code> is a fat number (up to ~107 bits in the
 128-bit accumulator). We need to squeeze it back into five tidy 51-bit limbs. The
@@ -412,7 +541,7 @@ is dead simple in C. The next two sections are about why it is <em>not</em> simp
 for the CPU, and how microcode beats it.</p>
 
 <!-- ===================================================================== -->
-<h2 id="why-hard">8. Why a normal CPU struggles with this</h2>
+<h2 id="why-hard">9. Why a normal CPU struggles with this</h2>
 
 <p>Look at the carry chain again. <code>c1 += carry</code> can't start until
 <code>carry = c0 >> 51</code> is done. <code>c2 += carry</code> waits on
@@ -436,7 +565,7 @@ multiplier sits idle.</p>
 </div>
 
 <!-- ===================================================================== -->
-<h2 id="ucode">9. The microcode idea: triads, hooks, one "firing"</h2>
+<h2 id="ucode">10. The microcode idea: triads, hooks, one "firing"</h2>
 
 <p>x86 instructions don't run directly on the silicon. Each one is decoded into
 tiny internal steps called <b>micro-ops</b>, and on this chip those come from a
@@ -476,10 +605,10 @@ square. So we use <b>two</b> hooks on two different harmless instructions:</p>
 <p>That's 66 + 42 = <b>108 triads</b>, comfortably under the 128-triad limit of the
 patch RAM. Having two separate trigger instructions is what lets a single block of
 assembly freely mix squares (<code>vmread</code>) and multiplies (<code>vmwrite</code>)
-without them stepping on each other — which matters a lot in §12.</p>
+without them stepping on each other — which matters a lot in §13.</p>
 
 <!-- ===================================================================== -->
-<h2 id="three">10. Core trick #1: three carry chains at once</h2>
+<h2 id="three">11. Core trick #1: three carry chains at once</h2>
 
 <p>Here's the first real win. Inside one triad we can issue up to 3 micro-ops, and
 crucially they can use <b>per-register carry flags</b> (via an op called
@@ -543,7 +672,7 @@ flag. <b>This fusion + the three parallel chains is the whole structural
 advantage.</b></p>
 
 <!-- ===================================================================== -->
-<h2 id="split">11. Core trick #2: 2<sup>64</sup> = 2<sup>51</sup> · 2<sup>13</sup></h2>
+<h2 id="split">12. Core trick #2: 2<sup>64</sup> = 2<sup>51</sup> · 2<sup>13</sup></h2>
 
 <p>At the end of a limb we have to turn those three accumulators back into one limb
 value plus a carry into the next limb. First we fold the carry-sum into the high
@@ -603,7 +732,7 @@ one-OR link that opens the next limb:</p>
 multiply by 19 back into limb 0, one short propagation, done.</p>
 
 <!-- ===================================================================== -->
-<h2 id="assemble">12. Bolting it into X25519: register chaining</h2>
+<h2 id="assemble">13. Bolting it into X25519: register chaining</h2>
 
 <p>Now we have two fast field ops, each fired by one instruction. The naive way to
 build X25519 is to call them like functions, bouncing every intermediate result out
@@ -684,7 +813,7 @@ so a run of 100 squarings touches memory only at its two ends. That single block
 hundreds of firings with almost no memory traffic in between.</p>
 
 <!-- ===================================================================== -->
-<h2 id="perf">13. Does it win? The numbers</h2>
+<h2 id="perf">14. Does it win? The numbers</h2>
 
 <p>Measured on the Goldmont N3350, pinned to base clock, best of a 24-way sweep over
 compilers and optimization levels (the way SUPERCOP measures).</p>
@@ -729,7 +858,7 @@ CPU better. And when we port <em>our</em> microcode to that 4×64 format, it col
 to 511k (nearly 2× slower than the asm). Why? The 4×64 format needs long, full-width
 carry chains — and our microcode can't thread the CPU carry flag through a dependent
 chain inside a patch, so it has to fake it with slow serial steps. The exact thing the
-5×51 format let us avoid (§8) comes roaring back. <b>The format that's best for normal
+5×51 format let us avoid (§9) comes roaring back. <b>The format that's best for normal
 CPUs is the one our trick is worst at — and vice versa.</b>
 </div>
 
