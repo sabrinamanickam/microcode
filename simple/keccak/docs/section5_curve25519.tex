@@ -186,26 +186,31 @@ later).},label={lst:c25519-mac},basicstyle=\ttfamily\footnotesize]
 \end{lstlisting}
 
 \paragraph{Resolving a limb and linking to the next.}
-At the end of a limb the three accumulators are reconciled into one canonical
-limb value and one carry into the following limb, by the short sequence of
-\Cref{lst:c25519-carry}. The carry sum is first folded into the high accumulator,
-so that \texttt{R8} then represents the entire contribution of weight $2^{64}$ and
-above and \texttt{TMP0} the contribution below it; the full accumulated value of
-the limb is $S = \texttt{TMP0} + 2^{64}\,\texttt{R8}$. The output limb is the
-residue $S \bmod 2^{51}$, and the carry into the next limb is the quotient
-$\lfloor S/2^{51}\rfloor$. The kernel exploits the identity
-$2^{64} = 2^{51}\cdot 2^{13}$ to compute both cheaply. The quotient separates into
-a low contribution $\texttt{TMP0} \gg 51$, which is at most 13 bits wide, and a
-high contribution $\texttt{R8} \ll 13$, whose low 13 bits are necessarily zero;
-the two are therefore disjoint in their bit positions, and their sum is realised
-by a single bitwise \texttt{OR}. That \texttt{OR} is the whole of the inter-limb
-link: it seeds the low accumulator of the next limb. The output limb itself,
-$\texttt{TMP0} \bmod 2^{51}$, is produced by shifting left by 13 and then right by
-13, which clears the upper bits with no mask constant and no spare register. After
-the last limb the remaining top carry is folded back into limb zero by a single
-multiplication by the constant $19$, one short propagation from limb zero into
-limb one completes the reduction modulo $p$, and the result is left lazily reduced
-to at most 52 bits in one limb, which the representation tolerates.
+At the end of a limb the three accumulators must yield two things: the finished
+value of this limb, and the carry that passes into the next. The sequence of
+\Cref{lst:c25519-carry} produces both. The carry sum is first folded into the high
+accumulator, after which \texttt{TMP0} holds the low part of the limb's total and
+\texttt{R8} the high part. The finished limb is just the portion of that total which
+fits within a limb; the carry is everything that protrudes above it.
+
+Both fall out of one observation. A machine word is exactly one limb wide plus the
+thirteen spare bits that the representation leaves free (\Cref{sec:c25519-field}), so
+the carry arrives already in two pieces that cannot overlap. The piece taken from
+\texttt{TMP0} is whatever spilled past the limb, and is no wider than those thirteen
+spare bits; the piece taken from \texttt{R8} is shifted up by the same thirteen bits,
+so its lowest bits are empty. Because the two pieces sit in disjoint bit positions,
+joining them requires no addition --- a single bitwise \texttt{OR} suffices, and that
+\texttt{OR} is the entire link between one limb and the next, seeding the low
+accumulator before the next limb's products begin. The finished limb itself is
+isolated by a shift up followed by a shift back down, which discards the spare bits
+without a mask constant or a register to hold one.
+
+After the last limb, the carry that remains has run off the top of the field. It is
+folded back into the lowest limb by a single multiplication by $19$, the same
+reduction identity used throughout, followed by one short carry from the lowest limb
+into its neighbour. The result is left lazily reduced --- a single limb is permitted
+to be one bit wider than usual --- which the unsaturated representation absorbs at no
+cost.
 
 \begin{lstlisting}[language=C,caption={Limb resolution and the inter-limb link.
 Because $2^{64}=2^{51}\cdot2^{13}$, the carry out of a limb splits into a 13-bit
