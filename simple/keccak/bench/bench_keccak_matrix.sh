@@ -134,7 +134,16 @@ run_matrix() {
         fi
         rm -f build_err.log
 
-        output=$(sudo taskset -c 0 ./asm_op_keccak_vs_static 2>&1)
+        # A run that crashes (SIGSEGV) or exits non-zero must NOT abort the whole
+        # sweep (set -e would otherwise kill it and we'd lose every prior config's
+        # results before emit_results_md runs). The `if ! ...` form is set-e-safe:
+        # the failure is consumed by the conditional. Skip the bad config and keep
+        # going so the .md still gets written from the configs that succeeded.
+        if ! output=$(sudo taskset -c 0 ./asm_op_keccak_vs_static 2>&1); then
+            echo "[RUN FAILED — harness crashed or exited non-zero] skipping config: $cfg"
+            echo "$output" | tail -n 8 | sed 's/^/    /'
+            continue
+        fi
 
         # Show the human report so the user sees per-config numbers in real time.
         echo "$output" | sed -n '/head-to-head/,/ratios valid/p'

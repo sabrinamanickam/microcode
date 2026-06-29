@@ -157,6 +157,18 @@ endif
 ifeq ($(PROG),asm_op_keccak_vs)
 CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
+# Pin the HARNESS translation unit to a fixed, known-good -O. The harness is
+# measurement apparatus, NOT an implementation under test — only the SUPERCOP
+# baselines (compiled in their own .o rules with the swept $(CFLAGS)) should be
+# tuned across the compiler/-O grid. Sweeping the harness's own -O is both
+# meaningless (microcode is a fixed patch image; its number must stay flat
+# across configs) and dangerous: at -Os GCC reshapes main() with extra
+# mid-function push/pop spills and a different stack layout, which collides with
+# ucode_perm()'s requirement that the microcode patch preserve RSP (RSP is the
+# patch's 32nd data register and cannot be listed as an inline-asm clobber) ->
+# SIGSEGV. Appending -O2 after $(CFLAGS) wins (last -O wins for gcc/clang) and
+# affects ONLY the $< compile in the build rule, not the prebuilt baseline .o.
+HARNESS_OPT := -O2
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o \
               keccak_opt64lcu24.o keccak_opt64lcu24shld.o \
               keccak_opt64lcu6.o keccak_opt64u6.o \
@@ -164,9 +176,11 @@ EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o \
               keccak_xkcp_g64.o keccak_xkcp_g64lc.o keccak_openssl.o
 endif
 
-# Build $(PROG)_static from $(PROG).c (+ any extra objs)
+# Build $(PROG)_static from $(PROG).c (+ any extra objs). $(HARNESS_OPT) is empty
+# by default and -O2 for asm_op_keccak_vs (see note above); it follows $(CFLAGS)
+# so the harness TU's -O is pinned while baselines keep the swept flags.
 $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $< $(EXTRA_OBJS) $(LIBS) -o $@
+	$(CC) $(LDFLAGS) $(CFLAGS) $(HARNESS_OPT) $< $(EXTRA_OBJS) $(LIBS) -o $@
 
 clean:
 	rm -f *_static *.o keccak_openssl.o.s
