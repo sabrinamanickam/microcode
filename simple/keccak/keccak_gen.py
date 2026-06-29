@@ -22,6 +22,10 @@ and microcode-control-flow):
     must be centered; index-register form [base+index] has no offset limit
     (used for the RC table + counter beyond immediate reach).
   - Intra-triad fully sequential incl 3-deep RAW; STLF works; <=1 mem op/triad.
+    (probe_memops, 2026-06-29: a SINGLE isolated 2-mem triad — two LD, two ST,
+    LD+ST, ST+LD-same-addr — PASSES, but packing MANY 2-mem triads back-to-back
+    in the prologue/epilogue CRASHED the NUC. So the packer stays at 1 mem/triad
+    until the resource limit is understood. See keccak-two-mem-ops-per-triad.)
   - ROL_DSZ64 works; NOTAND(d,a,b)=(~a)&b; immediate field 16-bit.
   - Loop: UJMPCC reads ARCH RFLAGS (ignores reg operand); ZF=0 at entry; an XOR
     in the SAME triad sets ZF; count UP (ADD), compare via XOR; backward UJMPCC
@@ -229,8 +233,8 @@ def simulate_perm(init_state):
     epi=[]; gen_epilogue(epi); run(epi)
     return buf[0:25]
 
-# ---- packer (ordered; <=3 ops/triad; <=1 mem; no load-to-use in a triad;
-#       LOOPTEST forced into its own triad) ----
+# ---- packer (ordered; <=3 ops/triad; <=1 mem (2-mem packing crashed the box,
+#       see pack()); no load-to-use in a triad; LOOPTEST forced into its own triad) ----
 def is_mem(op): return op[0] in ("LD","ST","LDX","STX")
 def reads_of(op):
     if op[0] in ("XOR","NOTAND"): return (op[2],op[3])
@@ -248,6 +252,10 @@ def pack(oplist):
         if op[0]=="LOOPTEST":
             flush(); triads.append([op]); continue
         mem=is_mem(op); hz=any(r in ld for r in reads_of(op))
+        # NOTE: cur_mem==1 (one mem op/triad). probe_memops showed a SINGLE 2-mem
+        # triad works in isolation, but packing many of them (12-13 back-to-back
+        # 2-load / 2-store triads in the prologue/epilogue) CRASHED the NUC hard
+        # (2026-06-29). Reverted to 1 mem/triad. See keccak-two-mem-ops-per-triad.
         if len(cur)==3 or (mem and cur_mem==1) or hz: flush()
         cur.append(op)
         if mem: cur_mem+=1

@@ -1,46 +1,119 @@
 % =====================================================================
-% Section 4 — Keccak-f[1600] in Microcode
-% Draft for TCHES submission.
+% Keccak-f[1600] in Microcode — restructured into three sections:
+%   1. Designing the Microcode Kernel   (\label{sec:keccak-design})
+%   2. Implementation                   (\label{sec:keccak-impl})
+%   3. Evaluation                       (\label{sec:keccak-eval})
 %
-% This section is the worked example that instantiates the general
-% methodology of Section 3 (\Cref{sec:ucode-layer}) on a concrete,
-% control-flow-heavy primitive. All Keccak-specific implementation detail
-% lives here; Section 3 stays general. Numbers and design rationale are
-% taken from docs/keccak-microcode-rundown.html and the generated patch
-% (keccak_perm_body.h / keccak_gen.py).
+% Worked example instantiating the methodology of Section 3
+% (\Cref{sec:ucode-layer}) on a control-flow-heavy primitive. Numbers and
+% design rationale are taken from docs/keccak-microcode-rundown.html and the
+% generated patch (keccak_perm_body.h / keccak_gen.py).
 %
-% Assumes the Background has recalled the Keccak-f[1600] round (theta,
-% rho, pi, chi, iota); we restate only what the mapping needs.
+% Assumes the Background has recalled the Keccak-f[1600] round (theta, rho,
+% pi, chi, iota); we restate only what the mapping needs.
 % =====================================================================
 
-\section{Keccak-$f[1600]$ in Microcode}
-\label{sec:keccak}
+% =====================================================================
+\section{Designing the Microcode Kernel}
+\label{sec:keccak-design}
+% =====================================================================
 
 The first worked example instantiates the methodology of
 \Cref{sec:ucode-layer} on the Keccak-$f[1600]$ permutation. Keccak is the most
-demanding test of the layer in this work, because in contrast to the
-straight-line field-arithmetic primitives it is a 24-round loop with a
-per-round constant table, and it therefore exercises in-place looping, indexed
-addressing, and conditional control flow in addition to dense arithmetic
-packing. It is also the example in which the structural advantage of microcode
-is most readily stated, and, as we shall see, the example in which the
-limitations of that advantage are most clearly exposed.
+demanding test of the layer in this work: in contrast to the straight-line
+field-arithmetic primitives it is a 24-round loop with a per-round constant
+table, and it therefore exercises in-place looping, indexed addressing, and
+conditional control flow in addition to dense arithmetic packing. It is also
+the example in which the structural advantage of microcode is most readily
+stated, and, as we shall see, the example in which the limits of that advantage
+are most clearly exposed. This section sets out the design decisions; the
+concrete mechanics that realise them are deferred to \Cref{sec:keccak-impl}.
 
-\paragraph{The structural advantage.}
+\paragraph{The structural opportunity: residency across all rounds.}
 A Keccak state consists of 25 lanes of 64 bits. Native x86-64 exposes
 approximately 14 usable general-purpose registers, with the consequence that
-hand-written assembly cannot hold the entire state in registers and spills to
+hand-written assembly cannot hold the entire state in registers; it spills to
 the first-level cache continuously, and the fastest scalar implementations
 recover residency only by fully unrolling all 24 rounds. The
 micro-architectural register file is 32 entries wide, comprising 16
 general-purpose and 16 temporary registers, which is sufficient to hold the
-complete 25-lane state resident not merely within a single round but across
-all 24. Our design rests entirely on this property, in that the 25 lanes are
-loaded once, the 24 rounds are evaluated with the whole state resident in
-registers, and the lanes are stored once at the end. We achieve residency
-without unrolling, which the 128-triad capacity of \Cref{sec:budget} would not
-in any case permit, and we expend the resulting register headroom on per-round
-transformations that register-starved native code is unable to perform.
+complete 25-lane state resident not merely within a single round but across all
+24. Our first and governing design decision is to rest the entire kernel on
+this property: the 25 lanes are loaded once, the 24 rounds are evaluated with
+the whole state resident in registers, and the lanes are stored once at the
+end. Residency is obtained without unrolling, which the 128-triad capacity of
+\Cref{sec:budget} would not in any case permit, and the resulting register
+headroom is then spent on per-round transformations that register-starved
+native code is unable to perform.
+
+\paragraph{One firing for the whole permutation.}
+The second decision concerns where the round boundary lives. Rather than fire
+the patch once per round, which would force the state out to memory and back at
+every boundary and pay the hook cost 24 times, we evaluate the entire
+permutation within a \emph{single} hooked \texttt{vmwrite} firing and loop the
+round body internally by means of a backward branch. Because control never
+leaves the patch, the temporary registers persist for the lifetime of the
+permutation, and the state therefore stays resident across all 24 rounds with
+no boundary traffic. Only a prologue and an epilogue, executed once each, move
+the state between registers and memory. This choice is what makes the residency
+of the previous paragraph realisable in practice.
+
+\paragraph{Why a single looped body is correct: the structure of $\pi$.}
+The natural objection to looping a Keccak round is that $\pi$ relabels lane
+positions, so that the lane held in a given register would appear to drift from
+one round to the next, which would seem to demand either per-round register
+renaming or two alternating body copies. The objection is unfounded, and the
+reason is structural. The permutation $\pi$ on the 25 lanes consists of one
+fixed point, namely lane~0, together with a single 24-cycle. If $\pi$ is
+applied \emph{in place} along that cycle --- that is, by walking the cycle and
+moving each element into its destination register while folding in the
+exclusive-or of $\theta$ and the rotation of $\rho$ --- then every lane is
+returned to its canonical register by the end of the round. Round $r{+}1$
+consequently observes exactly the register layout that round $r$ observed, so
+that a single identical body may be looped 24 times with no renaming and no
+two-body alternation scheme. This observation is the linchpin of the design: it
+is what allows the static footprint to be one round body rather than 24, and
+hence what allows residency and the 128-triad budget to coexist.
+
+\paragraph{Borrowing a 32nd register.}
+Holding the 25 state lanes, the five mixing lanes $D$ of $\theta$, the buffer
+base, and a working temporary simultaneously requires one register more than
+the architecturally nameable file affords once the base pointer is reserved.
+Our third decision is therefore to borrow \texttt{RSP} as a 32nd data register,
+saving it to the buffer in the prologue and restoring it in the epilogue. This
+is safe because, as established in \Cref{sec:findings}, the patch never touches
+the stack. The substitution is not cosmetic: it is precisely what permits the
+five $D$ values to remain resident in registers throughout a round instead of
+being re-read from memory once per lane, which would otherwise cost 25
+additional memory triads per round.
+
+\paragraph{Spending the headroom.}
+The final design decisions concern how the freed registers are used, each being
+a transformation that native code cannot make because it lacks the spare
+registers to do so. The state is kept fully resident, so that input and output
+are paid once per permutation rather than once per round. The five $D$ values
+are kept resident, as just described. And $\chi$, which would otherwise force
+two auxiliary moves per row to preserve values it is about to overwrite, is
+restructured to use the now-dead $D$ registers as scratch and so requires no
+auxiliary moves at all. To these we add two latency-shortening choices on the
+round's critical path: a balanced parity tree for $\theta$, and a loop counter
+that stores the round constant's byte offset directly so that the constant
+fetch needs no scaling arithmetic. The mechanics of all five appear in
+\Cref{sec:keccak-impl}, and their measured contributions in
+\Cref{sec:keccak-eval}. One further decision is forced rather than chosen: the
+loop counter is advanced \emph{upward}, because the decrement-style operations
+that a count-down would require do not behave correctly on this part, as
+recorded in \Cref{sec:findings}.
+
+% =====================================================================
+\section{Implementation}
+\label{sec:keccak-impl}
+% =====================================================================
+
+We now give the concrete realisation of the design of \Cref{sec:keccak-design}:
+the register and buffer layout, the triad-level form of each round stage, the
+generator and packer that produce the patch, and the verification that
+accompanies it.
 
 % ---------------------------------------------------------------------
 \subsection{State Layout and Residency}
@@ -53,19 +126,16 @@ $\texttt{RDI},\texttt{RSI},\texttt{RBX},\texttt{RDX},\texttt{RBP},
 \texttt{R8}\ldots\texttt{R15}$ followed by the 12 temporaries
 $\texttt{TMP0}\ldots\texttt{TMP11}$. The register \texttt{RCX} holds the buffer
 base and is never repurposed, while the remaining five registers, namely
-$\texttt{RAX}$ and $\texttt{TMP12}\ldots\texttt{TMP15}$, serve as scratch and
-hold the five resident $D$ values of $\theta$ during a round and the
-temporaries of $\chi$ once those values are no longer needed. The file is one
-register short of what full $D$-residency requires, and we therefore borrow
-\texttt{RSP} as a 32nd data register, saving it to the buffer in the prologue
-and restoring it in the epilogue, having verified in \Cref{sec:findings} that
-this is safe because the patch never touches the stack. This single
-substitution is what allows $D$ to live in registers rather than being
-re-read from memory once per lane.
+$\texttt{RAX}$ and $\texttt{TMP12}\ldots\texttt{TMP15}$, serve as scratch: they
+hold the five resident $D$ values of $\theta$ during a round and the temporaries
+of $\chi$ once those values are no longer needed. With \texttt{RSP} borrowed as
+the 32nd data register (\Cref{sec:keccak-design}) the file is exactly filled,
+\texttt{RSP} serving as the working register for the parity tree, the $\rho$
+rotation, and the $\pi$ cycle walk.
 
 \paragraph{Buffer organisation.}
-The operation is backed by a single contiguous array of 56 lanes, and the base
-pointer is centered at \texttt{RCX}~$=$~\texttt{\&buf[16]} so that every
+The operation is backed by a single contiguous array of 56 lanes, with the base
+pointer centered at \texttt{RCX}~$=$~\texttt{\&buf[16]} so that every
 displacement fits within the 8-bit signed offset field discussed in
 \Cref{sec:findings}, as summarised in \Cref{tab:keccak-buffer}. Only the 25
 state lanes are accessed by the prologue and epilogue. The column-parity
@@ -98,28 +168,24 @@ lane & offset(\texttt{RCX}) & name & contents \\
 \subsection{The Looped Round Body}
 \label{sec:keccak-round}
 
-The entire permutation is evaluated within a single hooked firing, comprising a
-prologue that loads the 25 lanes using one single-load triad per lane, since at
-most one memory operation may share a triad, a round body that is looped 24
-times by means of a backward branch, and an epilogue that stores the lanes
-back to memory. We describe the body in order of execution, giving particular
-attention to the two stages at which the layer confers its advantage.
+The permutation is the prologue, a body looped 24 times by a backward branch,
+and the epilogue. The prologue loads the 25 lanes using one single-load triad
+per lane, since at most one memory operation may share a triad
+(\Cref{sec:keccak-packing}); the epilogue stores them symmetrically. We
+describe the body in order of execution.
 
-\paragraph{The $\theta$ stage and the residency of $D$.}
+\paragraph{$\theta$ and the residency of $D$.}
 The column parity $C_x=\bigoplus_y A[x{+}5y]$ stands at the head of every
-round's dependency chain, and we therefore shorten its latency. In place of the
-reference implementation's depth-four left-associated chain we emit a balanced
-tree of depth three, using \texttt{RSP} as a second accumulator so that the two
-halves are computed in parallel, and the packer places the dependent
-exclusive-or operations in successive slots of a single triad, as shown in
+round's dependency chain, so we shorten its latency. In place of the reference
+implementation's depth-four left-associated chain we emit a balanced tree of
+depth three, using \texttt{RSP} as a second accumulator so that the two halves
+are computed in parallel, and the packer places the dependent exclusive-or
+operations in successive slots of a single triad, as shown in
 \Cref{lst:keccak-theta}. The five values $C_x$ are then spilled to the buffer,
 because the registers are required immediately afterwards, and the mixing lanes
-$D_x = C_{x-1}\oplus \mathrm{rol}(C_{x+1},1)$ are computed into the five
-scratch registers and kept resident for the remainder of the round. This use
-of the resident $D$ values is the principal benefit of the borrowed
-\texttt{RSP}, and it eliminates the per-lane reloads of $D$, amounting to 25
-additional memory triads per round, that earlier versions of the kernel
-incurred.
+$D_x = C_{x-1}\oplus \mathrm{rol}(C_{x+1},1)$ are computed into the five scratch
+registers and kept resident for the remainder of the round, eliminating the 25
+per-lane reloads of $D$ that earlier versions of the kernel incurred.
 
 \begin{lstlisting}[language=C,caption={The depth-three parity tree of $\theta$,
 in which a single column's tree is packed into the slots of one triad while the
@@ -129,33 +195,26 @@ spill of the previous column is interleaved.},label={lst:keccak-theta},basicstyl
 \end{lstlisting}
 
 \paragraph{The fused $\theta$-apply, $\rho$, and $\pi$ stage.}
-The natural concern when looping a round is that $\pi$ relabels lane positions,
-so that the lane held in a given register would appear to drift from one round
-to the next. This concern is unfounded, and the reason is structural. The
-permutation $\pi$ on the 25 lanes consists of one fixed point, namely lane 0,
-together with a single 24-cycle. By applying $\pi$ in place along that cycle,
-which is to say by walking the cycle and moving each element into its
-destination register while folding in the exclusive-or of $\theta$ and the
-rotation of $\rho$, every lane is returned to its canonical register at the end
-of the round. Round $r{+}1$ consequently observes exactly the register layout
-that round $r$ observed, so that a single identical body may be looped 24 times
-with no per-round renaming and no two-body alternation scheme. The fusion costs
-one exclusive-or and one rotation per lane, and $D$ is read directly from
-registers without any memory access.
+By the argument of \Cref{sec:keccak-design}, $\pi$ is one fixed point plus a
+single 24-cycle, so applying it in place along that cycle returns every lane to
+its canonical register. Concretely, we walk the cycle and move each element into
+its destination register while folding in the exclusive-or of $\theta$ and the
+rotation of $\rho$, reading $D$ directly from registers with no memory access.
+The fusion costs one exclusive-or and one rotation per lane, and \texttt{RSP}
+holds the one element displaced at the head of the cycle.
 
 \paragraph{The $\chi$ stage without auxiliary moves.}
 The step $\chi$ computes, for each row, $A_x \mathbin{\oplus}\!= (\lnot
 A_{x+1})\land A_{x+2}$, which corresponds exactly to the \texttt{NOTAND}
-primitive. If this were performed naively in place, the overwriting of $A_x$
-would destroy a value that the subsequent lanes still require, which forces two
-auxiliary moves per row, or ten per round, in register-starved native code.
-Because the five $D$ registers are now dead, we have the headroom to compute
-all five \texttt{NOTAND} terms of a row first, placing them in scratch, and
-then to apply the five in-place exclusive-or operations, as shown in
-\Cref{lst:keccak-chi}, so that no auxiliary moves are required at all. This was
-the single largest measured improvement, as reported in \Cref{sec:keccak-perf},
-and it is a direct consequence of residency, in that it is precisely the
-transformation that native code is unable to make.
+primitive. Performed naively in place, the overwriting of $A_x$ would destroy a
+value the subsequent lanes still require, which forces two auxiliary moves per
+row, or ten per round, in register-starved native code. Because the five $D$
+registers are now dead, we have the headroom to compute all five \texttt{NOTAND}
+terms of a row first, placing them in scratch, and then to apply the five
+in-place exclusive-or operations, as shown in \Cref{lst:keccak-chi}, so that no
+auxiliary moves are required at all. This is the single largest measured
+improvement (\Cref{sec:keccak-eval}), and it is a direct consequence of
+residency.
 
 \begin{lstlisting}[language=C,caption={The move-free $\chi$ stage, in which the
 five \texttt{NOTAND} terms of a row are computed into the now-dead
@@ -166,20 +225,17 @@ applied.},label={lst:keccak-chi},basicstyle=\ttfamily\footnotesize]
 { XOR(RSI,RSI,TMP12),   XOR(RBX,RBX,TMP13),   XOR(RDX,RDX,TMP14),    NOP_SEQW }
 \end{lstlisting}
 
-\paragraph{The $\iota$ stage and loop control.}
+\paragraph{$\iota$ and loop control.}
 Because the counter lane stores the byte offset of the current round constant
-directly, the step $\iota$ reduces to a load of the index, an indexed load of
-the constant, and a single exclusive-or into lane~0, with no scaling arithmetic
-on the path from $\iota$ to lane~0. The counter is then advanced by 8 and
-persisted in the spare slots of the same triad, after which a single forced
-triad performs the loop test and the backward branch. In that triad an
-exclusive-or of the index against the end marker sets the architectural zero
-flag, and a conditional branch within the same triad returns control to the top
-of the body for as long as the index differs from $320$, which lies just past
-the last constant, thereby producing exactly 24 iterations, as shown in
-\Cref{lst:keccak-loop}. We count upward rather than downward because
-decrement-style operations did not behave correctly on this part, as recorded
-in \Cref{sec:findings}.
+directly, $\iota$ reduces to a load of the index, an indexed load of the
+constant, and a single exclusive-or into lane~0, with no scaling arithmetic on
+the path from $\iota$ to lane~0. The counter is then advanced by 8 and persisted
+in the spare slots of the same triad, after which a single forced triad performs
+the loop test and the backward branch. In that triad an exclusive-or of the
+index against the end marker sets the architectural zero flag, and a conditional
+branch within the same triad returns control to the top of the body for as long
+as the index differs from $320$, which lies just past the last constant, thereby
+producing exactly 24 iterations, as shown in \Cref{lst:keccak-loop}.
 
 \begin{lstlisting}[language=C,caption={Loop control, in which the flag-setting
 exclusive-or and the backward conditional branch must occupy the same
@@ -188,59 +244,80 @@ triad.},label={lst:keccak-loop},basicstyle=\ttfamily\footnotesize]
 \end{lstlisting}
 
 % ---------------------------------------------------------------------
-\subsection{Triad Budget}
-\label{sec:keccak-budget}
+\subsection{Generation, Packing, and the Triad Budget}
+\label{sec:keccak-packing}
 
+\paragraph{No hand-written triads.}
+In accordance with \Cref{sec:triads-packing}, no triad is written by hand. The
+generator emits the round as an ordered op-list over real register names, and a
+single greedy left-to-right packer lowers that list to triads, closing the
+current triad whenever it would exceed three slots, whenever a second memory
+operation would enter it, whenever an operation would consume a register loaded
+earlier in the same triad, and around the forced loop-test triad. The packer
+therefore enforces the hardware scheduling rules mechanically rather than
+leaving them to the programmer.
+
+\paragraph{The one-memory-operation rule.}
+The packer admits at most one memory operation per triad, which is why the
+prologue and epilogue are 25 single-lane triads each. A targeted probe refined
+the cause of this rule. A single triad bearing two memory operations executes
+correctly in every combination of loads and stores we tested in isolation;
+however, a kernel in which many such triads are packed consecutively --- as
+arises naturally when the 25-lane prologue and epilogue are compressed two lanes
+to a triad --- faults the machine. The binding constraint is thus the sustained
+throughput of the memory cluster rather than the legality of an individual
+triad, and we retain the one-operation-per-triad rule in production.
+
+\paragraph{Budget.}
 The complete permutation compiles to 108 triads, which lies comfortably within
 the 128-triad patch RAM. These comprise a 26-triad prologue, consisting of one
 \texttt{RSP} save and 25 single-lane loads, a 56-triad body that includes the
 constant lookup and the loop test, and a 26-triad epilogue, consisting of 25
-stores and the \texttt{RSP} restore. The body begins at \texttt{U7c68}, which
-is the branch target. Because the body is looped rather than unrolled, the
-static footprint is independent of the number of rounds, whereas the dynamic
-count, that is, the number of triads actually executed per permutation, is
-$26 + 24\times56 + 26 = 1396$. The 20 triads of headroom beneath the cap
-constitute genuine slack, but, as \Cref{sec:keccak-perf} explains, they cannot
-be spent on unrolling for additional parallelism, because even a single
-additional round body would not fit alongside the existing one.
+stores and the \texttt{RSP} restore. The body begins at \texttt{U7c68}, which is
+the branch target. Because the body is looped rather than unrolled, the static
+footprint is independent of the number of rounds, whereas the dynamic count ---
+the number of triads actually executed per permutation --- is $26 +
+24\times56 + 26 = 1396$. The 20 triads of headroom beneath the cap are genuine
+slack, but, as \Cref{sec:keccak-eval} explains, they cannot be spent on
+unrolling, because even a single additional round body would not fit alongside
+the existing one.
 
 % ---------------------------------------------------------------------
 \subsection{Verification}
 \label{sec:keccak-verify}
 
-In accordance with \Cref{sec:triads-packing}, no triad is written by hand. The
-generator emits the round as an op-list, executes it on a register-and-memory
-simulator that models the 8-bit signed-offset limit, so that an out-of-range
-displacement manifests as an assertion failure in software rather than as a
-silent corruption of state on hardware, and asserts equality with a reference
-Keccak over 64 random states across all 24 rounds before any triads are
-emitted. On hardware the patch is then checked in two ways, first lane by lane
-against the same reference, and second, more stringently, against the published
-$f(0)$ and $f(f(0))$ known-answer vectors of the Keccak team, so that a
-correlated error present in both the reference and the patch cannot escape
-detection. The all-zero anchor reproduces the canonical value
+Before any triads are emitted, the generator executes the op-list on a
+register-and-memory simulator that models the 8-bit signed-offset limit, so that
+an out-of-range displacement manifests as an assertion failure in software
+rather than as a silent corruption of state on hardware, and asserts equality
+with a reference Keccak over 64 random states across all 24 rounds. On hardware
+the installed patch is then checked in two ways: first lane by lane against the
+same reference, and second, more stringently, against the published $f(0)$ and
+$f(f(0))$ known-answer vectors of the Keccak team, so that a correlated error
+present in both the reference and the patch cannot escape detection. The
+all-zero anchor reproduces the canonical value
 $\texttt{lane0}=\texttt{0xF1258F7940E1DDE7}$.
 
-% ---------------------------------------------------------------------
-\subsection{Performance}
-\label{sec:keccak-perf}
+% =====================================================================
+\section{Evaluation}
+\label{sec:keccak-eval}
+% =====================================================================
 
 \paragraph{Measurement methodology.}
-Timing on this part is subject to a pitfall that invalidates naive
-comparisons. The \texttt{rdtsc} instruction counts at a fixed reference rate of
-approximately $1.1$\,GHz, whereas the core bursts to approximately $2.4$\,GHz
-under load, with the consequence that the same work is reported as roughly
-$2.2$ times more or fewer ticks depending on the power state during
-measurement. Comparing a fresh measurement against a baseline captured in a
-separate run is therefore meaningless. We instead time the microcode and all of
-the scalar contenders back to back within a single process, after a warm-up
-phase has driven the core to a steady frequency, so that both observe the same
-clock and the ratio between them is frequency-invariant; for absolute cycle
-counts we additionally pin the core to its base frequency so that the reported
-ticks approximate true cycles. We compare against the genuinely fastest scalar
-baselines from SUPERCOP, swept over 24 compiler-and-optimisation configurations
-with the best result selected for each contender, in the same manner as the
-SUPERCOP autotuner.
+Timing on this part is subject to a pitfall that invalidates naive comparisons.
+The \texttt{rdtsc} instruction counts at a fixed reference rate of approximately
+$1.1$\,GHz, whereas the core bursts to approximately $2.4$\,GHz under load, with
+the consequence that the same work is reported as roughly $2.2$ times more or
+fewer ticks depending on the power state during measurement. Comparing a fresh
+measurement against a baseline captured in a separate run is therefore
+meaningless. We instead time the microcode and all of the scalar contenders back
+to back within a single process, after a warm-up phase has driven the core to a
+steady frequency, so that both observe the same clock and the ratio between them
+is frequency-invariant; for absolute cycle counts we additionally pin the core
+to its base frequency so that the reported ticks approximate true cycles. We
+compare against the genuinely fastest scalar baselines from SUPERCOP, swept over
+24 compiler-and-optimisation configurations with the best result selected for
+each contender, in the same manner as the SUPERCOP autotuner.
 
 \paragraph{Result.}
 Under base-frequency, same-process measurement the looped permutation completes
@@ -250,8 +327,8 @@ contender, \texttt{opt64lcu24}, and 2061 cycles for the hand-tuned
 corresponds to a ratio of $0.934$, an improvement of approximately $7\%$, and
 the microcode is the fastest of all contenders. The ratio is the robust
 quantity, since the same harness measured at burst frequency reports
-approximately 874 cycles against 942, which is the identical ratio of $0.93$
-scaled by the $2.4/1.1$ power-state factor.
+approximately 874 cycles against 942, the identical ratio of $0.93$ scaled by
+the $2.4/1.1$ power-state factor.
 
 \begin{table}[t]
 \centering
@@ -276,23 +353,23 @@ contender & min (cyc/perm) & median & best config \\
 \paragraph{The source and the bound of the improvement.}
 The margin is modest by design, and the latency model of \Cref{sec:findings}
 explains why. A single isolated firing sustains $0.49$ cycles per triad, but
-this is a throughput figure obtained by overlapping independent firings,
-whereas the looped permutation is a strict dependency chain, in which round
-$N$ requires round $N{-}1$, with a backward branch on each round and no overlap
-between firings, so that it pays the true latency of approximately $1.37$
-cycles per triad and the 1396 dynamic triads accordingly cost approximately
-1910 cycles. The microcode is therefore latency-bound at roughly one triad per
-cycle, whereas the hand-tuned scalar assembly extracts approximately three
-operations per cycle from the rotate and \texttt{ANDN} instruction-level
-parallelism of Goldmont. We cannot close this gap with additional parallelism,
-because the chain $\theta{\to}\rho{\to}\pi{\to}\chi$ is inherently sequential
-and the 128-triad cap precludes the unrolling that would expose independent
-work. The entire advantage is consequently the per-round work that native code
-cannot perform, namely full register residency, with the state input and output
-paid once per permutation rather than once per round, the borrowed 32nd
-register that keeps $D$ resident, and the move-free $\chi$ stage.
-\Cref{tab:keccak-opt} shows the improvement assembled from these structural
-contributions, each measured back to back.
+this is a throughput figure obtained by overlapping independent firings, whereas
+the looped permutation is a strict dependency chain, in which round $N$ requires
+round $N{-}1$, with a backward branch on each round and no overlap between
+firings, so that it pays the true latency of approximately $1.37$ cycles per
+triad and the 1396 dynamic triads accordingly cost approximately 1910 cycles.
+The microcode is therefore latency-bound at roughly one triad per cycle, whereas
+the hand-tuned scalar assembly extracts approximately three operations per cycle
+from the rotate and \texttt{ANDN} instruction-level parallelism of Goldmont. We
+cannot close this gap with additional parallelism, because the chain
+$\theta{\to}\rho{\to}\pi{\to}\chi$ is inherently sequential and the 128-triad
+cap precludes the unrolling that would expose independent work. The entire
+advantage is consequently the per-round work that native code cannot perform:
+full register residency, with the state input and output paid once per
+permutation rather than once per round; the borrowed 32nd register that keeps
+$D$ resident; and the move-free $\chi$ stage. \Cref{tab:keccak-opt} shows the
+improvement assembled from these structural contributions, each measured back to
+back.
 
 \begin{table}[t]
 \centering
@@ -315,9 +392,9 @@ step & change & ratio \\
 In summary, a complete and known-answer-verified 24-round Keccak-$f[1600]$ runs
 entirely in Goldmont microcode, looped within a single \texttt{vmwrite} firing,
 in 108 triads, and outperforms the fastest hand-tuned scalar assembly on this
-microarchitecture by approximately $7\%$. The result is a clear demonstration
-of the character of the layer established in \Cref{sec:ucode-layer}, in that its
-advantage is structural, deriving from the elimination of the spills and data
-movement that the instruction set architecture cannot avoid, rather than from a
-higher peak throughput, and it is greatest precisely where native code is most
+microarchitecture by approximately $7\%$. The result is a clear demonstration of
+the character of the layer established in \Cref{sec:ucode-layer}: its advantage
+is structural, deriving from the elimination of the spills and data movement
+that the instruction set architecture cannot avoid, rather than from a higher
+peak throughput, and it is greatest precisely where native code is most
 constrained by the shortage of registers.

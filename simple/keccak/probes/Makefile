@@ -73,6 +73,11 @@ CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
 endif
 
+ifeq ($(PROG),probe_memops)
+CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
+LDFLAGS := -static -no-pie
+endif
+
 $(PROG)_static: $(PROG).c $(LIBS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $< $(LIBS) -o $@
 

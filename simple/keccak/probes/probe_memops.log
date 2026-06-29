@@ -1,0 +1,16 @@
+ATTEMPT test=1  two LOADs in one triad { LDZX RDI<-[0], LDZX RSI<-[1] }  (3 triads)
+RESULT  test=1  PASS (two mem ops/triad WORK) buf[5]=1111111111111111(exp 1111111111111111) buf[6]=2222222222222222(exp 2222222222222222)
+=== probe_memops done: test=1 ===
+
+ATTEMPT test=2  two STORES in one triad { STAD RDI->[5], STAD RSI->[6] }  (3 triads)
+RESULT  test=2  PASS (two mem ops/triad WORK) buf[5]=1111111111111111(exp 1111111111111111) buf[6]=2222222222222222(exp 2222222222222222)
+=== probe_memops done: test=2 ===
+
+ATTEMPT test=3  LOAD+STORE in one triad { LDZX RDI<-[0], STAD RSI->[6] }  (3 triads)
+RESULT  test=3  PASS (two mem ops/triad WORK) buf[5]=1111111111111111(exp 1111111111111111) buf[6]=2222222222222222(exp 2222222222222222)
+=== probe_memops done: test=3 ===
+
+ATTEMPT test=4  STORE+LOAD same addr { STAD RDI->[5], LDZX RSI<-[5] }  (3 triads)
+RESULT  test=4  PASS (two mem ops/triad WORK) buf[5]=1111111111111111(exp 1111111111111111) buf[6]=1111111111111111(exp 1111111111111111)
+=== probe_memops done: test=4 ===
+
