@@ -1,0 +1,197 @@
+
+% =====================================================================
+% Results — consolidated experimental results for the two worked
+% examples. Every figure is taken directly from the measured matrices:
+%   - Curve25519: ../../curve25519/RESULTS.md
+%   - Keccak:     ../bench/KECCAK_RESULTS.md
+%
+% Both campaigns share one measurement discipline: the Goldmont core
+% (Intel Celeron N3350) is pinned to its ~1.09 GHz base frequency so the
+% cycle counter and core clock advance together, every contender is timed
+% back-to-back within a single process so all observe one clock, and each
+% contender is swept over the 24 combinations of compiler and -O level
+% with the best result retained, in the manner of the SUPERCOP autotuner.
+%
+% To preview, add  \input{section_results.tex}  to preview.tex.
+% =====================================================================
+
+\section{Results}
+\label{sec:results}
+
+This section gathers the measurements for the two worked examples under one
+common discipline. All timings are taken on the Goldmont core pinned to its
+$\sim\!1.09$\,GHz base frequency, so that the cycle counter advances with the
+core clock; every contender is timed back to back within a single process so
+that all observe the same clock; and each contender is swept over the
+twenty-four combinations of compiler and optimisation level, the best result
+being retained for each, in the manner of the SUPERCOP autotuner.
+
+% ---------------------------------------------------------------------
+\subsection{Curve25519}
+\label{sec:res-c25519}
+
+Timed in isolation in a tight loop, the two microcode field operations are the
+fastest of their kind we measured: the squaring completes in roughly $37$ cycles,
+about $26\%$ faster than the fiat-crypto reference, and the multiplication in
+roughly $58$ cycles, about $3\%$ faster. The asymmetry follows from the kernels
+themselves, since squaring issues only fifteen partial products to
+multiplication's twenty-five and so leaves more slack into which the carry work
+can be packed. End to end, the inlined microcode ladder completes a scalar
+multiplication in about $299{,}967$ median cycles and is the fastest of every
+$5\times51$ contender in the sweep, as \Cref{tab:res-c25519-e2e} shows, ahead of
+\texttt{donna\_c64}, fiat-crypto, hand-written \texttt{\_\_uint128\_t} C, the
+CryptOpt superoptimiser, and the Bernstein--Schwabe \texttt{amd64-51} hand
+assembly.
+
+\begin{table}[t]
+\centering
+\caption{End-to-end X25519: best configuration per contender across the
+twenty-four-config sweep, in median cycles per scalar multiplication. Smaller is
+better. The inlined microcode ladder is the fastest $5\times51$ implementation but
+is overtaken by the hand-written $4\times64$ saturated assembly, and the microcode
+port to that same $4\times64$ representation is the slowest entry by a wide margin.}
+\label{tab:res-c25519-e2e}
+\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+contender & representation / backend & median (cyc) \\
+\midrule
+amd64-64 / asm       & $4\times64$ saturated, hand asm                     & 271\,326 \\
+ours / ucode-inline  & $5\times51$, microcode (inlined ladder)            & 299\,967 \\
+amd64-51 / ucode     & $5\times51$, microcode (B--S framework)            & 314\,416 \\
+donna\_c64           & $5\times51$, portable C                            & 335\,744 \\
+ours / fiat          & $5\times51$, fiat-crypto C                         & 354\,851 \\
+amd64-51 / asm       & $5\times51$, hand asm                              & 356\,038 \\
+ours / hand-C        & $5\times51$, hand-written \texttt{\_\_uint128\_t} C & 379\,433 \\
+ours / cryptopt      & $5\times51$, CryptOpt asm                          & 380\,361 \\
+amd64-64 / ucode     & $4\times64$ saturated, microcode                   & 511\,017 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:res-c25519-ratio} aggregates the whole sweep as the geometric mean of
+the per-configuration ratio against the inlined ladder. Across the twenty-four
+configurations it is a geomean $1.25\times$ faster than fiat-crypto, $1.28\times$
+faster than CryptOpt, $1.30\times$ faster than hand-written C, and $1.31\times$
+faster than \texttt{donna\_c64}, and the field-operation advantage is not an
+artefact of our own ladder: dropped unchanged into the \texttt{amd64-51}
+framework it makes that hybrid a geomean $1.08\times$ faster than the same
+framework running its authors' own assembly field operations. The limit is
+equally clear. The fastest X25519 on this core is the saturated $4\times64$
+\texttt{amd64-64} assembly at $271{,}326$ cycles, roughly $11\%$ ahead of the
+inlined ladder (geomean $0.89\times$), and porting the field operations into that
+same $4\times64$ representation produces the slowest entry in the table at
+$511{,}017$ cycles --- a geomean $1.77\times$ slower than our $5\times51$
+microcode --- because the long, full-width carry chains of a saturated
+multiplication must be emulated by serial \texttt{SETCC} operations under the
+frozen single-flag model. The representation that suits the native core best is
+thus precisely the one that suits the microcode layer worst.
+
+\begin{table}[t]
+\centering
+\caption{Geometric-mean speedup of the inlined microcode ladder
+(\texttt{ours/ucode-inline}) over each contender across the twenty-four-config
+sweep, computed as the geomean of the per-config ratio (contender median $\div$
+ucode-inline median). A value $>1$ means the microcode ladder is faster.}
+\label{tab:res-c25519-ratio}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+contender & geomean speedup of ucode-inline \\
+\midrule
+amd64-64 / ucode  & $1.77\times$ \\
+donna\_c64        & $1.31\times$ \\
+ours / hand-C     & $1.30\times$ \\
+ours / cryptopt   & $1.28\times$ \\
+ours / fiat       & $1.25\times$ \\
+amd64-51 / asm    & $1.17\times$ \\
+amd64-51 / ucode  & $1.08\times$ \\
+amd64-64 / asm    & $0.89\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------------
+\subsection{Keccak-$f[1600]$}
+\label{sec:res-keccak}
+
+Under the same base-pinned, same-process measurement, the looped permutation
+completes in $1910$ cycles per permutation at its best configuration (gcc-12
+\texttt{-Os}) and is the fastest of all ten contenders, as
+\Cref{tab:res-keccak-best} reports. The nearest scalar baselines are the SUPERCOP
+autotuner's pick \texttt{opt64lcu24} at $2047$\,cyc/perm and the hand-tuned
+\texttt{x86\_64\_asm} at $2062$, giving a ratio of $0.933$ --- an improvement of
+approximately $7\%$. The ratio, rather than the absolute count, is the robust
+quantity: \texttt{rdtsc} ticks at the $\sim\!1.1$\,GHz reference rate while the
+core bursts to $\sim\!2.4$\,GHz, so the same harness run hot reports
+proportionally fewer ticks but an identical ratio. The two \texttt{shld}-based
+variants are roughly five times slower because that rotate idiom is heavily
+penalised on this microarchitecture, and they are reported only for completeness.
+
+\begin{table}[t]
+\centering
+\caption{Keccak-$f[1600]$: best result per contender across the
+twenty-four-config sweep, in cycles per permutation, base-pinned and measured
+same-process. Smaller is better.}
+\label{tab:res-keccak-best}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+contender & min (cyc/perm) & median & best config \\
+\midrule
+\textbf{microcode (looped)} & \textbf{1910} & 1915  & gcc-12 -Os \\
+keccak / opt64lcu24         & 2047          & 2056  & gcc-11 -Os \\
+keccak / x86\_64\_asm       & 2062          & 2069  & gcc-11 -O2 \\
+keccak / opt64lcu6          & 2204          & 2207  & clang-14 -O \\
+keccak / opt64u6            & 2400          & 2402  & gcc-11 -O2 \\
+keccak / simple             & 2493          & 2495  & clang-17 -Os \\
+keccak / sseu2              & 3055          & 3064  & clang-18 -Os \\
+keccak / mmxu1              & 3867          & 3873  & gcc-12 -O \\
+keccak / opt64lcu24shld     & 10053         & 10061 & clang-17 -Os \\
+keccak / x86\_64\_shld      & 10093         & 10101 & gcc-13 -Os \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Beyond winning at its best configuration, the microcode wins at every one of the
+twenty-four configurations and is among the most stable contenders in the sweep,
+as \Cref{tab:res-keccak-stability} shows: its cost varies by only $5$ cycles
+across all compilers and optimisation levels ($1910$--$1915$), whereas the fastest
+scalar baseline, \texttt{opt64lcu24}, swings by $211$ cycles ($2047$--$2258$) and
+attains its minimum only when a particular compiler happens to schedule it well.
+This stability is a direct consequence of the design: a single looped round body
+executed entirely within microcode is insensitive to the host compiler, which
+touches only the thin native prologue that fires the patch. The margin itself is
+modest by design and bounded by latency. The permutation is a strict twenty-four
+round dependency chain with a backward branch per round and no overlap between
+firings, so it pays the true per-triad latency of roughly $1.37$ cycles over its
+$1396$ dynamically executed triads, and the 128-triad cap precludes the unrolling
+that would expose independent work. The entire advantage is therefore structural
+--- full register residency across all $24$ rounds, the borrowed $32$nd register
+that keeps the $\theta$ mixing lanes resident, and the move-free $\chi$ stage ---
+rather than a higher peak throughput.
+
+\begin{table}[t]
+\centering
+\caption{Stability across the twenty-four-config sweep for the competitive
+64-bit contenders: the cost at the best configuration against the worst. The
+microcode is both the fastest and among the most stable, varying by only $5$
+cycles, whereas the fastest scalar baseline, \texttt{opt64lcu24}, swings by over
+$200$ cycles depending on the compiler.}
+\label{tab:res-keccak-stability}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+contender & best (cyc/perm) & worst & spread \\
+\midrule
+microcode (looped)    & 1910 & 1915 & 5   \\
+keccak / x86\_64\_asm & 2062 & 2066 & 4   \\
+keccak / opt64lcu24   & 2047 & 2258 & 211 \\
+keccak / opt64lcu6    & 2204 & 2209 & 5   \\
+keccak / opt64u6      & 2400 & 2403 & 3   \\
+keccak / simple       & 2493 & 2513 & 20  \\
+keccak / sseu2        & 3055 & 3137 & 82  \\
+keccak / mmxu1        & 3867 & 3878 & 11  \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,197 @@
+% =====================================================================
+% Section — Challenges: where state-of-the-art native implementations
+% reach the limit of the instruction set, and what microcode offers
+% beneath it. Motivates the two worked examples (Keccak, Curve25519).
+%
+% Intended placement: after Section 3 (the microcode layer) and before
+% Section 4 (Keccak), so that each worked example reads as the removal
+% of a named, ISA-level obstacle established here.
+%
+% FACTS verified for this draft (2026-06-28):
+%   - Goldmont (Celeron N3350) is OUT-OF-ORDER, 3-wide, 3 integer ALU
+%     ports (Wikipedia Goldmont; do NOT call it in-order).
+%   - Goldmont's ISA reaches SSE4.2/AES/SHA and includes NEITHER BMI2
+%     (MULX) NOR ADX (ADCX/ADOX) NOR AVX/AVX2. Verified two ways:
+%     `gcc -march=goldmont -dM -E` enables only AES/POPCNT/SHA/SSE4.2;
+%     Wikipedia Goldmont lists no BMI/ADX/AVX. ADX debuted on Broadwell.
+%   - 5x51 schoolbook = 25 partial products; 4x64 saturated = 16.
+% Citation keys: those already used in sec3-5 are reused; new keys are
+% listed with ready-to-paste BibTeX at the end of the handoff message.
+% =====================================================================
+
+\section{Challenges: The Ceilings of the Instruction Set}
+\label{sec:challenges}
+
+The implementations we set out to surpass are not naive. For each of the two
+primitives studied in this work the state of the art on commodity x86 is the
+product of sustained expert effort: hand-written assembly by the primitive's own
+designers~\cite{PKC:Bernstein06,bernsteinHighSpeedHighSecurity2012}, a formally
+verified arithmetic generator \cite{erbsenSimpleHighLevel2019}, and a dedicated
+cryptographic superoptimiser \cite{kuepperCryptOpt2023}. What unites them is that every one is expressed in
+the x86-64 instruction set, and it is the instruction set itself, rather than any
+shortfall of engineering, that bounds them. Two of its properties set those
+bounds, and neither can be relaxed from above the architectural interface at
+which a compiler or an assembly programmer works: the size of the
+general-purpose register file, and the presence of exactly one architectural
+carry flag. The first binds Keccak; the second binds the Curve25519 field
+arithmetic. Both are ceilings beneath which the microcode layer of
+\Cref{sec:ucode-layer} operates, and the purpose of this section is to state each
+precisely, so that the two results that follow may be read as the removal of a
+named obstacle rather than as an unexplained claim of speed.
+
+The target throughout is a single Goldmont core, the \hbox{Celeron~N3350}, and
+two of its characteristics matter to what follows. It is an out-of-order,
+three-wide superscalar core with three integer execution pipelines, so the usual
+intuition that a register-poor or dependency-bound program will simply be
+re-ordered into the idle units is available to it and, as we shall see, still
+does not rescue either primitive. And its instruction set extends only as far as
+SSE4.2, AES and SHA: it possesses neither the AVX2 vector width nor the BMI2
+\texttt{MULX} and ADX \texttt{ADCX}/\texttt{ADOX} instructions that Intel
+introduced on later, larger cores \cite{intelLargeIntegerArithmetic2012}, ADX
+having first appeared with Broadwell. The two escape hatches that the state of
+the art relies on elsewhere --- vectorisation for Keccak and parallel
+carry-chains for the field arithmetic --- are therefore both closed on this part,
+which is what makes its limits a clean test of the layer beneath it.
+
+% ---------------------------------------------------------------------
+\subsection{Keccak: A State That Does Not Fit}
+\label{sec:challenge-keccak}
+
+\paragraph{The register-file ceiling.}
+A Keccak-$f[1600]$ state is 1600 bits, laid out as 25 lanes of 64 bits, and the
+permutation transforms it through 24 rounds of $\theta,\rho,\pi,\chi,\iota$
+\cite{bertoniKeccakReference2011,technologySHA32015}. The x86-64 architecture exposes
+sixteen general-purpose registers, one of which is the stack pointer, leaving on
+the order of fifteen to hold data. The state thus needs twenty-five registers
+where the architecture offers fifteen, so that a single round --- which reads
+every lane once in the column parity of $\theta$ and again in $\chi$ --- cannot
+keep even two-thirds of its lanes resident. Native code is obliged to spill the
+majority of the state to the first-level cache and to reload it, and it does so on
+each of the 24 rounds. The quantity that dominates a scalar Keccak permutation on
+a core of this class is in consequence not arithmetic but the movement of state
+between the registers and L1.
+
+\paragraph{What the state of the art does, and why it does not lift the ceiling.}
+The fastest scalar implementations attack the shortage in two ways, both legible
+in the very names of the SUPERCOP contenders we measure against in
+\Cref{sec:keccak-perf}. They unroll all 24 rounds, so that the register allocator
+can carry a lane's value across a round boundary instead of reloading it, and they
+apply lane complementing to eliminate some of the bitwise complements of $\chi$
+that would otherwise cost an instruction and a register apiece, both of which are
+distributed in the eXtended Keccak Code Package \cite{XKCP}; the contender
+\texttt{opt64lcu24} announces them, in its lane-complement ``\texttt{lc}'' and its
+unrolled-24 ``\texttt{u24}''. Neither device removes the ceiling. The unrolled
+body is still register-starved within each round; full unrolling exchanges the
+spill for a large static instruction footprint; and the in-place update of
+$\chi$, in which writing one output lane destroys an input that a later lane of
+the same row still requires, forces auxiliary temporaries and the moves that fill
+them precisely when registers are scarcest. The remaining escape, vectorisation,
+does not apply to the case on the critical path: a SIMD Keccak parallelises
+several \emph{independent} permutations across the lanes of a vector register,
+which accelerates a batched or tree-structured hash but does nothing for the
+single permutation that a sequential hash must compute, and in any event
+Goldmont's vector unit reaches only SSE4.2 and lacks the AVX2 width those
+implementations are written for. On this microarchitecture a single Keccak
+permutation has, within the instruction set, no route to register residency.
+
+\paragraph{The opportunity.}
+The obstacle is one of the \emph{architectural} register file, not of the
+algorithm: the permutation refers to only 25 lanes and a handful of temporaries,
+comfortably within the 32-entry physical register file that the microcode layer
+exposes (\Cref{sec:ucode-layer}). The whole state can therefore be loaded once
+and held resident across all 24 rounds, so that the register-to-memory traffic is
+paid a single time per permutation rather than once per round, and the recovered
+registers can be spent on the per-round transformations --- above all a $\chi$
+that needs no auxiliary moves --- that register-starved native code cannot afford.
+This is the ceiling that \Cref{sec:keccak} removes, and the reason its advantage
+is structural rather than a matter of faster individual operations.
+
+% ---------------------------------------------------------------------
+\subsection{Curve25519: A Carry Chain Through a Single Flag}
+\label{sec:challenge-curve25519}
+
+\paragraph{Field arithmetic and the cost of its carries.}
+A X25519 scalar multiplication is dominated by multiplications and squarings in
+the field $\mathrm{GF}(2^{255}-19)$, of which a Montgomery ladder performs on the
+order of a thousand \cite{PKC:Bernstein06}. Each is a multi-precision operation
+whose cost on a 64-bit core is set as much by the propagation of carries between
+machine words as by the word multiplications themselves. The x86-64 architecture
+exposes a single carry flag, and the add-with-carry instruction from which a
+multi-precision accumulation is built both reads and writes that one flag. A
+sequence of such additions is therefore a strict dependency chain, each addition
+waiting on the carry the previous one produced; and because that dependency is
+genuine, threaded through the one shared flag, an out-of-order core cannot overlap
+it however many integer units stand idle. The three execution pipelines of
+Goldmont do not help here, for the limit is a true data dependency rather than a
+scarcity of units.
+
+\paragraph{The instructions the chip does not have.}
+Intel recognised this bottleneck and addressed it in hardware. The ADX extension
+adds \texttt{ADCX} and \texttt{ADOX}, which maintain two independent carry chains
+on the carry and overflow flags respectively, while BMI2 adds \texttt{MULX},
+which forms a $64\times64$ product without disturbing the flags; together they let
+a multi-precision multiply advance two carry chains at once and overlap them with
+the products that feed them \cite{intelLargeIntegerArithmetic2012}. The fastest
+saturated-radix field implementations on current Intel parts are built directly on
+these instructions, among them the \texttt{maa4}, \texttt{maa5} and \texttt{maax}
+field-arithmetic variants distributed in lib25519
+\cite{nathSarkarEfficientArithmetic2022,kuepperCryptOpt2023}.
+They are, however, unavailable on our target: Intel introduced ADX only with
+Broadwell, and Goldmont's instruction set, reaching SSE4.2, AES and SHA, includes
+neither \texttt{MULX} nor \texttt{ADCX}/\texttt{ADOX}. On this microarchitecture
+native code has one carry flag and hence one carry chain, and the standard
+hardware remedy for serialised carries is simply absent.
+
+\paragraph{The representation dilemma.}
+The way native implementations cope is to change the number representation, and
+the choice is a true dilemma rather than a free win. A saturated representation
+packs the 255-bit element into four 64-bit limbs, the choice of the
+\texttt{amd64-64} implementation \cite{bernsteinHighSpeedHighSecurity2012}, which
+minimises the number of word multiplications --- sixteen partial products for the
+$4\times4$ schoolbook --- but generates full-width carries between limbs, exactly
+the long carry chains that want ADX. A reduced-radix representation instead
+spreads the element across five 51-bit limbs, the choice of \texttt{amd64-51}
+\cite{bernsteinHighSpeedHighSecurity2012} and of fiat-crypto, leaving thirteen
+spare bits in each 64-bit word; carries are then short and need not be resolved
+immediately, which is what makes the form attractive on a core without ADX, but
+the extra limb raises the multiplication count to twenty-five
+\cite{PKC:Bernstein06,erbsenSimpleHighLevel2019}. Neither representation escapes
+the instruction set: the saturated form is fast only with carry instructions
+Goldmont lacks, and the reduced form pays for its lazy carries in additional
+multiplications. The verified generator, the superoptimiser, and the designers'
+own assembly that we compare against
+\cite{erbsenSimpleHighLevel2019,kuepperCryptOpt2023,bernsteinHighSpeedHighSecurity2012}
+all operate within these two options and within the single-flag limit they share.
+Nor is there a vectorised escape: the fastest vectorised X25519, Sandy2x
+\cite{chouSandy2x2015}, is built on the AVX instruction set and therefore does not
+run on Goldmont at all, exactly as the SIMD Keccak of
+\Cref{sec:challenge-keccak} does nothing for the single permutation on the
+critical path.
+
+\paragraph{The opportunity, and its boundary.}
+The microcode layer is not bound by the one architectural flag. The findings of
+\Cref{sec:findings} establish a per-register condition that each accumulator
+carries independently, so that several carry chains may advance at once on private
+flags --- the very capability ADX would have supplied in hardware, here expressed
+beneath the instruction set on a part that does not provide it. In the
+reduced-radix form this lets a field multiplication overlap its carry propagation
+with its multiplications in a manner no native code on this core can match, which
+is the obstacle that \Cref{sec:curve25519} removes. The same finding also fixes
+the boundary of the advantage: the architectural flag is frozen on entry to a
+patch and cannot be threaded through the long, full-width carry chain that a
+saturated $4\times64$ multiplication produces, so the representation that suits the
+native core best is the one that suits the layer worst --- a tension that
+\Cref{sec:curve25519} confronts directly when it reports where the microcode
+ceases to win.
+
+% ---------------------------------------------------------------------
+\medskip
+\noindent Both ceilings are properties of the architectural interface --- the
+extent of the register file and the width of the carry machinery --- and neither
+yields to a better compiler or a more patient assembly programmer, because both
+are fixed below the level at which that effort is spent. Microcode is fixed lower
+still. The two sections that follow take each ceiling in turn: \Cref{sec:keccak}
+shows residency defeating the register-file limit on Keccak, and
+\Cref{sec:curve25519} shows concurrent private-flag carry chains defeating the
+single-flag limit on the Curve25519 field arithmetic, each stated together with
+the point at which its advantage ends.

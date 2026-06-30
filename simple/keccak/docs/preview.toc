@@ -19,33 +19,46 @@
 \contentsline {paragraph}{Addressing.}{7}{section*.15}%
 \contentsline {paragraph}{Control flow.}{7}{section*.16}%
 \contentsline {paragraph}{Performance.}{7}{section*.17}%
-\contentsline {section}{\numberline {2}Keccak-$f[1600]$ in Microcode}{8}{section.2}%
-\contentsline {paragraph}{The structural advantage.}{8}{section*.18}%
-\contentsline {subsection}{\numberline {2.1}State Layout and Residency}{8}{subsection.2.1}%
-\contentsline {paragraph}{Register allocation.}{8}{section*.19}%
-\contentsline {paragraph}{Buffer organisation.}{8}{section*.20}%
-\contentsline {subsection}{\numberline {2.2}The Looped Round Body}{8}{subsection.2.2}%
-\contentsline {paragraph}{The $\theta $ stage and the residency of $D$.}{9}{section*.21}%
-\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{9}{section*.22}%
-\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{9}{section*.23}%
-\contentsline {paragraph}{The $\iota $ stage and loop control.}{10}{section*.24}%
-\contentsline {subsection}{\numberline {2.3}Triad Budget}{10}{subsection.2.3}%
-\contentsline {subsection}{\numberline {2.4}Verification}{10}{subsection.2.4}%
-\contentsline {subsection}{\numberline {2.5}Performance}{11}{subsection.2.5}%
-\contentsline {paragraph}{Measurement methodology.}{11}{section*.25}%
-\contentsline {paragraph}{Result.}{11}{section*.26}%
-\contentsline {paragraph}{The source and the bound of the improvement.}{11}{section*.27}%
-\contentsline {section}{\numberline {3}Curve25519 in Microcode}{13}{section.3}%
-\contentsline {paragraph}{The structural advantage.}{13}{section*.28}%
-\contentsline {subsection}{\numberline {3.1}Representation and Operations}{13}{subsection.3.1}%
-\contentsline {subsection}{\numberline {3.2}The Patch: Fused Multiply--Accumulate and Parallel Carry Chains}{13}{subsection.3.2}%
-\contentsline {paragraph}{Three concurrent accumulators.}{14}{section*.29}%
-\contentsline {paragraph}{Authoring and verification.}{14}{section*.30}%
-\contentsline {subsection}{\numberline {3.3}Triad Budget}{15}{subsection.3.3}%
-\contentsline {subsection}{\numberline {3.4}Integration into X25519}{15}{subsection.3.4}%
-\contentsline {subsection}{\numberline {3.5}Performance}{16}{subsection.3.5}%
-\contentsline {paragraph}{Methodology.}{16}{section*.31}%
-\contentsline {paragraph}{The field-operation result.}{16}{section*.32}%
-\contentsline {paragraph}{The integration result.}{16}{section*.33}%
-\contentsline {paragraph}{The limits of the result.}{16}{section*.34}%
-\contentsline {paragraph}{Summary.}{17}{section*.35}%
+\contentsline {section}{\numberline {2}Designing the Microcode Kernel}{8}{section.2}%
+\contentsline {paragraph}{The structural opportunity: residency across all rounds.}{8}{section*.18}%
+\contentsline {paragraph}{One firing for the whole permutation.}{8}{section*.19}%
+\contentsline {paragraph}{Why a single looped body is correct: the structure of $\pi $.}{8}{section*.20}%
+\contentsline {paragraph}{Borrowing a 32nd register.}{9}{section*.21}%
+\contentsline {paragraph}{Spending the headroom.}{9}{section*.22}%
+\contentsline {section}{\numberline {3}Implementation}{9}{section.3}%
+\contentsline {subsection}{\numberline {3.1}State Layout and Residency}{9}{subsection.3.1}%
+\contentsline {paragraph}{Register allocation.}{9}{section*.23}%
+\contentsline {paragraph}{Buffer organisation.}{9}{section*.24}%
+\contentsline {subsection}{\numberline {3.2}The Looped Round Body}{10}{subsection.3.2}%
+\contentsline {paragraph}{$\theta $ and the residency of $D$.}{10}{section*.25}%
+\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{10}{section*.26}%
+\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{10}{section*.27}%
+\contentsline {paragraph}{$\iota $ and loop control.}{11}{section*.28}%
+\contentsline {subsection}{\numberline {3.3}Generation, Packing, and the Triad Budget}{11}{subsection.3.3}%
+\contentsline {paragraph}{No hand-written triads.}{11}{section*.29}%
+\contentsline {paragraph}{The one-memory-operation rule.}{11}{section*.30}%
+\contentsline {paragraph}{Budget.}{11}{section*.31}%
+\contentsline {subsection}{\numberline {3.4}Verification}{12}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Evaluation}{12}{section.4}%
+\contentsline {paragraph}{Measurement methodology.}{12}{section*.32}%
+\contentsline {paragraph}{Result.}{12}{section*.33}%
+\contentsline {paragraph}{The source and the bound of the improvement.}{12}{section*.34}%
+\contentsline {section}{\numberline {5}Curve25519 in Microcode}{14}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Representation and Layout}{14}{subsection.5.1}%
+\contentsline {paragraph}{Register layout.}{14}{section*.35}%
+\contentsline {paragraph}{Where the advantage comes from, and where it stops.}{15}{section*.36}%
+\contentsline {subsection}{\numberline {5.2}The Kernel: One Firing, Three Carry Chains}{15}{subsection.5.2}%
+\contentsline {paragraph}{Three accumulators that never share the carry flag.}{16}{section*.37}%
+\contentsline {paragraph}{Resolving a limb and linking to the next.}{16}{section*.38}%
+\contentsline {paragraph}{Authoring and verification.}{17}{section*.39}%
+\contentsline {subsection}{\numberline {5.3}Installing Both Operations at Once}{17}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Triad Budget: Density, Not Capacity}{17}{subsection.5.4}%
+\contentsline {subsection}{\numberline {5.5}Assembling X25519 Around the Patches}{18}{subsection.5.5}%
+\contentsline {paragraph}{Chaining through registers.}{18}{section*.40}%
+\contentsline {paragraph}{The inversion as one chained block.}{18}{section*.41}%
+\contentsline {subsection}{\numberline {5.6}Performance}{19}{subsection.5.6}%
+\contentsline {paragraph}{Methodology.}{19}{section*.42}%
+\contentsline {paragraph}{The field operation in isolation.}{19}{section*.43}%
+\contentsline {paragraph}{End to end.}{19}{section*.44}%
+\contentsline {paragraph}{Where the advantage ends.}{19}{section*.45}%
+\contentsline {paragraph}{Summary.}{20}{section*.46}%

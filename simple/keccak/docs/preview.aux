@@ -40,85 +40,102 @@
 \@writefile{toc}{\contentsline {paragraph}{Addressing.}{7}{section*.15}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Control flow.}{7}{section*.16}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Performance.}{7}{section*.17}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2}Keccak-$f[1600]$ in Microcode}{8}{section.2}\protected@file@percent }
-\newlabel{sec:keccak}{{2}{8}{Keccak-$f[1600]$ in Microcode}{section.2}{}}
-\newlabel{sec:keccak@cref}{{[section][2][]2}{[1][8][]8}}
-\@writefile{toc}{\contentsline {paragraph}{The structural advantage.}{8}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}State Layout and Residency}{8}{subsection.2.1}\protected@file@percent }
-\newlabel{sec:keccak-layout}{{2.1}{8}{State Layout and Residency}{subsection.2.1}{}}
-\newlabel{sec:keccak-layout@cref}{{[subsection][1][2]2.1}{[1][8][]8}}
-\@writefile{toc}{\contentsline {paragraph}{Register allocation.}{8}{section*.19}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Buffer organisation.}{8}{section*.20}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}The Looped Round Body}{8}{subsection.2.2}\protected@file@percent }
-\newlabel{sec:keccak-round}{{2.2}{8}{The Looped Round Body}{subsection.2.2}{}}
-\newlabel{sec:keccak-round@cref}{{[subsection][2][2]2.2}{[1][8][]8}}
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Operand buffer of 56 lanes, with the base register centered at \texttt  {RCX}$=$\texttt  {\&buf[16]}.}}{9}{table.1}\protected@file@percent }
-\newlabel{tab:keccak-buffer}{{1}{9}{Operand buffer of 56 lanes, with the base register centered at \texttt {RCX}$=$\texttt {\&buf[16]}}{table.1}{}}
-\newlabel{tab:keccak-buffer@cref}{{[table][1][]1}{[1][8][]9}}
-\@writefile{toc}{\contentsline {paragraph}{The $\theta $ stage and the residency of $D$.}{9}{section*.21}\protected@file@percent }
-\newlabel{lst:keccak-theta}{{1}{9}{The depth-three parity tree of $\theta $, in which a single column's tree is packed into the slots of one triad while the spill of the previous column is interleaved}{lstlisting.1}{}}
-\newlabel{lst:keccak-theta@cref}{{[listing][1][]1}{[1][9][]9}}
-\@writefile{lol}{\contentsline {lstlisting}{\numberline {1}The depth-three parity tree of $\theta $, in which a single column's tree is packed into the slots of one triad while the spill of the previous column is interleaved.}{9}{lstlisting.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{9}{section*.22}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{9}{section*.23}\protected@file@percent }
-\newlabel{lst:keccak-chi}{{2}{10}{The move-free $\chi $ stage, in which the five \texttt {NOTAND} terms of a row are computed into the now-dead $D$-registers before the five in-place exclusive-or operations are applied}{lstlisting.2}{}}
-\newlabel{lst:keccak-chi@cref}{{[listing][2][]2}{[1][10][]10}}
-\@writefile{lol}{\contentsline {lstlisting}{\numberline {2}The move-free $\chi $ stage, in which the five \texttt  {NOTAND} terms of a row are computed into the now-dead $D$-registers before the five in-place exclusive-or operations are applied.}{10}{lstlisting.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The $\iota $ stage and loop control.}{10}{section*.24}\protected@file@percent }
-\newlabel{lst:keccak-loop}{{3}{10}{Loop control, in which the flag-setting exclusive-or and the backward conditional branch must occupy the same triad}{lstlisting.3}{}}
-\newlabel{lst:keccak-loop@cref}{{[listing][3][]3}{[1][10][]10}}
-\@writefile{lol}{\contentsline {lstlisting}{\numberline {3}Loop control, in which the flag-setting exclusive-or and the backward conditional branch must occupy the same triad.}{10}{lstlisting.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Triad Budget}{10}{subsection.2.3}\protected@file@percent }
-\newlabel{sec:keccak-budget}{{2.3}{10}{Triad Budget}{subsection.2.3}{}}
-\newlabel{sec:keccak-budget@cref}{{[subsection][3][2]2.3}{[1][10][]10}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Verification}{10}{subsection.2.4}\protected@file@percent }
-\newlabel{sec:keccak-verify}{{2.4}{10}{Verification}{subsection.2.4}{}}
-\newlabel{sec:keccak-verify@cref}{{[subsection][4][2]2.4}{[1][10][]10}}
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Best result for each contender over 24 compiler-and-optimisation configurations, measured base-pinned and same-process, where a smaller value is better.}}{11}{table.2}\protected@file@percent }
-\newlabel{tab:keccak-results}{{2}{11}{Best result for each contender over 24 compiler-and-optimisation configurations, measured base-pinned and same-process, where a smaller value is better}{table.2}{}}
-\newlabel{tab:keccak-results@cref}{{[table][2][]2}{[1][11][]11}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Performance}{11}{subsection.2.5}\protected@file@percent }
-\newlabel{sec:keccak-perf}{{2.5}{11}{Performance}{subsection.2.5}{}}
-\newlabel{sec:keccak-perf@cref}{{[subsection][5][2]2.5}{[1][10][]11}}
-\@writefile{toc}{\contentsline {paragraph}{Measurement methodology.}{11}{section*.25}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Result.}{11}{section*.26}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The source and the bound of the improvement.}{11}{section*.27}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces The improvement assembled from successive structural optimisations, expressed as the ratio to the naive residency-only baseline.}}{12}{table.3}\protected@file@percent }
-\newlabel{tab:keccak-opt}{{3}{12}{The improvement assembled from successive structural optimisations, expressed as the ratio to the naive residency-only baseline}{table.3}{}}
-\newlabel{tab:keccak-opt@cref}{{[table][3][]3}{[1][11][]12}}
-\@writefile{toc}{\contentsline {section}{\numberline {3}Curve25519 in Microcode}{13}{section.3}\protected@file@percent }
-\newlabel{sec:curve25519}{{3}{13}{Curve25519 in Microcode}{section.3}{}}
-\newlabel{sec:curve25519@cref}{{[section][3][]3}{[1][13][]13}}
-\@writefile{toc}{\contentsline {paragraph}{The structural advantage.}{13}{section*.28}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Representation and Operations}{13}{subsection.3.1}\protected@file@percent }
-\newlabel{sec:c25519-rep}{{3.1}{13}{Representation and Operations}{subsection.3.1}{}}
-\newlabel{sec:c25519-rep@cref}{{[subsection][1][3]3.1}{[1][13][]13}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}The Patch: Fused Multiply--Accumulate and Parallel Carry Chains}{13}{subsection.3.2}\protected@file@percent }
-\newlabel{sec:c25519-patch}{{3.2}{13}{The Patch: Fused Multiply--Accumulate and Parallel Carry Chains}{subsection.3.2}{}}
-\newlabel{sec:c25519-patch@cref}{{[subsection][2][3]3.2}{[1][13][]13}}
-\newlabel{lst:c25519-mac}{{4}{14}{The fused multiply--accumulate--carry core of the squaring kernel for a single limb. The register \texttt {TMP0} holds the low accumulator, \texttt {R8} the high accumulator, \texttt {TMP9} the running carry sum, and \texttt {TMP15} the transient \texttt {SETCC} carry. A multiplication, an accumulation, and a carry capture share one triad}{lstlisting.4}{}}
-\newlabel{lst:c25519-mac@cref}{{[listing][4][]4}{[1][14][]14}}
-\@writefile{lol}{\contentsline {lstlisting}{\numberline {4}The fused multiply--accumulate--carry core of the squaring kernel for a single limb. The register \texttt  {TMP0} holds the low accumulator, \texttt  {R8} the high accumulator, \texttt  {TMP9} the running carry sum, and \texttt  {TMP15} the transient \texttt  {SETCC} carry. A multiplication, an accumulation, and a carry capture share one triad.}{14}{lstlisting.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Three concurrent accumulators.}{14}{section*.29}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Authoring and verification.}{14}{section*.30}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Triad Budget}{15}{subsection.3.3}\protected@file@percent }
-\newlabel{sec:c25519-budget}{{3.3}{15}{Triad Budget}{subsection.3.3}{}}
-\newlabel{sec:c25519-budget@cref}{{[subsection][3][3]3.3}{[1][14][]15}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Integration into X25519}{15}{subsection.3.4}\protected@file@percent }
-\newlabel{sec:c25519-integration}{{3.4}{15}{Integration into X25519}{subsection.3.4}{}}
-\newlabel{sec:c25519-integration@cref}{{[subsection][4][3]3.4}{[1][15][]15}}
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Same-ladder field-operation comparison, reported as the geometric mean of the per-configuration minimum-cycle ratios for a complete X25519, where a smaller value indicates faster execution and the field backend is the only component that varies within each block.}}{16}{table.4}\protected@file@percent }
-\newlabel{tab:c25519-sameladder}{{4}{16}{Same-ladder field-operation comparison, reported as the geometric mean of the per-configuration minimum-cycle ratios for a complete X25519, where a smaller value indicates faster execution and the field backend is the only component that varies within each block}{table.4}{}}
-\newlabel{tab:c25519-sameladder@cref}{{[table][4][]4}{[1][16][]16}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Performance}{16}{subsection.3.5}\protected@file@percent }
-\newlabel{sec:c25519-perf}{{3.5}{16}{Performance}{subsection.3.5}{}}
-\newlabel{sec:c25519-perf@cref}{{[subsection][5][3]3.5}{[1][15][]16}}
-\@writefile{toc}{\contentsline {paragraph}{Methodology.}{16}{section*.31}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The field-operation result.}{16}{section*.32}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The integration result.}{16}{section*.33}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The limits of the result.}{16}{section*.34}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces End-to-end X25519 performance, given as the best result for each contender over 24 configurations in minimum cycles. The field-operation advantage does not overcome the representation-level advantage of \texttt  {amd64-64}, and the microcode $4\times 64$ port is where the layer's single-flag carry model is exposed.}}{17}{table.5}\protected@file@percent }
-\newlabel{tab:c25519-e2e}{{5}{17}{End-to-end X25519 performance, given as the best result for each contender over 24 configurations in minimum cycles. The field-operation advantage does not overcome the representation-level advantage of \texttt {amd64-64}, and the microcode $4\times 64$ port is where the layer's single-flag carry model is exposed}{table.5}{}}
-\newlabel{tab:c25519-e2e@cref}{{[table][5][]5}{[1][17][]17}}
-\@writefile{toc}{\contentsline {paragraph}{Summary.}{17}{section*.35}\protected@file@percent }
-\gdef \@abspage@last{17}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Designing the Microcode Kernel}{8}{section.2}\protected@file@percent }
+\newlabel{sec:keccak-design}{{2}{8}{Designing the Microcode Kernel}{section.2}{}}
+\newlabel{sec:keccak-design@cref}{{[section][2][]2}{[1][8][]8}}
+\@writefile{toc}{\contentsline {paragraph}{The structural opportunity: residency across all rounds.}{8}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{One firing for the whole permutation.}{8}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Why a single looped body is correct: the structure of $\pi $.}{8}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Borrowing a 32nd register.}{9}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Spending the headroom.}{9}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Implementation}{9}{section.3}\protected@file@percent }
+\newlabel{sec:keccak-impl}{{3}{9}{Implementation}{section.3}{}}
+\newlabel{sec:keccak-impl@cref}{{[section][3][]3}{[1][9][]9}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}State Layout and Residency}{9}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:keccak-layout}{{3.1}{9}{State Layout and Residency}{subsection.3.1}{}}
+\newlabel{sec:keccak-layout@cref}{{[subsection][1][3]3.1}{[1][9][]9}}
+\@writefile{toc}{\contentsline {paragraph}{Register allocation.}{9}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Buffer organisation.}{9}{section*.24}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Operand buffer of 56 lanes, with the base register centered at \texttt  {RCX}$=$\texttt  {\&buf[16]}.}}{10}{table.1}\protected@file@percent }
+\newlabel{tab:keccak-buffer}{{1}{10}{Operand buffer of 56 lanes, with the base register centered at \texttt {RCX}$=$\texttt {\&buf[16]}}{table.1}{}}
+\newlabel{tab:keccak-buffer@cref}{{[table][1][]1}{[1][9][]10}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}The Looped Round Body}{10}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:keccak-round}{{3.2}{10}{The Looped Round Body}{subsection.3.2}{}}
+\newlabel{sec:keccak-round@cref}{{[subsection][2][3]3.2}{[1][9][]10}}
+\@writefile{toc}{\contentsline {paragraph}{$\theta $ and the residency of $D$.}{10}{section*.25}\protected@file@percent }
+\newlabel{lst:keccak-theta}{{1}{10}{The depth-three parity tree of $\theta $, in which a single column's tree is packed into the slots of one triad while the spill of the previous column is interleaved}{lstlisting.1}{}}
+\newlabel{lst:keccak-theta@cref}{{[listing][1][]1}{[1][10][]10}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {1}The depth-three parity tree of $\theta $, in which a single column's tree is packed into the slots of one triad while the spill of the previous column is interleaved.}{10}{lstlisting.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The fused $\theta $-apply, $\rho $, and $\pi $ stage.}{10}{section*.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The $\chi $ stage without auxiliary moves.}{10}{section*.27}\protected@file@percent }
+\newlabel{lst:keccak-chi}{{2}{11}{The move-free $\chi $ stage, in which the five \texttt {NOTAND} terms of a row are computed into the now-dead $D$-registers before the five in-place exclusive-or operations are applied}{lstlisting.2}{}}
+\newlabel{lst:keccak-chi@cref}{{[listing][2][]2}{[1][10][]11}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {2}The move-free $\chi $ stage, in which the five \texttt  {NOTAND} terms of a row are computed into the now-dead $D$-registers before the five in-place exclusive-or operations are applied.}{11}{lstlisting.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{$\iota $ and loop control.}{11}{section*.28}\protected@file@percent }
+\newlabel{lst:keccak-loop}{{3}{11}{Loop control, in which the flag-setting exclusive-or and the backward conditional branch must occupy the same triad}{lstlisting.3}{}}
+\newlabel{lst:keccak-loop@cref}{{[listing][3][]3}{[1][11][]11}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {3}Loop control, in which the flag-setting exclusive-or and the backward conditional branch must occupy the same triad.}{11}{lstlisting.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Generation, Packing, and the Triad Budget}{11}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:keccak-packing}{{3.3}{11}{Generation, Packing, and the Triad Budget}{subsection.3.3}{}}
+\newlabel{sec:keccak-packing@cref}{{[subsection][3][3]3.3}{[1][11][]11}}
+\@writefile{toc}{\contentsline {paragraph}{No hand-written triads.}{11}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The one-memory-operation rule.}{11}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Budget.}{11}{section*.31}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Best result for each contender over 24 compiler-and-optimisation configurations, measured base-pinned and same-process, where a smaller value is better.}}{12}{table.2}\protected@file@percent }
+\newlabel{tab:keccak-results}{{2}{12}{Best result for each contender over 24 compiler-and-optimisation configurations, measured base-pinned and same-process, where a smaller value is better}{table.2}{}}
+\newlabel{tab:keccak-results@cref}{{[table][2][]2}{[1][12][]12}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Verification}{12}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:keccak-verify}{{3.4}{12}{Verification}{subsection.3.4}{}}
+\newlabel{sec:keccak-verify@cref}{{[subsection][4][3]3.4}{[1][11][]12}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Evaluation}{12}{section.4}\protected@file@percent }
+\newlabel{sec:keccak-eval}{{4}{12}{Evaluation}{section.4}{}}
+\newlabel{sec:keccak-eval@cref}{{[section][4][]4}{[1][12][]12}}
+\@writefile{toc}{\contentsline {paragraph}{Measurement methodology.}{12}{section*.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Result.}{12}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The source and the bound of the improvement.}{12}{section*.34}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces The improvement assembled from successive structural optimisations, expressed as the ratio to the naive residency-only baseline.}}{13}{table.3}\protected@file@percent }
+\newlabel{tab:keccak-opt}{{3}{13}{The improvement assembled from successive structural optimisations, expressed as the ratio to the naive residency-only baseline}{table.3}{}}
+\newlabel{tab:keccak-opt@cref}{{[table][3][]3}{[1][13][]13}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Curve25519 in Microcode}{14}{section.5}\protected@file@percent }
+\newlabel{sec:curve25519}{{5}{14}{Curve25519 in Microcode}{section.5}{}}
+\newlabel{sec:curve25519@cref}{{[section][5][]5}{[1][14][]14}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Representation and Layout}{14}{subsection.5.1}\protected@file@percent }
+\newlabel{sec:c25519-field}{{5.1}{14}{Representation and Layout}{subsection.5.1}{}}
+\newlabel{sec:c25519-field@cref}{{[subsection][1][5]5.1}{[1][14][]14}}
+\@writefile{toc}{\contentsline {paragraph}{Register layout.}{14}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Where the advantage comes from, and where it stops.}{15}{section*.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}The Kernel: One Firing, Three Carry Chains}{15}{subsection.5.2}\protected@file@percent }
+\newlabel{sec:c25519-kernel}{{5.2}{15}{The Kernel: One Firing, Three Carry Chains}{subsection.5.2}{}}
+\newlabel{sec:c25519-kernel@cref}{{[subsection][2][5]5.2}{[1][15][]15}}
+\@writefile{toc}{\contentsline {paragraph}{Three accumulators that never share the carry flag.}{16}{section*.37}\protected@file@percent }
+\newlabel{lst:c25519-mac}{{4}{16}{The fused multiply--accumulate--carry motif, taken from the squaring kernel's first output limb. \texttt {TMP0} is the low accumulator, \texttt {R8} the high accumulator, \texttt {TMP9} the running sum of accumulation carries, \texttt {TMP15} the transient \texttt {SETCC} carry. The multiply writes its low half into the operand register (read on the same line) and its high half into \texttt {RCX} (added in later)}{lstlisting.4}{}}
+\newlabel{lst:c25519-mac@cref}{{[listing][4][]4}{[1][16][]16}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {4}The fused multiply--accumulate--carry motif, taken from the squaring kernel's first output limb. \texttt  {TMP0} is the low accumulator, \texttt  {R8} the high accumulator, \texttt  {TMP9} the running sum of accumulation carries, \texttt  {TMP15} the transient \texttt  {SETCC} carry. The multiply writes its low half into the operand register (read on the same line) and its high half into \texttt  {RCX} (added in later).}{16}{lstlisting.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Resolving a limb and linking to the next.}{16}{section*.38}\protected@file@percent }
+\newlabel{lst:c25519-carry}{{5}{17}{Limb resolution and the inter-limb link. Because $2^{64}=2^{51}\cdot 2^{13}$, the carry out of a limb splits into a 13-bit low part (\texttt {TMP8}) and a left-shifted high part (\texttt {TMP1}) whose bit ranges do not overlap, so the link that opens the next limb is an \texttt {OR}, not an addition}{lstlisting.5}{}}
+\newlabel{lst:c25519-carry@cref}{{[listing][5][]5}{[1][17][]17}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {5}Limb resolution and the inter-limb link. Because $2^{64}=2^{51}\cdot 2^{13}$, the carry out of a limb splits into a 13-bit low part (\texttt  {TMP8}) and a left-shifted high part (\texttt  {TMP1}) whose bit ranges do not overlap, so the link that opens the next limb is an \texttt  {OR}, not an addition.}{17}{lstlisting.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Authoring and verification.}{17}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Installing Both Operations at Once}{17}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:c25519-coexist}{{5.3}{17}{Installing Both Operations at Once}{subsection.5.3}{}}
+\newlabel{sec:c25519-coexist@cref}{{[subsection][3][5]5.3}{[1][17][]17}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Triad Budget: Density, Not Capacity}{17}{subsection.5.4}\protected@file@percent }
+\newlabel{sec:c25519-budget}{{5.4}{17}{Triad Budget: Density, Not Capacity}{subsection.5.4}{}}
+\newlabel{sec:c25519-budget@cref}{{[subsection][4][5]5.4}{[1][17][]17}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Assembling X25519 Around the Patches}{18}{subsection.5.5}\protected@file@percent }
+\newlabel{sec:c25519-assemble}{{5.5}{18}{Assembling X25519 Around the Patches}{subsection.5.5}{}}
+\newlabel{sec:c25519-assemble@cref}{{[subsection][5][5]5.5}{[1][18][]18}}
+\@writefile{toc}{\contentsline {paragraph}{Chaining through registers.}{18}{section*.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The inversion as one chained block.}{18}{section*.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}Performance}{19}{subsection.5.6}\protected@file@percent }
+\newlabel{sec:c25519-perf}{{5.6}{19}{Performance}{subsection.5.6}{}}
+\newlabel{sec:c25519-perf@cref}{{[subsection][6][5]5.6}{[1][19][]19}}
+\@writefile{toc}{\contentsline {paragraph}{Methodology.}{19}{section*.42}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The field operation in isolation.}{19}{section*.43}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{End to end.}{19}{section*.44}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Where the advantage ends.}{19}{section*.45}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces End-to-end X25519, best configuration per contender over the twenty-four-configuration sweep, in median cycles. The inlined microcode ladder is the fastest $5\times 51$ implementation but is overtaken by the hand-written $4\times 64$ saturated assembly, and the microcode port to that same $4\times 64$ representation is the slowest entry by a wide margin.}}{20}{table.4}\protected@file@percent }
+\newlabel{tab:c25519-e2e}{{4}{20}{End-to-end X25519, best configuration per contender over the twenty-four-configuration sweep, in median cycles. The inlined microcode ladder is the fastest $5\times 51$ implementation but is overtaken by the hand-written $4\times 64$ saturated assembly, and the microcode port to that same $4\times 64$ representation is the slowest entry by a wide margin}{table.4}{}}
+\newlabel{tab:c25519-e2e@cref}{{[table][4][]4}{[1][19][]20}}
+\@writefile{toc}{\contentsline {paragraph}{Summary.}{20}{section*.46}\protected@file@percent }
+\gdef \@abspage@last{20}
