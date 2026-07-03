@@ -1,0 +1,458 @@
+% =====================================================================
+% Section 6 — Results and Comparisons
+%
+% A consolidated results section for the two microcode case studies
+% (Keccak-f[1600] and Curve25519 field arithmetic), written in the style
+% and to the comprehensiveness of the "Results and Comparisons" section of
+% Zhang, Yan, Huang and Koc, "Optimized Software Implementation of Keccak,
+% Kyber, and Dilithium on RV{32,64}IM{B}{V}", IACR TCHES 2025(1):632-655
+% (referred to below as Zhang et al.\ [TCHES 2025(1)]).
+%
+% All numbers are taken verbatim from the committed measurement files:
+%   curve25519/RESULTS.md          (X25519 end-to-end + ratio matrices)
+%   keccak/bench/KECCAK_RESULTS.md (Keccak head-to-head matrix, 13 contenders)
+% and from the per-op microbenchmarks reported in Sections 4-5. The stability
+% figures are read off the per-configuration min matrix in KECCAK_RESULTS.md.
+%
+% PLATFORM FACTS (verified 2026-06-28, see section_challenges.tex):
+%   Goldmont (Celeron N3350) is OUT-OF-ORDER, 3-wide, 3 integer ALU ports.
+%   Its ISA reaches SSE4.2/AES/SHA but has NO BMI2 (MULX), NO ADX
+%   (ADCX/ADOX), and NO AVX/AVX2. Do not describe it as in-order.
+%
+% Cross-references (\Cref{sec:curve25519}, \Cref{sec:keccak-design},
+% \Cref{sec:findings}, \Cref{sec:budget}, \Cref{sec:ucode-layer}) point at
+% the case-study and microcode-layer sections. Requires booktabs.
+% NOTE: this file and section_results.tex both use \label{sec:results}; they
+% are alternatives (a comprehensive vs a compact take) -- input only one.
+% =====================================================================
+
+\section{Results and Comparisons}
+\label{sec:results}
+
+We now report the measured cost of the two microcode kernels and compare each
+against the best code that exists for it on the same silicon. The comparison is
+deliberately unforgiving: for Keccak we bench against every scalar and SIMD
+permutation from SUPERCOP that runs on this core, the eXtended Keccak Code
+Package, and the OpenSSL assembly; for Curve25519 we bench against a formally
+verified generator, a cryptographic superoptimiser, portable and
+\texttt{\_\_uint128\_t} C, and the hand-written assembly of the primitive's own
+designers. Every contender is measured on the same processor, under the same
+harness, and---following the SUPERCOP autotuner---swept over the same grid of
+compilers and optimisation levels with the best configuration retained for each.
+The section is organised as Zhang et al.\ [TCHES 2025(1)] organise theirs: a
+common setup and measurement preamble (\Cref{sec:results-setup}), then one
+subsection per primitive (\Cref{sec:results-keccak,sec:results-curve}), each
+leading with its comparison table and reading the numbers row by row, and closing
+with a summary and future work (\Cref{sec:results-future}). We state the limits of
+the advantage as plainly as the advantage itself.
+
+% =====================================================================
+\subsection{Experimental Setup and Measurement Methodology}
+\label{sec:results-setup}
+% =====================================================================
+
+\paragraph{Platform.}
+All measurements are obtained on an Intel Celeron N3350 (Goldmont
+microarchitecture, family/model \texttt{0x506C9}), a low-power x86-64 core that is
+\emph{out-of-order} and three-wide, with three integer ALU ports, running from a
+single core pinned with \texttt{taskset\,-c\,0}. Its instruction set reaches
+SSE4.2, AES-NI, and the SHA extensions, but---importantly for what follows---it
+provides neither the BMI2 fused multiply \texttt{MULX} nor the ADX dual
+carry-chain instructions \texttt{ADCX}/\texttt{ADOX} nor any of AVX/AVX2, so
+native code on this part is confined to the single architectural carry flag and to
+scalar or SSE-width vectors. Unless stated otherwise the governor is set to
+\texttt{userspace} and the core frequency is pinned to its base of
+$\sim\!1.09$\,GHz (nominal $1.10$\,GHz); the reason this matters is explained
+below. The microcode patches are installed into the Goldmont patch RAM through the
+red-unlock mechanism of \Cref{sec:ucode-layer}.
+
+\paragraph{The cycle-counter pitfall, and why it dictates how we report.}
+Timing on this part is subject to a pitfall that invalidates naive comparisons,
+and we state it first because it shapes every number that follows. The
+\texttt{rdtsc} instruction counts at a fixed reference rate of approximately
+$1.1$\,GHz, whereas the core bursts to approximately $2.4$\,GHz under load, so the
+\emph{same} work is reported as roughly $2.2\times$ more or fewer ticks depending
+on the power state in force during the measurement. A cycle count captured in one
+run and compared against a baseline captured in a separate run is therefore
+meaningless. We take two precautions. First, we time the microcode and \emph{all}
+of its competitors back to back within a single process, after a warm-up loop has
+driven the core to a steady frequency, so that every contender observes the same
+clock and the ratio between them is frequency-invariant. Second, for the absolute
+cycle counts we additionally pin the core to its base frequency, so that a
+reported tick approximates a true core cycle; a guard in the harness aborts the
+run if any core is observed outside $\pm 6\%$ of base. The ratio is the robust
+quantity throughout: the identical Keccak harness measured at burst frequency
+reports approximately 874 against 942 cycles, the same ratio as the base-pinned
+1912 against 2043, scaled by the $2.4/1.1$ power-state factor.
+
+\paragraph{The compiler-and-optimisation sweep.}
+A single compiler and flag choice is not a fair baseline, because the native
+contenders are exactly the kind of code whose performance the compiler reshapes.
+We therefore adopt the discipline of the SUPERCOP autotuner: each contender is
+built and run under all 24 combinations of six compilers---\texttt{gcc}
+11, 12, 13 and \texttt{clang} 14, 17, 18---and four optimisation
+levels---\texttt{-O3}, \texttt{-O2}, \texttt{-Os}, \texttt{-O}---and the best
+result for each contender is retained, with the winning configuration recorded.
+The shared flags are \texttt{-fwrapv -fPIC -fPIE -march=native}, with
+\texttt{-mtune=native} added for \texttt{gcc}. The microcode itself is a fixed
+patch-RAM image and is compiler-independent, so its number is essentially flat
+across the grid and serves as a sanity baseline; what the sweep genuinely tunes
+are the C contenders, while the hand-written assembly baselines assemble
+identically at every configuration.
+
+\paragraph{Statistics and verification.}
+For Curve25519 each contender is timed over 100 repetitions of a complete scalar
+multiplication and we report the median. For Keccak, whose per-call cost is
+smaller, each contender is timed in batches of 1000 permutations over 200
+repetitions, all contenders interleaved within the single timing process; we
+report both the median and a robust minimum that discards any batch reading below
+half the median, since such readings can only arise from a power-state transition
+straddling the measurement bracket. Correctness is a gate, not an afterthought:
+the two Curve25519 field operations are checked against the fiat-crypto reference
+over a large random corpus and a thousand-iteration self-chaining test, the
+assembled scalar multiplication is checked against the RFC~7748 known-answer
+vectors, and the Keccak permutation is checked against the Keccak team's published
+$f(0)$ and $f(f(0))$ vectors, reproducing the canonical anchor
+$\texttt{lane0}=\texttt{0xF1258F7940E1DDE7}$. No timing is reported for a kernel
+that has not first passed its correctness gate.
+
+% =====================================================================
+\subsection{Keccak-f[1600]}
+\label{sec:results-keccak}
+% =====================================================================
+
+\Cref{tab:results-keccak} reports the per-permutation cost of the looped
+microcode Keccak against every permutation from the SUPERCOP
+\texttt{crypto\_hash/keccakc1024} family that executes on this 64-bit Intel core,
+together with the XKCP single-permutation kernel and the OpenSSL x86-64 assembly.
+The variants that cannot run here are excluded and named for completeness: the
+AMD-XOP kernel (\texttt{xopu24}) raises an illegal-instruction fault on a
+GenuineIntel part, the other-ISA and 32-bit bit-interleaved kernels do not apply,
+and the AVX2/AVX-512 OpenSSL paths require vector extensions Goldmont lacks. The
+comparison is thus against the genuinely fastest code that runs on the hardware,
+not a strawman.
+
+\begin{table}[t]
+\centering
+\caption{Keccak-$f[1600]$ on the Goldmont N3350, best configuration per contender
+over the 24-configuration compiler-and-optimisation sweep, measured base-pinned
+and same-process. Cycles are per permutation; \texttt{this/$\mu$code} is the
+contender's minimum divided by the microcode minimum, so a value above~1 means
+the microcode is faster. A smaller cycle count is better. The microcode row is
+the looped single-firing kernel of \Cref{sec:keccak-design}.}
+\label{tab:results-keccak}
+\small
+\begin{tabular}{@{}llrrrl@{}}
+\toprule
+Contender & Method & Min & Median & \texttt{this/$\mu$code} & Best config \\
+\midrule
+\textbf{microcode} & looped, one firing, full-state resident & \textbf{1912} & 1917 & \textbf{1.000$\times$} & gcc-12 -O2 \\
+\midrule
+opt64lcu24        & C64: lane-compl., full unroll (24)       & 2043 & 2051 & 1.069$\times$ & gcc-11 -Os \\
+openssl           & asm: x86-64 scalar (CRYPTOGAMS)          & 2047 & 2053 & 1.071$\times$ & gcc-11 -O  \\
+x86\_64\_asm      & asm: hand-written, \texttt{ROL} (Van Keer) & 2064 & 2073 & 1.079$\times$ & gcc-11 -Os \\
+xkcp\_g64lc       & XKCP plain-64: unroll, lane-compl.       & 2151 & 2160 & 1.125$\times$ & gcc-12 -O2 \\
+opt64lcu6         & C64: lane-compl., unroll 6               & 2216 & 2218 & 1.159$\times$ & clang-17 -O3 \\
+xkcp\_g64         & XKCP plain-64: unroll, no lane-compl.    & 2268 & 2270 & 1.186$\times$ & clang-18 -Os \\
+simple            & reference C                              & 2370 & 2371 & 1.240$\times$ & gcc-11 -O3 \\
+opt64u6           & C64: plain, unroll 6                     & 2394 & 2396 & 1.252$\times$ & gcc-12 -Os \\
+sseu2             & SIMD: SSE2/SSSE3                         & 3047 & 3053 & 1.594$\times$ & clang-18 -Os \\
+mmxu1             & SIMD: MMX                                & 3941 & 3953 & 2.061$\times$ & gcc-12 -O3 \\
+opt64lcu24shld    & C64: \texttt{SHLD} rotation, unroll 24   & 10058 & 10069 & 5.260$\times$ & clang-17 -Os \\
+x86\_64\_shld     & asm: hand-written, \texttt{SHLD}         & 10100 & 10112 & 5.282$\times$ & clang-17 -O \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{The permutation as a whole.}
+The looped microcode permutation completes in 1912 cycles, against 2043 for the
+fastest scalar contender \texttt{opt64lcu24} and 2064 for the hand-written
+\texttt{x86\_64\_asm}, a ratio of $0.936$ and an improvement of approximately
+$6.8\%$. It is the fastest of every contender we measured. The three fastest
+baselines---the lane-complemented, fully unrolled C kernel; the OpenSSL scalar
+assembly; and the Van Keer rotate-based hand assembly---cluster within one percent
+of one another at just above 2000 cycles, which is itself evidence that the
+2043-cycle figure is a genuine ceiling for native code on this core rather than an
+artefact of one implementation. The microcode sits clearly below that cluster.
+
+\paragraph{The instruction the core hates.}
+Two contenders stand a factor of five slower than the rest: both variants that
+realise the $\rho$ rotations with the \texttt{SHLD} double-precision shift rather
+than a rotate. On this Atom-class core \texttt{SHLD} is a heavily microcoded,
+multi-cycle operation, and a kernel that issues it once per lane per round is
+crippled by it. We include these rows not to flatter the microcode but because
+they are instructive: the same source, differing only in how a rotation is
+spelled, spans an order of magnitude, which is a concrete reminder that on this
+microarchitecture the choice of primitive instruction, not the high-level
+algorithm, dominates. The SIMD kernels (\texttt{sseu2}, \texttt{mmxu1}) are also
+uncompetitive here, because Goldmont's narrow SSE-width vector units, with no AVX2,
+handle the bitwise logic of Keccak poorly---an observation Zhang et al.\
+[TCHES 2025(1)] make about their own RISC-V vector unit as well.
+
+\paragraph{Compiler stability.}
+Because a Keccak permutation runs entirely inside one microcode firing, the host
+compiler touches only the thin native prologue that triggers the patch, so the
+microcode is nearly invariant across the sweep. \Cref{tab:results-keccak-stab}
+contrasts the competitive 64-bit contenders at their best and worst
+configurations. The microcode varies by a single cycle across all 24
+compiler-and-optimisation combinations, and the hand-written assembly---whose
+generated code is likewise fixed---by four; but the fastest \emph{compiled}
+baseline, \texttt{opt64lcu24}, swings by 213 cycles and attains its 2043-cycle
+minimum only when one particular compiler happens to schedule it well, being some
+$10\%$ slower at its worst. The microcode is thus not merely the fastest entry but
+also the one whose performance a deployer could most reliably reproduce, since it
+does not depend on the compiler finding a good schedule.
+
+\begin{table}[t]
+\centering
+\caption{Stability across the 24-configuration sweep for the competitive 64-bit
+contenders: the per-permutation cost at the best against the worst configuration,
+and their spread (both read off the per-configuration minimum matrix). The
+microcode and the two hand-assembly kernels are essentially compiler-invariant;
+the fastest \emph{compiled} baseline \texttt{opt64lcu24} swings by over 200
+cycles.}
+\label{tab:results-keccak-stab}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Contender & Best & Worst & Spread \\
+\midrule
+microcode (looped) & 1912 & 1913 & 1   \\
+opt64lcu24         & 2043 & 2256 & 213 \\
+openssl            & 2047 & 2050 & 3   \\
+x86\_64\_asm       & 2064 & 2068 & 4   \\
+xkcp\_g64lc        & 2151 & 2156 & 5   \\
+opt64lcu6          & 2216 & 2222 & 6   \\
+xkcp\_g64          & 2268 & 2273 & 5   \\
+simple             & 2370 & 2378 & 8   \\
+opt64u6            & 2394 & 2395 & 1   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Where the advantage comes from, and its bound.}
+The margin is modest by design, and the latency model of \Cref{sec:findings}
+explains why. The kernel compiles to 108 static triads---a 26-triad prologue, a
+56-triad looped body, and a 26-triad epilogue---which lies comfortably within the
+128-triad patch RAM; because the body is looped rather than unrolled, the dynamic
+count executed per permutation is $26 + 24\times56 + 26 = 1396$ triads. A single
+isolated firing sustains $0.49$ cycles per triad, but that is a throughput figure
+obtained by overlapping independent firings, whereas the looped permutation is a
+strict dependency chain---round $N$ needs round $N{-}1$, with a backward branch on
+each and no overlap---so it pays the true latency of approximately $1.37$ cycles
+per triad, and $1396$ triads accordingly cost approximately 1912 cycles. The
+microcode is thus latency-bound at roughly one triad per cycle, while the
+hand-tuned scalar assembly, running on a three-wide out-of-order core, extracts
+approximately three operations per cycle from the rotate and \texttt{ANDN}
+instruction-level parallelism of Goldmont. We cannot close this gap with more
+parallelism, because the chain $\theta\!\to\!\rho\!\to\!\pi\!\to\!\chi$ is
+inherently sequential and the 128-triad cap precludes the unrolling that would
+expose independent work across rounds. The entire advantage is therefore the
+per-round work that native code \emph{cannot} perform: full register residency, so
+that state input and output are paid once per permutation rather than once per
+round; the borrowed thirty-second register that keeps the $\theta$-mixing lanes
+$D$ resident; and the move-free $\chi$ stage that uses the freed registers as
+scratch. \Cref{tab:results-keccak-opt} assembles the improvement from these
+structural contributions, each measured back to back in the same harness. This is
+the analogue of the ``normalized'' and CPI columns Zhang et al.\ report: it
+exposes where the cycles go rather than only how many there are.
+
+\begin{table}[t]
+\centering
+\caption{The Keccak improvement assembled from successive structural
+optimisations, each expressed as the ratio to the naive residency-only baseline
+(smaller is faster). Every step attacks the round's dependency chain; the
+move-free $\chi$ is the single largest contributor.}
+\label{tab:results-keccak-opt}
+\small
+\begin{tabular}{@{}clr@{}}
+\toprule
+Step & Change & Ratio \\
+\midrule
+0 & per-lane $D$ re-read from buffer, naive $\chi$ with auxiliary moves & $1.00\times$ \\
+1 & $D$ resident in registers via the borrowed \texttt{RSP}, no base rebuild & $0.99\times$ \\
+2 & move-free $\chi$ using the now-dead $D$-registers as scratch & $0.95\times$ \\
+3 & depth-three $\theta$ parity tree and byte-indexed round constant & $0.93\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Cross-architecture context.}
+Our claim is a same-silicon one: microcode against the best native code on the
+\emph{same} core. For orientation only---and, as Zhang et al.\ themselves caution
+about such comparisons, ``clearly unfair and provided for reference only''---we
+note where optimised scalar Keccak-$f[1600]$ lands on other recent parts. Zhang
+et al.\ [TCHES 2025(1)] report 1770 cycles on the dual-issue in-order XuanTie C908
+with the RISC-V bit-manipulation extension, and cite Becker and Kannwischer's 1418
+cycles on an ARM Cortex-A55 scalar pipeline, both exploiting a
+bit-manipulation-rich instruction set and lazy-rotation techniques that Goldmont's
+x86 ISA does not offer. These numbers are not comparable to our 1912 cycles in any
+rigorous sense---different ISA, different core, different rotation and and-not
+primitives---and we draw no performance conclusion from them. We include them
+because they make the structural point precise: none of these native
+implementations achieves full-state register residency, which is exactly the lever
+the microcode uses and exactly what a register-limited ISA denies its compiler and
+its assembly programmer.
+
+% =====================================================================
+\subsection{Curve25519 / X25519}
+\label{sec:results-curve}
+% =====================================================================
+
+For Curve25519 the object placed in the patch RAM is not the scalar
+multiplication but the two field operations beneath it, the multiplication and the
+squaring modulo $p=2^{255}-19$ in the unsaturated radix-$2^{51}$ representation
+(\Cref{sec:curve25519}). We therefore report at two levels: the field operation in
+isolation, which is where the paper's claim is staked, and the complete scalar
+multiplication, which orients that claim within the state of the art.
+
+\paragraph{The field operation in isolation.}
+Timed on their own in a dependent chain---the way the ladder issues them---the
+microcode field operations are faster than the fiat-crypto reference against which
+the superoptimiser is itself measured. The squaring completes in roughly
+37 cycles, about $26\%$ faster than fiat, and the multiplication in roughly
+58 cycles, about $3\%$ faster. The asymmetry is intrinsic to the kernels: squaring
+issues fifteen partial products against multiplication's twenty-five, so it has
+proportionally more slack into which the concurrent carry chains of
+\Cref{sec:curve25519} can be packed, whereas the multiplication is nearer the
+multiplier-throughput bound where the layer's carry-concurrency advantage has less
+room to act. Because both the Montgomery ladder and the Fermat inversion are
+squaring-dominated, it is the larger squaring advantage that propagates into the
+end-to-end figure.
+
+\paragraph{The cleanest comparison: the same framework, only the field ops
+change.} The most confounding-free way to attribute an end-to-end difference to
+the field operations is to hold everything else constant. We do this by carrying
+the microcode field operations into the Bernstein--Schwabe \texttt{amd64-51}
+framework, leaving its ladder, inversion, conditional swap, and (un)packing
+exactly as its authors wrote them, and swapping only \texttt{fe25519\_mul} and
+\texttt{fe25519\_square} for the microcode. Across the 24-configuration sweep the
+microcode field operations make the same framework a geometric mean of
+$1.084\times$ faster than the authors' own hand-written assembly field
+operations---about $8\%$---so the advantage is not an artefact of our own ladder
+and survives transplantation into an independently engineered scalar
+multiplication. That such a chained accumulation is where the layer helps at all
+is itself a consequence of the platform: lacking the ADX extension, native
+Goldmont code cannot overlap two carry chains through \texttt{ADCX}/\texttt{ADOX}
+and must serialise on the single architectural carry flag, whereas the microcode
+advances three accumulation chains at once, each on its own private flag domain
+(\Cref{sec:findings}).
+
+\paragraph{End to end.}
+\Cref{tab:results-curve-e2e} reports the best per-contender result across the
+sweep, in median cycles per complete scalar multiplication, alongside the
+geometric mean over all 24 configurations of each contender's ratio to our inlined
+microcode ladder. The inlined microcode ladder completes in about 300\,000 cycles
+and is the fastest of every $5\times51$ contender we measured: it is a geometric
+mean of $1.25\times$ faster than fiat-crypto, $1.30\times$ faster than
+hand-written \texttt{\_\_uint128\_t} C, $1.28\times$ faster than the CryptOpt
+superoptimiser, $1.31\times$ faster than \texttt{donna\_c64}, and $1.17\times$
+faster than the hand-written \texttt{amd64-51} assembly stack. Against a formally
+verified generator, a cryptographic superoptimiser, expert portable C, and expert
+hand assembly, all at or above the ISA, the below-ISA microcode is the fastest
+$5\times51$ X25519 on this core.
+
+\begin{table}[t]
+\centering
+\caption{End-to-end X25519 on the Goldmont N3350, best configuration per contender
+over the 24-configuration sweep, in median cycles. The last column is the
+geometric mean over all 24 configurations of (contender) $\div$
+(ours/microcode-inline); above~1 means our microcode is faster, below~1 means it
+is slower. The inlined microcode ladder is the fastest $5\times51$ implementation
+but is overtaken by the hand-written $4\times64$ saturated assembly, and the
+microcode port \emph{into} that $4\times64$ representation is the slowest entry by
+a wide margin.}
+\label{tab:results-curve-e2e}
+\small
+\begin{tabular}{@{}llrr@{}}
+\toprule
+Contender & Representation and backend & Median (cyc) & geomean vs ours \\
+\midrule
+amd64-64 / asm       & $4\times64$ saturated, hand asm             & 271\,326 & $0.891\times$ \\
+\textbf{ours / ucode-inline} & $5\times51$, microcode (inlined ladder) & \textbf{299\,967} & $1.000\times$ \\
+amd64-51 / ucode     & $5\times51$, microcode (B--S framework)     & 314\,416 & $1.080\times$ \\
+donna\_c64           & $5\times51$, portable C                     & 335\,744 & $1.307\times$ \\
+ours / fiat          & $5\times51$, fiat-crypto C                  & 354\,851 & $1.253\times$ \\
+amd64-51 / asm       & $5\times51$, hand asm                       & 356\,038 & $1.170\times$ \\
+ours / hand-C        & $5\times51$, hand-written \texttt{\_\_uint128\_t} C & 379\,433 & $1.300\times$ \\
+ours / cryptopt      & $5\times51$, CryptOpt asm                   & 380\,361 & $1.277\times$ \\
+amd64-64 / ucode     & $4\times64$ saturated, microcode            & 511\,017 & $1.773\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Where the advantage ends.}
+The fastest scalar multiplication on this core is nonetheless not ours. It is the
+Bernstein--Schwabe \texttt{amd64-64} implementation, which uses the saturated
+$4\times64$ representation in radix $2^{64}$ and completes in 271\,326 cycles, a
+geometric mean of $1.12\times$ ahead of the inlined microcode ladder---about
+$11\%$. Its advantage has nothing to do with carry handling, at which the
+microcode excels; it is one of algorithm and of native execution. The saturated
+$4\times64$ multiplication performs sixteen partial products against our
+twenty-five, on a core whose multiplier, not its carry logic, is the scarce
+resource; and being ordinary native code it pays none of the per-firing dispatch
+tax that our hooked operations incur on the order of two and a half thousand times
+per scalar multiplication. The honest headline is therefore precise: the microcode
+is the fastest \emph{$5\times51$} X25519 we measured and the fastest field backend
+under a fixed representation, but it is not the fastest X25519, because it cannot
+adopt the better algorithm.
+
+\paragraph{The representation that suits the layer worst.}
+The last row of \Cref{tab:results-curve-e2e} makes the boundary sharp. When we
+encode the field operations themselves in the $4\times64$ representation, the
+microcode port runs in 511\,017 cycles---a geometric mean of about $1.77\times$
+slower than our $5\times51$ microcode and nearly twice the cost of the native
+$4\times64$ assembly. The cause is exactly the flag structure of
+\Cref{sec:findings}. A saturated $4\times64$ multiplication produces long,
+full-width carry chains, and the add-with-carry instruction those chains want
+reads the architectural flag domain that is frozen on entry to a patch and cannot
+be threaded through a sequence of dependent additions inside the microcode. The
+four-deep saturated carry must therefore be emulated by serial \texttt{SETCC}
+operations, reintroducing precisely the serialisation the $5\times51$ kernel's
+three parallel carry chains were built to avoid. The representation that suits the
+native core best is thus the one that suits the layer worst, and the
+representation at which the layer excels does not yield the fastest algorithm
+overall. This is the crisp form of the headroom result: descending to microcode
+buys a single-digit-percent constant factor on a \emph{fixed} algorithm, not the
+freedom to run a better one.
+
+% =====================================================================
+\subsection{Summary and Future Work}
+\label{sec:results-future}
+% =====================================================================
+
+\paragraph{Summary.}
+Both results have the same shape. A complete, known-answer-verified 24-round
+Keccak-$f[1600]$ runs entirely in Goldmont microcode, looped within a single
+firing in 108 triads, and is approximately $7\%$ faster than the fastest
+hand-tuned scalar assembly on this microarchitecture---the fastest of every
+runnable contender, and the most stable across compilers. A hand-scheduled
+microcode encoding of the Curve25519 $5\times51$ field operations is the fastest
+such field backend we measured, ahead of an optimising compiler, a formally
+verified generator, a cryptographic superoptimiser, and expert hand assembly, and
+the advantage survives transplantation into the Bernstein--Schwabe framework,
+where it is a geometric mean of about $8\%$ faster than the authors' own assembly.
+In both cases the advantage is structural---concurrent private-flag carry chains
+fused into single triads for the field arithmetic, whole-state register residency
+with move-free $\chi$ for the permutation---and in both cases it is bounded, by the
+128-triad patch RAM, the per-firing dispatch tax, and one-triad-per-cycle issue,
+not by anything the compiler leaves on the table. Where the layer loses it loses
+for a reason we can name: the faster X25519 belongs to a $4\times64$ saturated
+algorithm that the frozen single-flag model makes the layer worst at, and that the
+patch RAM cannot in any case hold.
+
+\paragraph{Future work.}
+Several levers remain. For X25519, replacing the Fermat inversion with a
+Bernstein--Yang constant-time inversion is projected to recover a further
+$1$--$2.5\%$ end-to-end and is gated on a short constant-time probe. The
+same-process interleaved harness used for Keccak should be extended to the
+X25519 field-operation comparison so that its claim rests on a same-process ratio
+rather than cross-run minima, and the reported statistics should be broadened from
+median and minimum to include an inter-quartile range. More broadly, the method
+generalises: we have applied the same generator-and-simulator methodology to
+several further primitives (P-256, secp256k1, poly1305), which a fuller treatment
+could report; and the Keccak kernel is directly reusable as the permutation inside
+hash-based signatures. Finally, the security surface this work opens---that a
+primitive which can be \emph{implemented} in microcode can equally be
+\emph{subverted} there, invisibly to any ISA-level audit---deserves the separate
+treatment we give it in \Cref{sec:ucode-layer} and beyond.
