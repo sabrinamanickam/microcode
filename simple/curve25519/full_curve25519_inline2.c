@@ -920,7 +920,7 @@ static inline uint64_t rdtsc_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define BENCH_REPS 100
+#define BENCH_REPS 1000   /* enough samples for stable p10/p90 tails */
 
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
@@ -1814,10 +1814,22 @@ void supercop_amd64_51_ucode_ladderstep(a51u_fe25519 *work) {
     memcpy(work[4].v, st.z3, 5 * sizeof(uint64_t));
 }
 
-static void bench_stats(uint64_t *samples, int n, uint64_t *out_min, uint64_t *out_median) {
+/* Nearest-rank percentile of an ascending-sorted array (0<=pct<=100). */
+static uint64_t pctl_u64(const uint64_t *sorted, int n, double pct) {
+    if (n <= 0) return 0;
+    int idx = (int)(pct / 100.0 * (n - 1) + 0.5);
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    return sorted[idx];
+}
+/* median is the headline; min for reference; p10/p90 for the dispersion columns. */
+static void bench_stats(uint64_t *samples, int n, uint64_t *out_min, uint64_t *out_median,
+                        uint64_t *out_p10, uint64_t *out_p90) {
     qsort(samples, n, sizeof(uint64_t), cmp_u64);
     *out_min    = samples[0];
     *out_median = samples[n / 2];
+    *out_p10    = pctl_u64(samples, n, 10.0);
+    *out_p90    = pctl_u64(samples, n, 90.0);
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -2127,7 +2139,7 @@ static int test_rfc7748(void) {
  * ════════════════════════════════════════════════════════════════════ */
 static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
-    uint64_t t0, t1, mn, med;
+    uint64_t t0, t1, mn, med, p10, p90;
     uint64_t samples[BENCH_REPS];
 
     hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scalar, 32);
@@ -2151,9 +2163,9 @@ static void benchmark(void) {
             t0 = rdtsc_start(); CALL; t1 = rdtsc_end();                     \
             samples[r] = t1 - t0;                                           \
         }                                                                   \
-        bench_stats(samples, BENCH_REPS, &mn, &med);                        \
-        printf("%-20s min %8" PRIu64 "  median %8" PRIu64 " cycles\n",      \
-               LABEL, mn, med);                                             \
+        bench_stats(samples, BENCH_REPS, &mn, &med, &p10, &p90);            \
+        printf("%-20s median %8" PRIu64 "  min %8" PRIu64 "  p10 %8" PRIu64 \
+               "  p90 %8" PRIu64 " cycles\n", LABEL, med, mn, p10, p90);    \
     } while (0)
 
     BENCH_ONE("ours/hand-C:",       x25519_native(out, scalar, point));

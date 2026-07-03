@@ -249,8 +249,32 @@ md_ratio_matrix() {
     echo
 }
 
+# md_dispersion <contender...> — per-contender best-config median alongside the
+# min and the p10–p90 spread, so run-to-run dispersion is visible next to the
+# headline median. Values are taken at each contender's best-median config (the
+# same config the headline median comes from), over the benchmark's reps.
+md_dispersion() {
+    local cols=("$@") label cfg md mn a b spread
+    echo
+    echo "### Dispersion at each contender's best config"
+    echo
+    echo "_Median is the headline; min and the p10–p90 range show run-to-run spread at that config. A tight p90−p10 relative to the inter-contender gaps means the ranking is not noise._"
+    echo
+    echo "| contender | median | min | p10 | p90 | p90−p10 | best config |"
+    echo "|---|---:|---:|---:|---:|---:|---|"
+    for label in "${cols[@]}"; do
+        cfg="${best_med_cfg[$label]:-}"
+        md="${best_med[$label]:-}"; mn="${cell_min[$cfg|$label]:-}"
+        a="${cell_p10[$cfg|$label]:-}"; b="${cell_p90[$cfg|$label]:-}"
+        spread="—"
+        [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && spread=$((b - a))
+        echo "| $(short_label "$label") | ${md:-—} | ${mn:-—} | ${a:-—} | ${b:-—} | $spread | ${cfg:-—} |"
+    done
+}
+
 # emit_results_md <outfile> — write the markdown report (host info, legend,
-# the median table, and the three "does it win?" ratio tables) to <outfile>.
+# the median table, the dispersion table, and the three "does it win?" ratio
+# tables) to <outfile>.
 emit_results_md() {
     local out="${1:-RESULTS.md}"
     local freq gov turbo cpu
@@ -266,9 +290,10 @@ emit_results_md() {
         echo "**Host:** $(hostname)"
         echo "**CPU:** $cpu"
         echo "**Pinned freq:** $freq kHz   (governor: \`$gov\`, no_turbo: \`$turbo\`)"
+        echo "**Delivered core freq:** ${DELIVERED_FREQ_MHZ:-n/a} MHz · **TSC (RDTSC) rate:** ${TSC_FREQ_MHZ:-n/a} MHz · **correction f_core/f_TSC:** ${CYCLE_CORRECTION:-n/a} (aperf/mperf under load, verified before the sweep; comparative **ratios are invariant** to this factor, multiply **absolute** cycle counts by it for true core cycles)"
         echo "**Configs that ran:** ${#ran_cfgs[@]} / ${#ACTIVE_CONFIGS[@]}"
         echo "**Pipeline:** \`taskset -c 0 ./full_curve25519_inline2_static\` (+ amd64-64/ucode) for each (compiler, -O) combo"
-        echo "**Metric:** median cycles per X25519 (best config per contender shown in **bold**)."
+        echo "**Metric:** median cycles per X25519 (headline; best config per contender in **bold**). Min and the p10–p90 spread are in the dispersion table below."
         echo
         echo "## Contender legend"
         echo
@@ -287,6 +312,7 @@ emit_results_md() {
         echo
         echo "---"
         md_matrix "X25519 end-to-end" "${TABLE[@]}"
+        md_dispersion "${TABLE[@]}"
         echo
         echo "---"
         echo

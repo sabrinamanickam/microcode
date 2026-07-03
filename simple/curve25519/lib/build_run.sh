@@ -81,11 +81,13 @@ run_standalone() {
 
     if make -s PROG="$prog" CC="$cc" CFLAGS="$cflags" >/dev/null 2>"$errlog"; then
         rm -f "$errlog"
-        local out md
+        local out md mn
         out=$(sudo taskset -c 0 ./"${prog}_static" 2>&1)
         echo "$out" | sed -n '/--- Bench/,/p90:/p'
         md=$(echo "$out" | awk '/^median:/ {print $2; exit}')
-        record_result "$cfg" "$label" "$md"
+        mn=$(echo "$out" | awk '/^min:/ {print $2; exit}')
+        # This standalone binary reports only min/median (no p10/p90).
+        record_result "$cfg" "$label" "$md" "$mn"
     else
         echo "$fail_tag"
         sed 's/^/    /' "$errlog"
@@ -99,7 +101,7 @@ run_standalone() {
 # (amd64-64/ucode). Populates the global result tables (via record_result)
 # and the ran_cfgs list.
 run_matrix() {
-    local cfg cc opt cflags output line label md
+    local cfg cc opt cflags output line label md mn p10 p90
 
     for cfg in "${ACTIVE_CONFIGS[@]}"; do
         cc="${cfg%% *}"
@@ -146,8 +148,11 @@ run_matrix() {
             [ "$label" = "amd64-64/ucode" ]    && continue
             line=$(echo "$output" | grep -E "^${label}:" || true)
             [ -z "$line" ] && continue
-            md=$(echo "$line" | grep -oE 'median[[:space:]]+[0-9]+' | awk '{print $2}')
-            record_result "$cfg" "$label" "$md"
+            md=$(echo "$line"  | grep -oE 'median[[:space:]]+[0-9]+' | awk '{print $2}')
+            mn=$(echo "$line"  | grep -oE 'min[[:space:]]+[0-9]+'    | awk '{print $2}')
+            p10=$(echo "$line" | grep -oE 'p10[[:space:]]+[0-9]+'    | awk '{print $2}')
+            p90=$(echo "$line" | grep -oE 'p90[[:space:]]+[0-9]+'    | awk '{print $2}')
+            record_result "$cfg" "$label" "$md" "$mn" "$p10" "$p90"
         done
 
         # ── amd64-64/ucode: amd64-64 framework (driver, invert, pack/unpack,

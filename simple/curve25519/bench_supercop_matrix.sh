@@ -37,7 +37,10 @@ source lib/print_matrix.sh
 
 # ── Shared result tables (populated by record_result, read by the renderers) ──
 # We track median cycles only.
-declare -A cell_med      # "cfg|label" -> median cycles
+declare -A cell_med      # "cfg|label" -> median cycles (headline stat)
+declare -A cell_min      # "cfg|label" -> min cycles
+declare -A cell_p10      # "cfg|label" -> 10th-percentile cycles (dispersion)
+declare -A cell_p90      # "cfg|label" -> 90th-percentile cycles (dispersion)
 declare -A best_med      # label -> best (smallest) median cycles
 declare -A best_med_cfg  # label -> winning config (for median)
 declare -a ran_cfgs      # configs that produced a benchmark (excludes build failures)
