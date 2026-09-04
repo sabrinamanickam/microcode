@@ -154,7 +154,11 @@ endif
 # head-to-head: links ALL fast SUPERCOP scalar Keccak variants; -no-pie because
 # the harness installs the microcode patch and needs its buffer in the low 4GB
 # (LDZX_DSZ64_ASZ32 only takes 32-bit addresses).
-ifeq ($(PROG),asm_op_keccak_vs)
+# sha3_vs is the end-to-end SHA3-256 harness: same sponge, pluggable
+# permutation backends. It links the same baseline set and has the same
+# low-4GB / RSP-preservation constraints as asm_op_keccak_vs, so it shares
+# that target's flags and pinned harness -O.
+ifneq ($(filter $(PROG),asm_op_keccak_vs sha3_vs bench_ablation),)
 CFLAGS := $(filter-out -fPIE,$(CFLAGS)) -no-pie
 LDFLAGS := -static -no-pie
 # Pin the HARNESS translation unit to a fixed, known-good -O. The harness is
@@ -169,17 +173,26 @@ LDFLAGS := -static -no-pie
 # SIGSEGV. Appending -O2 after $(CFLAGS) wins (last -O wins for gcc/clang) and
 # affects ONLY the $< compile in the build rule, not the prebuilt baseline .o.
 HARNESS_OPT := -O2
+ifeq ($(PROG),bench_ablation)
+EXTRA_OBJS :=
+else
 EXTRA_OBJS := keccak_x86_64_asm.o keccak_x86_64_shld.o \
               keccak_opt64lcu24.o keccak_opt64lcu24shld.o \
               keccak_opt64lcu6.o keccak_opt64u6.o \
               keccak_sseu2.o keccak_mmxu1.o keccak_simple.o \
               keccak_xkcp_g64.o keccak_xkcp_g64lc.o keccak_openssl.o
 endif
+endif
 
 # Build $(PROG)_static from $(PROG).c (+ any extra objs). $(HARNESS_OPT) is empty
 # by default and -O2 for asm_op_keccak_vs (see note above); it follows $(CFLAGS)
 # so the harness TU's -O is pinned while baselines keep the swept flags.
-$(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
+# The generated patch headers are real prerequisites: regenerating the kernel
+# (keccak_gen.py / keccak_ablate.py) must force a relink, or a stale binary
+# silently benchmarks the previous kernel.
+GEN_HDRS := ../keccak_perm.h ../keccak_perm_body.h $(wildcard ../abl/*.h)
+
+$(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS) $(GEN_HDRS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $(HARNESS_OPT) $< $(EXTRA_OBJS) $(LIBS) -o $@
 
 clean:

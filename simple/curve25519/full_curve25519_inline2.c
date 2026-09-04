@@ -983,7 +983,11 @@ static int test_rfc7748(void) {
 }
 #endif /* INLINE2_PROFILE */
 
-#if !defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)
+/* INLINE2_CONTENDERS_ONLY keeps this whole block (the contender backends,
+ * the RFC 7748 verification and the bench harness) but strips main(), so a
+ * probe binary can reuse a contender directly. INLINE2_LIB, by contrast,
+ * strips the block entirely — bench_attrib wants only the field-op macros. */
+#if (!defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)) || defined(INLINE2_CONTENDERS_ONLY)
 /* ════════════════════════════════════════════════════════════════════
  * CONTENDER BACKENDS — copied verbatim from full_curve25519.c so the
  * inline binary now hosts every X25519 contender. full_curve25519.c is
@@ -1328,6 +1332,28 @@ extern int x25519_amd64_64(unsigned char *out,
 extern int x25519_amd64_51_ucode(unsigned char *out,
                                  const unsigned char *scalar,
                                  const unsigned char *point);
+
+/* ════════════════════════════════════════════════════════════════════
+ * The two 5×51 ladder controls (CONTROLS.md).
+ *
+ * x25519_amd64_51_ucode above uses the register-chained inline-asm ladder
+ * defined further down, so `amd64-51/asm vs amd64-51/ucode` moves both the
+ * field ops and the ladder. These two arms complete the square inside
+ * amd64-51's own framework, both on the SAME C ladderstep.c:
+ *
+ *   amd64-51/asm-Clad    C ladder + amd64-51's qhasm mul/square  (native)
+ *   amd64-51/ucode-Clad  C ladder + 5×51 microcode field ops
+ *
+ *   asm-Clad  ÷ asm        = ladder tax, framework held constant
+ *   asm-Clad  ÷ ucode-Clad = field-op effect, ladder AND framework constant
+ *   ucode-Clad ÷ ucode     = ladder coding style, field ops held constant
+ * ════════════════════════════════════════════════════════════════════ */
+extern int x25519_amd64_51_asmclad(unsigned char *out,
+                                   const unsigned char *scalar,
+                                   const unsigned char *point);
+extern int x25519_amd64_51_ucode_clad(unsigned char *out,
+                                      const unsigned char *scalar,
+                                      const unsigned char *point);
 
 /* ════════════════════════════════════════════════════════════════════
  * COMMON FIELD OPERATIONS (pure C, used by all backends)
@@ -1782,6 +1808,147 @@ static void x25519_cryptopt(uint8_t out[32], const uint8_t scalar[32],
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * amd64-51 ASM FIELD OPS ON THE SHARED C LADDER  ("a51ops/C-ladder")
+ *
+ * The CONTROL for the 5×51 field-op claim.
+ *
+ * The headline `amd64-51/ucode` contender does NOT use amd64-51's own
+ * ladderstep.S — it uses the register-chained inline-asm ladder defined
+ * below (supercop_amd64_51_ucode_ladderstep). So the amd64-51/asm vs
+ * amd64-51/ucode ratio moves TWO things at once: the field-op backend and
+ * the ladder. It cannot attribute anything to the microcode alone.
+ *
+ * This contender closes that hole. It is `x25519_cryptopt` with exactly one
+ * substitution — Bernstein–Schwabe's hand-written amd64-51 fe25519_mul.S /
+ * fe25519_square.S in place of the CryptOpt field ops — so it shares the
+ * IDENTICAL C ladder, inversion chain, cswap, pack and driver with
+ * `ucode/C-ladder`, and runs in the same process. The pair
+ *
+ *     a51ops/C-ladder  vs  ucode/C-ladder
+ *
+ * therefore differs in the field-op backend and nothing else: it is the
+ * clean form of the "microcode beats hand-tuned asm field ops" claim.
+ *
+ * Representation note: amd64-51's fe25519 is 5×51 unsaturated radix 2^51,
+ * the same layout as our `fe` (uint64_t[5]), so the cast is a no-op. The
+ * RFC 7748 vectors below gate this — if the bound disciplines disagreed,
+ * the 1000-iteration chain would diverge.
+ * ════════════════════════════════════════════════════════════════════ */
+typedef struct { unsigned long long v[5]; } a51_fe_t;
+extern void supercop_amd64_51_fe25519_mul(a51_fe_t *r, const a51_fe_t *x, const a51_fe_t *y);
+extern void supercop_amd64_51_fe25519_square(a51_fe_t *r, const a51_fe_t *x);
+
+static inline void fe_mul_a51(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    supercop_amd64_51_fe25519_mul((a51_fe_t *)out, (const a51_fe_t *)a, (const a51_fe_t *)b);
+}
+
+static inline void fe_sq_a51(const uint64_t *a, uint64_t *out) {
+    supercop_amd64_51_fe25519_square((a51_fe_t *)out, (const a51_fe_t *)a);
+}
+
+static void fe_invert_a51(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_a51(z, z2);
+    fe_sq_a51(z2, t);
+    fe_sq_a51(t, t);
+    fe_mul_a51(t, z, z9);
+    fe_mul_a51(z9, z2, z11);
+    fe_sq_a51(z11, t);
+    fe_mul_a51(t, z9, t0);
+
+    fe_sq_a51(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_a51(t1, t1);
+    fe_mul_a51(t1, t0, t1);
+
+    fe_sq_a51(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_a51(t2, t2);
+    fe_mul_a51(t2, t1, t2);
+
+    fe_sq_a51(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_a51(t3, t3);
+    fe_mul_a51(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_a51(t3, t3);
+    fe_mul_a51(t3, t1, t1);
+
+    fe_sq_a51(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_a51(t2, t2);
+    fe_mul_a51(t2, t1, t2);
+
+    fe_sq_a51(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_a51(t3, t3);
+    fe_mul_a51(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_a51(t3, t3);
+    fe_mul_a51(t3, t1, t1);
+
+    fe_sq_a51(t1, t1);
+    fe_sq_a51(t1, t1);
+    fe_sq_a51(t1, t1);
+    fe_sq_a51(t1, t1);
+    fe_sq_a51(t1, t1);
+    fe_mul_a51(t1, z11, out);
+}
+
+static void x25519_a51ops(uint8_t out[32], const uint8_t scalar[32],
+                            const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_a51(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_a51(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_a51(D, A, DA);
+        fe_mul_a51(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_a51(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_a51(t0, z3);
+        fe_mul_a51(x1, z3, z3);
+
+        fe_mul_a51(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_a51(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_a51(z2, z2);
+    fe_mul_a51(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * amd64-51/ucode ladderstep — REWRITTEN in the inline-asm style.
  *
  * The amd64-51-ucode hybrid (SUPERCOP amd64-51 driver/invert/pack +
@@ -1983,6 +2150,59 @@ static int test_rfc7748(void) {
             printf("  fiat:   FAIL\n"); fail++;
         }
 
+        /* a51ops/C-ladder: amd64-51 asm field ops on the shared C ladder.
+         * This 1000-iteration chain is the gate on the representation/bound
+         * compatibility noted at the fe_mul_a51 definition. */
+        uint8_t kq[32], uq[32];
+        memcpy(kq, k, 32);
+        memcpy(uq, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_a51ops(r, kq, uq);
+            memcpy(uq, kq, 32);
+            memcpy(kq, r, 32);
+        }
+        print_hex("a51ops after 1000", kq, 32);
+        if (memcmp_hex(kq,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  a51ops: PASS\n"); pass++;
+        } else {
+            printf("  a51ops: FAIL\n"); fail++;
+        }
+
+        /* The two 5×51 ladder controls. */
+        uint8_t kca[32], uca[32];
+        memcpy(kca, k, 32); memcpy(uca, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51_asmclad(r, kca, uca);
+            memcpy(uca, kca, 32);
+            memcpy(kca, r, 32);
+        }
+        print_hex("a51/asmCld  1000 ", kca, 32);
+        if (memcmp_hex(kca,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  a51/asm-Clad: PASS\n"); pass++;
+        } else {
+            printf("  a51/asm-Clad: FAIL\n"); fail++;
+        }
+
+        uint8_t kcu[32], ucu[32];
+        memcpy(kcu, k, 32); memcpy(ucu, u, 32);
+        for (int i = 0; i < 1000; i++) {
+            x25519_amd64_51_ucode_clad(r, kcu, ucu);
+            memcpy(ucu, kcu, 32);
+            memcpy(kcu, r, 32);
+        }
+        print_hex("a51/ucodeCld 1000", kcu, 32);
+        if (memcmp_hex(kcu,
+                       "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51",
+                       32) == 0) {
+            printf("  a51/ucode-Clad: PASS\n"); pass++;
+        } else {
+            printf("  a51/ucode-Clad: FAIL\n"); fail++;
+        }
+
         uint8_t kd[32], ud[32];
         memcpy(kd, k, 32);
         memcpy(ud, u, 32);
@@ -2136,53 +2356,97 @@ static int test_rfc7748(void) {
 
 /* ════════════════════════════════════════════════════════════════════
  * BENCHMARK — every contender (amd64-64/ucode lives in its own binary)
+ *
+ * Contenders are timed INTERLEAVED: one repetition of every contender per
+ * round, round-robin, rather than BENCH_REPS reps of one contender before
+ * moving on to the next. Under block-sequential timing any slow drift over
+ * the run — thermal, frequency, or accumulated machine state — lands unevenly
+ * across the contenders and is indistinguishable from a real difference
+ * between them. Round-robin spreads such drift equally over all of them, so
+ * the ranking cannot be an artefact of measurement order. The amd64-64
+ * control binary (full_curve25519_amd64_64_asmclad.c) has always timed its
+ * two arms this way; this brings the main harness into line with it.
+ *
+ * Output format is unchanged — lib/build_run.sh greps "^<label>: … median N".
  * ════════════════════════════════════════════════════════════════════ */
+typedef void (*bench_fn)(uint8_t *out, const uint8_t *scalar, const uint8_t *point);
+
+/* Uniform thunks: our own contenders return void over uint8_t[32], the
+ * SUPERCOP-derived ones return int over unsigned char*. Same underlying type,
+ * so these only normalise the signature for the dispatch table below. */
+#define BENCH_THUNK(TH, CALL)                                                \
+    static void TH(uint8_t *o, const uint8_t *s, const uint8_t *p) { CALL; }
+
+BENCH_THUNK(bt_hand_c,   x25519_native(o, s, p))
+BENCH_THUNK(bt_fiat,     x25519_fiat(o, s, p))
+BENCH_THUNK(bt_cryptopt, x25519_cryptopt(o, s, p))
+BENCH_THUNK(bt_a51ops,   x25519_a51ops(o, s, p))
+BENCH_THUNK(bt_donna,    (void)x25519_donna_c64(o, s, p))
+BENCH_THUNK(bt_a51_asm,  (void)x25519_amd64_51(o, s, p))
+BENCH_THUNK(bt_a51_uc,   (void)x25519_amd64_51_ucode(o, s, p))
+BENCH_THUNK(bt_a51_asmc, (void)x25519_amd64_51_asmclad(o, s, p))
+BENCH_THUNK(bt_a51_ucc,  (void)x25519_amd64_51_ucode_clad(o, s, p))
+BENCH_THUNK(bt_a64_asm,  (void)x25519_amd64_64(o, s, p))
+BENCH_THUNK(bt_ours_uc,  x25519(o, s, p))
+BENCH_THUNK(bt_uc_clad,  x25519_ucode(o, s, p))
+
+/* Order here is only the order rows are printed; it no longer affects timing. */
+static const struct { const char *label; bench_fn fn; } BENCH_TAB[] = {
+    { "ours/hand-C:",          bt_hand_c   },
+    { "ours/fiat:",            bt_fiat     },
+    { "ours/cryptopt:",        bt_cryptopt },
+    /* "a51ops/C-ladder" = Bernstein-Schwabe amd64-51 asm field ops on the
+     * SAME C ladder as ucode/C-ladder — the control that separates the
+     * field-op backend from the ladder rewrite (see CONTROLS.md). */
+    { "a51ops/C-ladder:",      bt_a51ops   },
+    { "donna_c64:",            bt_donna    },
+    { "amd64-51/asm:",         bt_a51_asm  },
+    { "amd64-51/ucode:",       bt_a51_uc   },
+    /* The two 5×51 ladder controls — same framework, same C ladder, field
+     * ops the only difference between them (CONTROLS.md). */
+    { "amd64-51/asm-Clad:",    bt_a51_asmc },
+    { "amd64-51/ucode-Clad:",  bt_a51_ucc  },
+    { "amd64-64/asm:",         bt_a64_asm  },
+    /* "ours/ucode" is the inline-asm register-chained ladder (canonical).
+     * "ucode/C-ladder" is the SAME microcode field ops on the identical C
+     * ladder as hand-C/fiat/cryptopt — it isolates the field-op backend
+     * end-to-end, and is NOT a headline contender. */
+    { "ours/ucode:",           bt_ours_uc  },
+    { "ucode/C-ladder:",       bt_uc_clad  },
+};
+#define N_BENCH ((int)(sizeof BENCH_TAB / sizeof BENCH_TAB[0]))
+
+/* [contender][rep] — ~96 KB in BSS at 12 contenders x 1000 reps. */
+static uint64_t bench_samples[N_BENCH][BENCH_REPS];
+
 static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
-    uint64_t t0, t1, mn, med, p10, p90;
-    uint64_t samples[BENCH_REPS];
+    uint64_t mn, med, p10, p90;
 
     hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scalar, 32);
     hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", point, 32);
 
-    printf("=== X25519 Benchmark (%d repetitions) ===\n\n", BENCH_REPS);
+    printf("=== X25519 Benchmark (%d repetitions, interleaved) ===\n\n", BENCH_REPS);
 
-    /* Warm up every contender. */
-    x25519_native(out, scalar, point);
-    x25519_fiat(out, scalar, point);
-    x25519_cryptopt(out, scalar, point);
-    x25519_donna_c64(out, scalar, point);
-    x25519_amd64_51(out, scalar, point);
-    x25519_amd64_51_ucode(out, scalar, point);
-    x25519_amd64_64(out, scalar, point);
-    x25519_ucode(out, scalar, point);
-    x25519(out, scalar, point);
+    /* Warm up every contender before any timing starts. */
+    for (int c = 0; c < N_BENCH; c++)
+        BENCH_TAB[c].fn(out, scalar, point);
 
-#define BENCH_ONE(LABEL, CALL) do {                                         \
-        for (int r = 0; r < BENCH_REPS; r++) {                              \
-            t0 = rdtsc_start(); CALL; t1 = rdtsc_end();                     \
-            samples[r] = t1 - t0;                                           \
-        }                                                                   \
-        bench_stats(samples, BENCH_REPS, &mn, &med, &p10, &p90);            \
-        printf("%-20s median %8" PRIu64 "  min %8" PRIu64 "  p10 %8" PRIu64 \
-               "  p90 %8" PRIu64 " cycles\n", LABEL, med, mn, p10, p90);    \
-    } while (0)
+    /* Round-robin over contenders; the repetition index is the outer loop. */
+    for (int r = 0; r < BENCH_REPS; r++) {
+        for (int c = 0; c < N_BENCH; c++) {
+            uint64_t t0 = rdtsc_start();
+            BENCH_TAB[c].fn(out, scalar, point);
+            uint64_t t1 = rdtsc_end();
+            bench_samples[c][r] = t1 - t0;
+        }
+    }
 
-    BENCH_ONE("ours/hand-C:",       x25519_native(out, scalar, point));
-    BENCH_ONE("ours/fiat:",         x25519_fiat(out, scalar, point));
-    BENCH_ONE("ours/cryptopt:",     x25519_cryptopt(out, scalar, point));
-    BENCH_ONE("donna_c64:",         x25519_donna_c64(out, scalar, point));
-    BENCH_ONE("amd64-51/asm:",      x25519_amd64_51(out, scalar, point));
-    BENCH_ONE("amd64-51/ucode:",    x25519_amd64_51_ucode(out, scalar, point));
-    BENCH_ONE("amd64-64/asm:",      x25519_amd64_64(out, scalar, point));
-    /* "ours/ucode" is the inline-asm register-chained ladder (the canonical
-     * implementation). "ucode/C-ladder" is the SAME microcode field ops on
-     * the identical C ladder as ours/hand-C/fiat/cryptopt — it exists only
-     * to isolate the field-op backend end-to-end (the same-ladder field-op
-     * swap table), NOT as a headline contender. */
-    BENCH_ONE("ours/ucode:",        x25519(out, scalar, point));
-    BENCH_ONE("ucode/C-ladder:",    x25519_ucode(out, scalar, point));
-#undef BENCH_ONE
+    for (int c = 0; c < N_BENCH; c++) {
+        bench_stats(bench_samples[c], BENCH_REPS, &mn, &med, &p10, &p90);
+        printf("%-20s median %8" PRIu64 "  min %8" PRIu64 "  p10 %8" PRIu64
+               "  p90 %8" PRIu64 " cycles\n", BENCH_TAB[c].label, med, mn, p10, p90);
+    }
 
     printf("\n");
 }
@@ -2190,6 +2454,7 @@ static void benchmark(void) {
 /* ════════════════════════════════════════════════════════════════════
  * MAIN — the inline-asm 5×51 ladder (x25519) is the canonical "ours".
  * ════════════════════════════════════════════════════════════════════ */
+#if !defined(INLINE2_CONTENDERS_ONLY)
 int main(void) {
     printf("=== Full X25519: every contender (inline-asm 5×51 is canonical ours) ===\n\n");
 
@@ -2214,6 +2479,7 @@ int main(void) {
     printf("Done.\n");
     return 0;
 }
+#endif /* !INLINE2_CONTENDERS_ONLY */
 #endif /* !INLINE2_PROFILE */
 
 #if defined(INLINE2_PROFILE) && !defined(INLINE2_LIB)

@@ -42,6 +42,15 @@ static uint64_t robust_min(const uint64_t *sorted, int n, uint64_t med){
     for(int i=0;i<n;i++) if(sorted[i]>=floor) return sorted[i];
     return sorted[n-1];
 }
+/* Nearest-rank percentile of an ascending-sorted array (0<=pct<=100). Call
+ * after median_u64 has sorted the array in place. Used for the p10/p90 spread. */
+static uint64_t percentile_u64(const uint64_t *sorted, int n, double pct){
+    if(n<=0) return 0;
+    int idx = (int)(pct/100.0*(n-1) + 0.5);
+    if(idx<0) idx=0;
+    if(idx>=n) idx=n-1;
+    return sorted[idx];
+}
 
 #include "../keccak_perm.h"
 static uint64_t g_keccak_buf[KECCAK_BUFLEN];
@@ -143,7 +152,7 @@ int main(void){
      * all close in time so they see the same frequency. min over reps. */
     typedef void (*permfn)(uint64_t*);
     #define NCONT 12
-    struct { const char *name; const char *type; const char *key; permfn fn; uint64_t min; uint64_t med; } C[NCONT] = {
+    struct { const char *name; const char *type; const char *key; permfn fn; uint64_t min; uint64_t med; uint64_t p10; uint64_t p90; } C[NCONT] = {
         {"x86_64_asm",     "asm",  "x86_64_asm",     keccak_x86_64_asm_perm,     UINT64_MAX, 0},
         {"x86_64_shld",    "asm",  "x86_64_shld",    keccak_x86_64_shld_perm,    UINT64_MAX, 0},
         {"openssl",        "asm",  "openssl",        keccak_openssl_perm,        UINT64_MAX, 0},
@@ -180,54 +189,64 @@ int main(void){
     /* median sorts each sample array in place; robust_min then reads the sorted
      * array, skipping implausible near-zero batches (see robust_min above). */
     for(int c=0;c<NC;c++){
-        C[c].med=median_u64(cval[c],REPS);
+        C[c].med=median_u64(cval[c],REPS);          /* sorts cval[c] ascending */
         C[c].min=robust_min(cval[c],REPS,C[c].med);
+        C[c].p10=percentile_u64(cval[c],REPS,10.0);
+        C[c].p90=percentile_u64(cval[c],REPS,90.0);
     }
     uc_med=median_u64(ucval,REPS);
     uc_min=robust_min(ucval,REPS,uc_med);
+    uint64_t uc_p10=percentile_u64(ucval,REPS,10.0);
+    uint64_t uc_p90=percentile_u64(ucval,REPS,90.0);
 
-    uint64_t uc=uc_min/BATCH;
+    /* median is the headline statistic (min shown for reference). */
+    uint64_t uc=uc_med/BATCH;
 
     /* Assemble all rows (every SUPERCOP variant + microcode), sort ascending by
      * min cyc/perm, and print one aligned table. */
-    struct row { const char *name; const char *type; uint64_t min, med; int uco; };
+    struct row { const char *name; const char *type; uint64_t min, med, p10, p90; int uco; };
     struct row R[NCONT+1];
-    for(int c=0;c<NC;c++) R[c]=(struct row){C[c].name, C[c].type, C[c].min/BATCH, C[c].med/BATCH, 0};
-    R[NC]=(struct row){"microcode", "ucode", uc, uc_med/BATCH, 1};
+    for(int c=0;c<NC;c++) R[c]=(struct row){C[c].name, C[c].type,
+        C[c].min/BATCH, C[c].med/BATCH, C[c].p10/BATCH, C[c].p90/BATCH, 0};
+    R[NC]=(struct row){"microcode", "ucode",
+        uc_min/BATCH, uc_med/BATCH, uc_p10/BATCH, uc_p90/BATCH, 1};
     int NR=NC+1;
+    /* sort ascending by MEDIAN — the headline statistic. */
     for(int i=1;i<NR;i++){ struct row k=R[i]; int j=i-1;
-        while(j>=0 && R[j].min>k.min){ R[j+1]=R[j]; j--; } R[j+1]=k; }
+        while(j>=0 && R[j].med>k.med){ R[j+1]=R[j]; j--; } R[j+1]=k; }
 
-    /* fastest non-microcode contender = the baseline we must beat */
+    /* fastest non-microcode contender (by median) = the baseline we must beat */
     uint64_t best=UINT64_MAX; const char *bestname=""; const char *besttype="";
-    for(int c=0;c<NC;c++){ uint64_t v=C[c].min/BATCH;
+    for(int c=0;c<NC;c++){ uint64_t v=C[c].med/BATCH;
         if(v<best){best=v; bestname=C[c].name; besttype=C[c].type;} }
 
     printf("\n--- Keccak-f[1600] head-to-head: same process & frequency (cyc/perm) ---\n");
-    printf("  %-15s %-5s %8s %8s   %s\n", "contender","type","min","median","x vs ucode");
-    printf("  %-15s %-5s %8s %8s   %s\n", "---------------","-----","--------","--------","----------");
+    printf("  %-15s %-5s %8s %8s %8s %8s   %s\n",
+           "contender","type","median","min","p10","p90","x vs ucode");
+    printf("  %-15s %-5s %8s %8s %8s %8s   %s\n",
+           "---------------","-----","--------","--------","--------","--------","----------");
     for(int i=0;i<NR;i++){
-        double x=(double)R[i].min/(double)uc;
-        printf("  %-15s %-5s %8" PRIu64 " %8" PRIu64 "   %6.2fx%s\n",
-               R[i].name, R[i].type, R[i].min, R[i].med, x,
-               R[i].uco ? "  <== microcode" : (R[i].min<uc ? "  (beats ucode!)" : ""));
+        double x=(double)R[i].med/(double)uc;       /* ratio from medians */
+        printf("  %-15s %-5s %8" PRIu64 " %8" PRIu64 " %8" PRIu64 " %8" PRIu64 "   %6.2fx%s\n",
+               R[i].name, R[i].type, R[i].med, R[i].min, R[i].p10, R[i].p90, x,
+               R[i].uco ? "  <== microcode" : (R[i].med<uc ? "  (beats ucode!)" : ""));
     }
-    printf("\n  fastest non-microcode:   %s (%s) = %" PRIu64 " cyc/perm\n", bestname, besttype, best);
-    printf("  microcode (looped):      %" PRIu64 " cyc/perm\n", uc);
+    printf("\n  fastest non-microcode:   %s (%s) = %" PRIu64 " cyc/perm (median)\n", bestname, besttype, best);
+    printf("  microcode (looped):      %" PRIu64 " cyc/perm (median)\n", uc);
     printf("  ratio microcode/fastest: %.3fx  (%s)\n",
            (double)uc/(double)best,
            uc<best ? "*** microcode WINS vs the fastest runnable variant ***" : "microcode loses");
     printf("\n(all measured back-to-back at the same CPU frequency -> ratios valid)\n");
 
     /* Machine-readable block scraped by bench_keccak_matrix.sh. One line per
-     * contender: "keccak/<key>: ... min N median M" in cyc/perm. The matrix
-     * driver greps "^keccak/<key>:" and records min/median per (config,key). */
+     * contender: min/median/p10/p90 in cyc/perm (median is the headline). The
+     * matrix driver greps "^keccak/<key>:" and records all four per (config,key). */
     printf("\n=== matrix-parse ===\n");
     for(int c=0;c<NC;c++)
-        printf("keccak/%s: min %" PRIu64 " median %" PRIu64 "\n",
-               C[c].key, C[c].min/BATCH, C[c].med/BATCH);
-    printf("keccak/microcode: min %" PRIu64 " median %" PRIu64 "\n",
-           uc_min/BATCH, uc_med/BATCH);
+        printf("keccak/%s: min %" PRIu64 " median %" PRIu64 " p10 %" PRIu64 " p90 %" PRIu64 "\n",
+               C[c].key, C[c].min/BATCH, C[c].med/BATCH, C[c].p10/BATCH, C[c].p90/BATCH);
+    printf("keccak/microcode: min %" PRIu64 " median %" PRIu64 " p10 %" PRIu64 " p90 %" PRIu64 "\n",
+           uc_min/BATCH, uc_med/BATCH, uc_p10/BATCH, uc_p90/BATCH);
 
     init_match_and_patch(); do_fix_IN_patch();
     return 0;

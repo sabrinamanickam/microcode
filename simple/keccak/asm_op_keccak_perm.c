@@ -157,6 +157,11 @@ static int verify_kat(void) {
     return fails;
 }
 
+/* Random states compared against the C reference, on hardware. */
+#define NRANDOM 1000
+#define STR_(x) #x
+#define STR(x)  STR_(x)
+
 static int verify(void) {
     int fails=0;
 
@@ -174,14 +179,34 @@ static int verify(void) {
     for (int i=0;i<25;i++) a[i]=0x0123456789ABCDEFULL*(i+1) ^ 0xDEADBEEFCAFEBABEULL;
     fails += check("nontrivial", a);
 
-    /* 3. a few random states */
+    /* 3. differential test against the C reference on many random states.
+     * This is the tier the paper cites, so it runs on the INSTALLED PATCH rather
+     * than in simulation; 1000 permutations cost a few milliseconds. Only
+     * failures are printed per trial (check() prints its own lane diffs), with a
+     * single summary line for the pass. */
     uint64_t seed=0x12345;
-    for (int t=0;t<3;t++){
-        uint64_t r[25];
+    int rnd_fail_states=0;
+    for (int t=0;t<NRANDOM;t++){
+        uint64_t r[25], ref[25];
         for (int i=0;i<25;i++){ seed=seed*6364136223846793005ULL+1; r[i]=seed; }
-        char lbl[24]; snprintf(lbl,sizeof(lbl),"random[%d]",t);
-        fails += check(lbl, r);
+        memcpy(ref, r, sizeof(ref));
+        keccak_perm_ref(ref);
+        memcpy(g_keccak_buf, r, 25*8);
+        reset_control();
+        keccak_perm_ucode();
+        int bad=0;
+        for (int i=0;i<25;i++) if (g_keccak_buf[i]!=ref[i]) bad++;
+        if (bad){
+            rnd_fail_states++;
+            if (rnd_fail_states<=4){
+                char lbl[24]; snprintf(lbl,sizeof(lbl),"random[%d]",t);
+                printf("  %s: %d/25 lanes wrong\n", lbl, bad);
+            }
+            fails += bad;
+        }
     }
+    printf("%-22s %s (%d/%d states)\n", "random x" STR(NRANDOM),
+           rnd_fail_states?"FAIL":"PASS", NRANDOM-rnd_fail_states, NRANDOM);
     return fails;
 }
 

@@ -25,7 +25,7 @@ all: $(PROG)_static
 # full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
 # contender; full_curve25519 is kept on disk but no longer benched) and needs
 # the identical flags + external objects.
-ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop,$(PROG)))
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops,$(PROG)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
 
@@ -126,6 +126,88 @@ amd64-51-ucode_$(1).o: $$(AMD51U_DIR)/$(1).c
 endef
 $(foreach f,$(AMD51U_NEW_C),$(eval $(call AMD51U_NEW_C_RULE,$(f))))
 
+# ---- The two 5x51 ladder controls (see CONTROLS.md) ----------------------
+# amd64-51/ucode uses an inline-asm register-chained ladder whose FE_MUL/FE_SQ
+# are assembly-text macros with the microcode fired inline — there is no
+# fe25519_mul() call to substitute, so the amd64-64 trick (swap the field-op
+# objects under a fixed ladder) cannot be applied to it directly. Instead we
+# build the two missing corners of the square on the C ladder:
+#
+#   amd64-51/asm        qhasm ladderstep.S + qhasm mul/square   (stock)
+#   amd64-51/asm-Clad   C ladderstep.c    + qhasm mul/square    <-- AMD51A
+#   amd64-51/ucode-Clad C ladderstep.c    + 5x51 microcode      <-- AMD51UC
+#   amd64-51/ucode      inline-asm ladder + 5x51 microcode      (stock hybrid)
+#
+# asm-Clad / asm        = ladder tax, inside amd64-51's own framework
+# asmClad / ucodeClad   = field-op effect, ladder AND framework held constant
+# ucodeClad / ucode     = ladder coding style, field ops held constant
+#
+# The C ladderstep lives in extra/amd64-51-ucode/ (it left the main hybrid when
+# inline2 took over the ladder); both controls compile that same source.
+AMD51CLAD_DIR := extra/amd64-51-ucode
+
+# --- amd64-51/asm-Clad: everything from amd64-51 except the ladder. Native.
+AMD51A_CPP  := -I$(AMD51_DIR) -I$(SC_INC) -include include/amd64_51_asmclad_namespace.h
+AMD51A_CFLAGS := $(filter-out -masm=intel,$(CFLAGS)) -masm=att
+AMD51A_REUSE_C  := mont25519 consts fe25519_invert fe25519_pack fe25519_setint fe25519_unpack
+AMD51A_REUSE_S  := fe25519_freeze work_cswap fe25519_mul fe25519_square
+AMD51A_NEW_C    := ladderstep
+
+AMD51A_OBJS := \
+    $(addprefix amd64-51-asmclad_,$(addsuffix .o,$(AMD51A_REUSE_C))) \
+    $(addprefix amd64-51-asmclad_,$(addsuffix .o,$(AMD51A_REUSE_S))) \
+    $(addprefix amd64-51-asmclad_,$(addsuffix .o,$(AMD51A_NEW_C)))
+
+define AMD51A_REUSE_C_RULE
+amd64-51-asmclad_$(1).o: $$(AMD51_DIR)/$(1).c
+	$$(CC) $$(AMD51A_CFLAGS) $$(AMD51A_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD51A_REUSE_C),$(eval $(call AMD51A_REUSE_C_RULE,$(f))))
+
+define AMD51A_REUSE_S_RULE
+amd64-51-asmclad_$(1).o: $$(AMD51_DIR)/$(1).S
+	$$(CC) $$(AMD51A_CFLAGS) $$(AMD51A_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD51A_REUSE_S),$(eval $(call AMD51A_REUSE_S_RULE,$(f))))
+
+amd64-51-asmclad_ladderstep.o: $(AMD51CLAD_DIR)/ladderstep.c
+	$(CC) $(AMD51A_CFLAGS) $(AMD51A_CPP) -c $< -o $@
+
+# --- amd64-51/ucode-Clad: same C ladder, microcode field ops.
+AMD51UC_CPP  := -I$(AMD51_DIR) -I$(SC_INC) -include include/amd64_51_ucode_clad_namespace.h
+AMD51UC_CFLAGS := $(filter-out -masm=intel,$(CFLAGS)) -masm=att
+AMD51UC_REUSE_C  := mont25519 consts fe25519_invert fe25519_pack fe25519_setint fe25519_unpack
+AMD51UC_REUSE_S  := fe25519_freeze work_cswap
+AMD51UC_WRAP_C   := fe25519_mul fe25519_square
+
+AMD51UC_OBJS := \
+    $(addprefix amd64-51-ucodeclad_,$(addsuffix .o,$(AMD51UC_REUSE_C))) \
+    $(addprefix amd64-51-ucodeclad_,$(addsuffix .o,$(AMD51UC_REUSE_S))) \
+    $(addprefix amd64-51-ucodeclad_,$(addsuffix .o,$(AMD51UC_WRAP_C))) \
+    amd64-51-ucodeclad_ladderstep.o
+
+define AMD51UC_REUSE_C_RULE
+amd64-51-ucodeclad_$(1).o: $$(AMD51_DIR)/$(1).c
+	$$(CC) $$(AMD51UC_CFLAGS) $$(AMD51UC_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD51UC_REUSE_C),$(eval $(call AMD51UC_REUSE_C_RULE,$(f))))
+
+define AMD51UC_REUSE_S_RULE
+amd64-51-ucodeclad_$(1).o: $$(AMD51_DIR)/$(1).S
+	$$(CC) $$(AMD51UC_CFLAGS) $$(AMD51UC_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD51UC_REUSE_S),$(eval $(call AMD51UC_REUSE_S_RULE,$(f))))
+
+# The microcode-calling wrappers come from the live hybrid dir.
+define AMD51UC_WRAP_C_RULE
+amd64-51-ucodeclad_$(1).o: $$(AMD51U_DIR)/$(1).c
+	$$(CC) $$(AMD51UC_CFLAGS) $$(AMD51UC_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD51UC_WRAP_C),$(eval $(call AMD51UC_WRAP_C_RULE,$(f))))
+
+amd64-51-ucodeclad_ladderstep.o: $(AMD51CLAD_DIR)/ladderstep.c
+	$(CC) $(AMD51UC_CFLAGS) $(AMD51UC_CPP) -c $< -o $@
+
 # ---- amd64-64-UCODE hybrid: same driver/invert/pack as amd64-64, but
 #                            ladderstep + mul + square replaced with C that
 #                            calls the 4x64 microcode field ops ----
@@ -168,6 +250,47 @@ amd64-64-ucode_$(1).o: $$(AMD64U_DIR)/$(1).c
 endef
 $(foreach f,$(AMD64U_NEW_C),$(eval $(call AMD64U_NEW_C_RULE,$(f))))
 
+# ---- amd64-64/asm-Clad CONTROL: amd64-64 framework + the ucode hybrid's C
+#      ladderstep + amd64-64's OWN asm fe25519_mul/square ----
+# Isolates the field-op backend from the ladder rewrite. amd64-64/ucode
+# replaces ladderstep AND mul/square, so amd64-64/asm vs amd64-64/ucode
+# confounds the two. This control differs from amd64-64/ucode in the field
+# ops ONLY (same ladderstep.c object source), and from amd64-64/asm in the
+# ladder ONLY. Pure native code — installs no microcode patch.
+AMD64A_CPP  := -I$(AMD64_DIR) -I$(SC_INC) -include include/amd64_64_asmclad_namespace.h
+AMD64A_CFLAGS := $(filter-out -masm=intel,$(CFLAGS)) -masm=att
+
+# Everything from SUPERCOP amd64-64 (recompiled under the control's namespace)
+# — note fe25519_mul/fe25519_square are here, NOT replaced.
+AMD64A_REUSE_C  := mont25519 consts fe25519_invert fe25519_pack fe25519_setint fe25519_unpack
+AMD64A_REUSE_S  := fe25519_freeze work_cswap fe25519_mul fe25519_square
+# The one replaced file: the SAME C ladder the ucode hybrid uses.
+AMD64A_NEW_C    := ladderstep
+
+AMD64A_OBJS := \
+    $(addprefix amd64-64-asmclad_,$(addsuffix .o,$(AMD64A_REUSE_C))) \
+    $(addprefix amd64-64-asmclad_,$(addsuffix .o,$(AMD64A_REUSE_S))) \
+    $(addprefix amd64-64-asmclad_,$(addsuffix .o,$(AMD64A_NEW_C)))
+
+define AMD64A_REUSE_C_RULE
+amd64-64-asmclad_$(1).o: $$(AMD64_DIR)/$(1).c
+	$$(CC) $$(AMD64A_CFLAGS) $$(AMD64A_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD64A_REUSE_C),$(eval $(call AMD64A_REUSE_C_RULE,$(f))))
+
+define AMD64A_REUSE_S_RULE
+amd64-64-asmclad_$(1).o: $$(AMD64_DIR)/$(1).S
+	$$(CC) $$(AMD64A_CFLAGS) $$(AMD64A_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD64A_REUSE_S),$(eval $(call AMD64A_REUSE_S_RULE,$(f))))
+
+# Replaced C file — sourced from amd64-64-ucode/ (identical ladder source).
+define AMD64A_NEW_C_RULE
+amd64-64-asmclad_$(1).o: $$(AMD64U_DIR)/$(1).c
+	$$(CC) $$(AMD64A_CFLAGS) $$(AMD64A_CPP) -c $$< -o $$@
+endef
+$(foreach f,$(AMD64A_NEW_C),$(eval $(call AMD64A_NEW_C_RULE,$(f))))
+
 # ---- CryptOpt fe_mul / fe_sq (Goldmont-tuned, generated by CryptOpt) ----
 # The .asm files declare `fiat_curve25519_carry_{mul,square}` which clashes
 # with the fiat-crypto C version already linked. Sed-rename to `cryptopt_*`
@@ -200,6 +323,7 @@ endif
 ifeq ($(PROG),full_curve25519_inline2)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
               $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -212,8 +336,28 @@ EXTRA_OBJS := $(AMD64U_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
+# amd64-64/asm-Clad control binary (pure native; no microcode patch).
+# Links the stock amd64-64 objects TOO, so the binary benches amd64-64/asm and
+# amd64-64/asm-Clad back-to-back in ONE process — the ladder-rewrite tax comes
+# out as a same-process ratio, immune to cross-run frequency state. The two
+# object sets use different CRYPTO_NAMESPACE prefixes, so they coexist.
+ifeq ($(PROG),full_curve25519_amd64_64_asmclad)
+EXTRA_OBJS := $(AMD64A_OBJS) $(AMD64_OBJS)
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
 # bench_fieldop: per-op field-op comparison; links CryptOpt asm (fiat is a C
 # include, native is inline, microcode comes from the INLINE2_LIB include).
+# probe_a51ops includes inline2 as a library to verify/bench the a51ops
+# control without installing any patch (no sudo, no red-unlock needed).
+ifeq ($(PROG),probe_a51ops)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
 ifeq ($(PROG),bench_fieldop)
 EXTRA_OBJS := cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a

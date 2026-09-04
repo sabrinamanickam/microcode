@@ -38,9 +38,11 @@ source ../../lib/parse.sh         # record_result()
 
 # ── Result tables (read by record_result in lib/parse.sh) ──
 declare -A cell          # "cfg|label" -> min cyc/perm
-declare -A cell_med      # "cfg|label" -> median cyc/perm
+declare -A cell_med      # "cfg|label" -> median cyc/perm (headline stat)
+declare -A cell_p10      # "cfg|label" -> 10th-percentile cyc/perm (dispersion)
+declare -A cell_p90      # "cfg|label" -> 90th-percentile cyc/perm (dispersion)
 declare -A best_min      # label -> best (smallest) min
-declare -A best_med      # label -> best median
+declare -A best_med      # label -> best (smallest) median  (headline; SUPERCOP style)
 declare -A best_cfg      # label -> config achieving best_min
 declare -A best_med_cfg  # label -> config achieving best_med
 declare -a ran_cfgs      # configs that produced a benchmark
@@ -103,7 +105,7 @@ select_active_configs() {
 # compiler/flags, run it, scrape each contender's min/median from the
 # matrix-parse block, and record. Echoes the per-config human report live.
 run_matrix() {
-    local cfg cc opt cflags output line label mn md
+    local cfg cc opt cflags output line label mn md p10 p90
     for cfg in "${ACTIVE_CONFIGS[@]}"; do
         cc="${cfg%% *}"
         opt="${cfg##* }"
@@ -153,15 +155,18 @@ run_matrix() {
         for label in "${CONTENDERS[@]}"; do
             line=$(echo "$output" | grep -E "^${label}:" || true)
             [ -z "$line" ] && continue
-            mn=$(echo "$line" | grep -oE 'min[[:space:]]+[0-9]+'    | awk '{print $2}')
-            md=$(echo "$line" | grep -oE 'median[[:space:]]+[0-9]+' | awk '{print $2}')
-            record_result "$cfg" "$label" "$mn" "$md"
+            mn=$(echo "$line"  | grep -oE 'min[[:space:]]+[0-9]+'    | awk '{print $2}')
+            md=$(echo "$line"  | grep -oE 'median[[:space:]]+[0-9]+' | awk '{print $2}')
+            p10=$(echo "$line" | grep -oE 'p10[[:space:]]+[0-9]+'    | awk '{print $2}')
+            p90=$(echo "$line" | grep -oE 'p90[[:space:]]+[0-9]+'    | awk '{print $2}')
+            record_result "$cfg" "$label" "$mn" "$md" "$p10" "$p90"
         done
     done
 }
 
 # headline: fastest SUPERCOP baseline (min over the 4 SUPERCOP variants) vs ucode.
 # Echoes "<sc_best_label> <sc_best> <uc>" (or empty fields if unavailable).
+# Headline is by MEDIAN (best-per-contender across the sweep, SUPERCOP style).
 compute_headline() {
     local label v sc_best="" sc_best_label="" uc
     for label in keccak/x86_64_asm keccak/x86_64_shld \
@@ -169,33 +174,35 @@ compute_headline() {
                  keccak/opt64lcu6 keccak/opt64u6 \
                  keccak/sseu2 keccak/mmxu1 keccak/simple \
                  keccak/xkcp_g64 keccak/xkcp_g64lc keccak/openssl; do
-        v="${best_min[$label]:-}"
+        v="${best_med[$label]:-}"
         [ -z "$v" ] && continue
         if [ -z "$sc_best" ] || [ "$v" -lt "$sc_best" ]; then
             sc_best="$v"; sc_best_label="$label"
         fi
     done
-    uc="${best_min[keccak/microcode]:-}"
+    uc="${best_med[keccak/microcode]:-}"
     echo "$sc_best_label|$sc_best|$uc"
 }
 
 report_terminal() {
-    local label hl sc_best_label sc_best uc uc_best rcell bm
-    uc_best="${best_min[keccak/microcode]:-}"   # microcode's best min, for the ratio column
+    local label hl sc_best_label sc_best uc uc_best rcell bm cfg p10 p90
+    uc_best="${best_med[keccak/microcode]:-}"   # microcode's best median, for the ratio column
     echo
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  KECCAK MATRIX SCOREBOARD  (best cyc/perm over ${#ran_cfgs[@]} configs)"
+    echo "  KECCAK MATRIX SCOREBOARD  (best median cyc/perm over ${#ran_cfgs[@]} configs)"
     echo "═══════════════════════════════════════════════════════════════"
-    printf "  %-24s %8s %8s %10s   %s\n" "contender" "min" "median" "this/ucode" "best config (min)"
-    printf "  %-24s %8s %8s %10s   %s\n" "------------------------" "--------" "--------" "----------" "-----------------"
+    printf "  %-24s %8s %8s %8s %8s %10s   %s\n" "contender" "median" "min" "p10" "p90" "this/ucode" "best config"
+    printf "  %-24s %8s %8s %8s %8s %10s   %s\n" "------------------------" "--------" "--------" "--------" "--------" "----------" "-----------------"
     for label in "${CONTENDERS[@]}"; do
-        # this/ucode = this_contender_cyc / microcode_cyc  (>1 => microcode faster)
-        rcell="—"; bm="${best_min[$label]:-}"
+        # this/ucode = this_contender_median / microcode_median  (>1 => microcode faster)
+        rcell="—"; bm="${best_med[$label]:-}"; cfg="${best_med_cfg[$label]:-}"
         if [ -n "$uc_best" ] && [[ "$bm" =~ ^[0-9]+$ ]] && [ "$bm" -gt 0 ]; then
             rcell=$(awk -v u="$uc_best" -v b="$bm" 'BEGIN{printf "%.3fx", b/u}')
         fi
-        printf "  %-24s %8s %8s %10s   %s\n" "$label" \
-            "${best_min[$label]:-n/a}" "${best_med[$label]:-n/a}" "$rcell" "${best_cfg[$label]:-—}"
+        # p10/p90 taken at the best-median config, so the spread matches the headline number.
+        p10="${cell_p10[$cfg|$label]:-—}"; p90="${cell_p90[$cfg|$label]:-—}"
+        printf "  %-24s %8s %8s %8s %8s %10s   %s\n" "$label" \
+            "${best_med[$label]:-n/a}" "${best_min[$label]:-n/a}" "$p10" "$p90" "$rcell" "${cfg:-—}"
     done
 
     hl=$(compute_headline)
@@ -218,7 +225,7 @@ report_terminal() {
 # Markdown: a full (config × contender) matrix of mins + a best-per-contender
 # table + the headline. No git interaction (unlike the curve script).
 emit_results_md() {
-    local out="$1" cfg label i hl sc_best_label sc_best uc uc_best rcell bm
+    local out="$1" cfg label i hl sc_best_label sc_best uc uc_best rcell bm p10 p90
     {
         echo "# Keccak SUPERCOP-matrix benchmark"
         echo
@@ -227,35 +234,43 @@ emit_results_md() {
         echo "asm, 64-bit C, x86 SIMD, reference) + the"
         echo "head-to-head harness, run back-to-back in one process, keep the best per"
         echo "contender. cyc/perm (RDTSC at TSC rate; pin to base so ticks ≈ true cycles)."
+        echo "Headline statistic is the **median**; min and the p10–p90 spread are also reported."
         echo
         echo "Configs that ran: ${#ran_cfgs[@]} / ${#CONFIGS[@]}"
         echo
-        echo "## min cyc/perm per (config × contender)"
+        echo "Environment: base-pinned, turbo off. Delivered core freq ${DELIVERED_FREQ_MHZ:-n/a} MHz,"
+        echo "TSC (RDTSC) rate ${TSC_FREQ_MHZ:-n/a} MHz, correction f_core/f_TSC = ${CYCLE_CORRECTION:-n/a}"
+        echo "(aperf/mperf under load, verified before the sweep; ratios invariant to it, multiply"
+        echo "absolute cycle counts by it for true core cycles)."
+        echo
+        echo "## median cyc/perm per (config × contender)"
         echo
         printf "| config |"; for i in "${SHORT[@]}"; do printf " %s |" "$i"; done; echo
         printf "|---|";       for i in "${SHORT[@]}"; do printf -- "---|"; done; echo
         for cfg in "${ran_cfgs[@]}"; do
             printf "| %s |" "$cfg"
             for label in "${CONTENDERS[@]}"; do
-                printf " %s |" "${cell[$cfg|$label]:-—}"
+                printf " %s |" "${cell_med[$cfg|$label]:-—}"
             done
             echo
         done
         echo
         echo "## best per contender (what SUPERCOP's autotuner would pick)"
         echo
-        echo "\`this/microcode\` = this_contender_cyc / microcode_cyc; >1 means microcode is faster"
-        echo "(e.g. 1.071x = microcode is ~7% faster; 1.000x is microcode itself)."
+        echo "Best = lowest **median** across the sweep. \`this/microcode\` = this_contender_median /"
+        echo "microcode_median; >1 means microcode is faster (e.g. 1.07x = ~7% faster; 1.000x is"
+        echo "microcode itself). p10/p90 are taken at each contender's best-median config."
         echo
-        uc_best="${best_min[keccak/microcode]:-}"
-        echo "| contender | best min | best median | winning config | this/microcode |"
-        echo "|---|---|---|---|---|"
+        uc_best="${best_med[keccak/microcode]:-}"
+        echo "| contender | median | min | p10 | p90 | winning config | this/microcode |"
+        echo "|---|---|---|---|---|---|---|"
         for label in "${CONTENDERS[@]}"; do
-            rcell="—"; bm="${best_min[$label]:-}"
+            rcell="—"; bm="${best_med[$label]:-}"; cfg="${best_med_cfg[$label]:-}"
             if [ -n "$uc_best" ] && [[ "$bm" =~ ^[0-9]+$ ]] && [ "$bm" -gt 0 ]; then
                 rcell=$(awk -v u="$uc_best" -v b="$bm" 'BEGIN{printf "%.3fx", b/u}')
             fi
-            echo "| $label | ${best_min[$label]:-n/a} | ${best_med[$label]:-n/a} | ${best_cfg[$label]:-—} | $rcell |"
+            p10="${cell_p10[$cfg|$label]:-—}"; p90="${cell_p90[$cfg|$label]:-—}"
+            echo "| $label | ${best_med[$label]:-n/a} | ${best_min[$label]:-n/a} | $p10 | $p90 | ${cfg:-—} | $rcell |"
         done
         echo
         hl=$(compute_headline)
@@ -264,8 +279,8 @@ emit_results_md() {
         if [ -n "$uc" ] && [ -n "$sc_best_label" ]; then
             echo "## headline"
             echo
-            echo "- fastest SUPERCOP baseline: **$sc_best_label = $sc_best cyc/perm** (${best_cfg[$sc_best_label]})"
-            echo "- microcode (looped): **$uc cyc/perm** (${best_cfg[keccak/microcode]})"
+            echo "- fastest SUPERCOP baseline: **$sc_best_label = $sc_best cyc/perm** (median, ${best_med_cfg[$sc_best_label]})"
+            echo "- microcode (looped): **$uc cyc/perm** (median, ${best_med_cfg[keccak/microcode]})"
             awk -v u="$uc" -v s="$sc_best" 'BEGIN{
                 printf "- ratio microcode / fastest SUPERCOP: **%.3fx** (%s)\n",
                        u/s, (u<s ? "microcode WINS" : "microcode loses")

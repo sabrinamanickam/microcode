@@ -135,14 +135,19 @@ def gen_prologue(ops):
 
 def gen_body(ops):
     """theta + rho + pi + chi + iota(RC[counter]). State stays in REG[]."""
-    # theta-C -> buffer (Cscr = DSCR lanes 25..29). BALANCED XOR TREE (depth 3
-    # not 4): C is at the head of the round's dependency chain, so shortening
-    # its latency shortens every round. RSP is free here (2nd tree accumulator).
+    # theta-C -> buffer (Cscr = DSCR lanes 25..29). SERIAL reduction, depth 4.
+    # We previously used a balanced XOR tree (depth 3, RSP as a second
+    # accumulator) on the reasoning that C heads the round's dependency chain.
+    # The ablation (keccak_ablate.py / bench_ablation.c) MEASURED that choice and
+    # it was a pessimisation: the balanced form cost 1.2% (1915 vs 1893 cyc/perm,
+    # non-overlapping p10-p90) at identical triad and operation counts. The
+    # shorter chain was not the binding constraint, and occupying a second
+    # accumulator across each column constrained the packer. Serial it is.
     for x in range(5):
-        emit(ops,"XOR", "RAX", REG[x],    REG[x+5])    # a^b
-        emit(ops,"XOR", "RSP", REG[x+10], REG[x+15])   # c^d (parallel)
-        emit(ops,"XOR", "RAX", "RAX", "RSP")           # (a^b)^(c^d)
-        emit(ops,"XOR", "RAX", "RAX", REG[x+20])       # ^e   -> depth 3
+        emit(ops,"XOR", "RAX", REG[x], REG[x+5])
+        emit(ops,"XOR", "RAX", "RAX", REG[x+10])
+        emit(ops,"XOR", "RAX", "RAX", REG[x+15])
+        emit(ops,"XOR", "RAX", "RAX", REG[x+20])
         emit(ops,"ST",  "RAX", OFF(DSCR+x))
     # theta-D -> 5 REGISTERS (D_REG), reading C from buffer. RSP = rol temp.
     # D[x] = C[x-1] ^ rol(C[x+1],1).  No in-place hazard (C is in memory).
@@ -188,12 +193,19 @@ def gen_body(ops):
     emit(ops,"XOR",  REG[0], REG[0], "TMP13")
 
 RC_END_IDX = (RCTAB-BASE_LANE)*8 + 24*8         # byte-index just past RC[23]
+# Cursor encoding. Baseline: the counter lane holds the RC BYTE-INDEX, stepped by
+# 8, so iota needs no shift/add. An ablation may instead hold a round number,
+# stepped by 1 and compared against 24; these three globals capture that choice.
+COUNTER_INIT    = (RCTAB-BASE_LANE)*8
+COUNTER_STEP    = 8
+LOOP_THRESHOLD  = RC_END_IDX
+
 def gen_loopctrl(ops):
-    """idx += 8 ; store ; {XOR sets ZF, UJMPCC CONDNZ -> loop_top}. TMP14=idx."""
-    emit(ops,"ADDI", "TMP14", "TMP14", 8)
+    """cursor += step ; store ; {XOR sets ZF, UJMPCC CONDNZ -> loop_top}. TMP14=cursor."""
+    emit(ops,"ADDI", "TMP14", "TMP14", COUNTER_STEP)
     emit(ops,"ST",   "TMP14", OFF(COUNTER))
     # the XOR + UJMPCC must be the SAME triad -> emitted as a forced triad later.
-    emit(ops,"LOOPTEST", "TMP12", "TMP14", RC_END_IDX)  # XOR TMP12=idx^END ; UJMPCC CONDNZ -> loop_top
+    emit(ops,"LOOPTEST", "TMP12", "TMP14", LOOP_THRESHOLD)
 
 def gen_epilogue(ops):
     for i in range(25):
@@ -204,7 +216,7 @@ def gen_epilogue(ops):
 def simulate_perm(init_state):
     rf={"RSP":0}; buf=[0]*BUFLEN
     buf[0:25]=list(init_state)
-    buf[COUNTER]=(RCTAB-BASE_LANE)*8       # RC byte-index init (idx of RC[0])
+    buf[COUNTER]=COUNTER_INIT               # cursor init (see COUNTER_INIT)
     for r in range(24): buf[RCTAB+r]=RC[r]
     def at(off):
         assert -128<=off<=127, off
@@ -220,6 +232,7 @@ def simulate_perm(init_state):
             elif k=="XORI": rf[op[1]]=(rf[op[2]]^op[3])&MASK
             elif k=="ROL":  rf[op[1]]=rol(rf[op[2]],op[3])
             elif k=="NOTAND": rf[op[1]]=((~rf[op[2]])&rf[op[3]])&MASK
+            elif k=="AND":  rf[op[1]]=(rf[op[2]]&rf[op[3]])&MASK
             elif k=="MOV":  rf[op[1]]=rf[op[2]]&MASK
             elif k=="ADDI": rf[op[1]]=(rf[op[2]]+op[3])&MASK
             elif k=="SHLI": rf[op[1]]=(rf[op[2]]<<op[3])&MASK
@@ -237,7 +250,7 @@ def simulate_perm(init_state):
 #       see pack()); no load-to-use in a triad; LOOPTEST forced into its own triad) ----
 def is_mem(op): return op[0] in ("LD","ST","LDX","STX")
 def reads_of(op):
-    if op[0] in ("XOR","NOTAND"): return (op[2],op[3])
+    if op[0] in ("XOR","NOTAND","AND"): return (op[2],op[3])
     if op[0] in ("XORI","ROL","MOV","ADDI","SHLI"): return (op[2],)
     if op[0] in ("ST","STX"): return (op[1],) + ((op[2],) if op[0]=="STX" else ())
     if op[0]=="LDX": return (op[2],)
@@ -274,6 +287,7 @@ def op_to_c(op, loop_top=None):
     elif k=="XORI": return f"XOR_DSZ64_DRI({op[1]}, {op[2]}, {hex(op[3])})"
     elif k=="ROL":  return f"ROL_DSZ64_DRI({op[1]}, {op[2]}, {op[3]})"
     elif k=="NOTAND": return f"NOTAND_DSZ64_DRR({op[1]}, {op[2]}, {op[3]})"
+    elif k=="AND":  return f"AND_DSZ64_DRR({op[1]}, {op[2]}, {op[3]})"
     elif k=="MOV":  return f"ZEROEXT_DSZ64_DR({op[1]}, {op[2]})"
     elif k=="LDI_IDX": return f"ZEROEXT_DSZ32_DI({op[1]}, {op[2]})"
     elif k=="ADDI": return f"ADD_DSZ64_DRI({op[1]}, {op[2]}, {op[3]})"

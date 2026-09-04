@@ -115,6 +115,29 @@ check_cpu_frequency() {
 DELIVERED_FREQ_MHZ=""   # Bzy_MHz: core clock delivered under load
 TSC_FREQ_MHZ=""         # TSC_MHz: the actual rate RDTSC ticks at
 CYCLE_CORRECTION=""     # f_core / f_TSC : multiply RDTSC ticks by this for true cycles
+PRE_DELIVERED_FREQ_MHZ=""   # the same three, as measured BEFORE the sweep
+PRE_TSC_FREQ_MHZ=""
+PRE_CYCLE_CORRECTION=""
+
+# measure_freq — run a ~2 s busy load on the benchmark core and report the
+# delivered core clock and the actual RDTSC rate over it, as "Bzy_MHz TSC_MHz"
+# on stdout. Returns non-zero if turbostat is missing, cannot run, or its
+# output cannot be parsed. Factored out so the SAME measurement can be taken
+# before the sweep (check_effective_freq) and again after it
+# (recheck_effective_freq) — a mid-sweep thermal throttle is invisible to a
+# single up-front check.
+measure_freq() {
+    local out bzy tsc core="${BENCH_CORE:-0}"
+    command -v turbostat >/dev/null 2>&1 || return 1
+    out=$(sudo turbostat --quiet --show Core,CPU,Bzy_MHz,TSC_MHz \
+            -- taskset -c "$core" bash -c \
+               'e=$((SECONDS+2)); while [ $SECONDS -lt $e ]; do :; done' 2>&1) || return 1
+    # Rows are: Core CPU Bzy_MHz TSC_MHz. Per-core rows carry a numeric CPU;
+    # the package summary row carries '-'.
+    read -r bzy tsc < <(awk -v c="$core" '$2==c{print $3, $4; exit}' <<<"$out")
+    [[ -n "$bzy" && -n "$tsc" ]] && (( tsc > 0 )) || return 1
+    echo "$bzy $tsc"
+}
 
 # check_effective_freq <tsc_ghz> — measure the DELIVERED core frequency and the
 # actual TSC (RDTSC) rate under load with turbostat, which reads aperf/mperf and
@@ -139,21 +162,9 @@ check_effective_freq() {
         return 0
     fi
 
-    # Run a ~2 s busy load on core 0 and let turbostat measure Bzy_MHz (delivered
-    # core clock, from aperf/mperf) and TSC_MHz (the actual RDTSC rate) over it.
-    local out
-    if ! out=$(sudo turbostat --quiet --show Core,CPU,Bzy_MHz,TSC_MHz \
-                 -- taskset -c 0 bash -c 'e=$((SECONDS+2)); while [ $SECONDS -lt $e ]; do :; done' 2>&1); then
-        echo "NOTE: turbostat could not run (need root) — delivered-frequency check SKIPPED."
-        return 0
-    fi
-
-    # Parse CPU 0's row. Rows are: Core CPU Bzy_MHz TSC_MHz; the per-core rows
-    # carry a numeric CPU, the package summary row carries '-'.
     local bzy tsc
-    read -r bzy tsc < <(awk '$2=="0"{print $3, $4; exit}' <<<"$out")
-    if [[ -z "$bzy" || -z "$tsc" ]] || (( tsc <= 0 )); then
-        echo "NOTE: could not parse turbostat output — delivered-frequency check SKIPPED."
+    if ! read -r bzy tsc < <(measure_freq); then
+        echo "NOTE: turbostat unavailable/unparsable — delivered-frequency check SKIPPED."
         return 0
     fi
     DELIVERED_FREQ_MHZ="$bzy"; TSC_FREQ_MHZ="$tsc"
@@ -173,4 +184,60 @@ check_effective_freq() {
         exit 1
     fi
     echo "Delivered-frequency OK: core at base P-state, stable (|f_core/f_TSC - 1| <= 3%)."
+
+    # Remember the pre-sweep reading so recheck_effective_freq can compare.
+    PRE_DELIVERED_FREQ_MHZ="$bzy"; PRE_TSC_FREQ_MHZ="$tsc"
+    PRE_CYCLE_CORRECTION="$CYCLE_CORRECTION"
+}
+
+# ── globals set by recheck_effective_freq, read by the results-header writers ─
+POST_DELIVERED_FREQ_MHZ=""   # Bzy_MHz measured AFTER the sweep
+POST_TSC_FREQ_MHZ=""         # TSC_MHz measured AFTER the sweep
+FREQ_DRIFT_PCT=""            # 100 * (post_corr/pre_corr - 1)
+FREQ_DRIFT_STATUS="not checked"
+
+# recheck_effective_freq — re-measure the delivered core frequency AFTER the
+# sweep and compare with the pre-sweep reading.
+#
+# The up-front guard proves the machine was pinned when the sweep STARTED. It
+# says nothing about a thermal throttle part-way through a ~20-minute run on a
+# passively cooled part, which would silently inflate the tick counts of every
+# configuration measured after it. This closes that gap by bracketing the
+# sweep. It never aborts — the measurements are already taken by this point,
+# and discarding them helps nobody — but a drift beyond 1% is recorded in
+# FREQ_DRIFT_STATUS and propagated into RESULTS.md and PAPER_TABLES.md so the
+# artifact itself carries the warning.
+recheck_effective_freq() {
+    local bzy tsc corr
+    if ! read -r bzy tsc < <(measure_freq); then
+        FREQ_DRIFT_STATUS="not checked (turbostat unavailable)"
+        echo "NOTE: post-sweep delivered-frequency check SKIPPED (turbostat unavailable)."
+        return 0
+    fi
+    POST_DELIVERED_FREQ_MHZ="$bzy"; POST_TSC_FREQ_MHZ="$tsc"
+    corr=$(awk -v b="$bzy" -v t="$tsc" 'BEGIN{printf "%.5f", b/t}')
+
+    if [[ -z "${PRE_CYCLE_CORRECTION:-}" ]]; then
+        FREQ_DRIFT_STATUS="post-sweep only: f_core/f_TSC = $corr"
+        echo "Post-sweep delivered freq: ${bzy} MHz; TSC ${tsc} MHz; f_core/f_TSC = $corr"
+        return 0
+    fi
+
+    FREQ_DRIFT_PCT=$(awk -v a="$PRE_CYCLE_CORRECTION" -v b="$corr" \
+                         'BEGIN{printf "%+.3f", 100*(b/a - 1)}')
+    echo "Post-sweep delivered freq: ${bzy} MHz; TSC ${tsc} MHz; f_core/f_TSC = $corr"
+    echo "  pre-sweep f_core/f_TSC = $PRE_CYCLE_CORRECTION -> drift ${FREQ_DRIFT_PCT}%"
+
+    if awk -v d="$FREQ_DRIFT_PCT" 'BEGIN{if(d<0)d=-d; exit !(d>1.0)}'; then
+        FREQ_DRIFT_STATUS="DRIFTED ${FREQ_DRIFT_PCT}% (pre ${PRE_CYCLE_CORRECTION} -> post ${corr})"
+        echo ""
+        echo "WARNING: the core clock drifted ${FREQ_DRIFT_PCT}% relative to the TSC during the"
+        echo "         sweep — thermal throttling or a governor change. Configurations measured"
+        echo "         late in the sweep are NOT comparable with early ones. Let the machine"
+        echo "         cool, re-pin, and re-run before using these numbers in the paper."
+        echo ""
+    else
+        FREQ_DRIFT_STATUS="stable (${FREQ_DRIFT_PCT}% over the sweep)"
+        echo "Post-sweep check OK: core/TSC ratio stable to within 1% across the whole sweep."
+    fi
 }

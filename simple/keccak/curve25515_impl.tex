@@ -1,0 +1,475 @@
+% curve25515_impl.tex — replacement for \subsection{Implementation} of
+% \section{Case Study 2: Curve25519 in Microcode} (label sec:curve25519) in
+% gold489.tex. Drop in with \input{curve25515_impl} in place of the existing
+% subsection, or paste inline.
+%
+% Every triad, uop and slot-density figure below is taken from the installed
+% patch arrays in simple/curve25519/full_curve25519_inline2.c.
+%
+% NOTE: the original text cited \Cref{sec:ucode-layer}, which is not defined
+% anywhere in gold489.tex. This version states the intra-triad forwarding
+% property locally and cites \Cref{sec:cyclewalk}, which establishes the same
+% slot semantics for Keccak. When \section{Background and Programming Model}
+% (sec:background) is written, that claim probably belongs there, cited from
+% both case studies.
+
+\subsection{Implementation}
+
+\subsubsection{Register interface and operand lifetimes}
+\label{sec:c25519-interface}
+
+Neither patch performs a memory access.
+All operands, accumulators, carries, and results live in registers for the whole
+invocation, and the surrounding x86 wrapper is responsible for placing the inputs
+and retrieving the outputs.
+This division follows from the resource that binds each side.
+Patch RAM is scarce and native instruction slots are not, so we move every
+operation that does not require the microcode interface into the wrapper.
+\Cref{tab:c25519-regif} gives the resulting register interface.
+
+The wrapper also supplies two pre-zeroed accumulator seeds in \code{RAX} and
+\code{R8}, which removes two initialisation $\mu$ops from each patch.
+For multiplication the wrapper issues ten loads and two register clears.
+For squaring it issues five loads, four \code{LEA} instructions that form the
+doubled operands, two \code{IMUL} instructions that form the operands scaled by
+19, and the same two clears.
+
+\begin{table}[htbp]
+\centering
+\caption{Register interface of the two field-arithmetic patches.
+The first operand of multiplication occupies five registers that no
+$\mu$op overwrites, so all 25 partial products read them in place.
+The second operand is copied to \code{TMP10}--\code{TMP14} at patch entry, which
+frees its five architectural registers to receive output limbs as successive
+positions complete.
+The squaring patch receives the doubled and scaled operands from the wrapper and
+returns its result in a different register set, which \Cref{sec:c25519-integration}
+uses to explain where chaining is possible.}
+\label{tab:c25519-regif}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+Role & Registers & Lifetime \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{multiplication}} \\
+$a_0,\ldots,a_4$      & \code{RDI RSI R12 R11 R14} & read-only for the entire patch \\
+$b_0,\ldots,b_4$      & \code{R15 R13 R9 R10 RBX}  & copied to \code{TMP10}--\code{TMP14}, then reused as outputs \\
+$19b_1,\ldots,19b_4$  & \code{R13 R9 R10 RBX}      & formed in place at entry, consumed in decreasing index \\
+$h_0,\ldots,h_4$      & \code{R15 R13 R9 R10 RAX}  & written as each output position completes \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{squaring}} \\
+$a_0,\ldots,a_4$      & \code{RDI RSI R12 R11 R14} & \code{RDI} is overwritten by $h_0$ at the end of position zero \\
+$2a_0,\ldots,2a_3$    & \code{R15 R13 R9 R10}      & supplied by the wrapper; \code{R13} is regenerated inside the patch \\
+$19a_4$, $19a_3$      & \code{RBX RDX}             & supplied by the wrapper \\
+$h_0,\ldots,h_4$      & \code{RDI R9 R10 RBX RAX}  & written as each output position completes \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{shared internal state}} \\
+low accumulator       & \code{TMP0}   & holds the incoming carry, then the sum of the low product halves \\
+high accumulator      & \code{R8}     & sum of the high product halves \\
+carry accumulator     & \code{TMP9}   & count of carries out of the low accumulator \\
+materialised carry    & \code{TMP15}  & destination of \code{SETCC\_CONDB} \\
+product high half     & \code{RCX}    & second output of every multiply \\
+product staging       & \code{RDX}    & the operand each multiply is allowed to destroy \\
+limb extraction       & \code{TMP1 TMP2 TMP8} & shift results combined into the next carry \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The unusual feature of this interface is the treatment of the second operand,
+and it follows from the shape of the multiply $\mu$op.
+\code{MUL\_DSZ64\_DRR} has two destinations.
+It preserves its first source, writes the low half of the product over its
+\emph{second} source, and writes the high half to the named destination.
+Every product therefore destroys one of the operands that formed it.
+A schoolbook multiplication reads each limb of both operands five times, so no
+limb can be left in the register that a product will consume.
+
+We resolve this by separating an immortal copy of each operand from a mortal
+staging register.
+The first operand is immortal by construction, since it always occupies the
+preserved source position.
+The second operand is copied to \code{TMP10}--\code{TMP14} in the first triad of
+the patch, and thereafter each product is formed by copying the required limb into
+\code{RDX} and letting the multiply overwrite it.
+The three-triad prologue performs this copy and forms $19b_1,\ldots,19b_4$ in
+place in the architectural registers, using the same destructive low-half write
+that the schoolbook products use.
+Both forms of the second operand are consequently live at once, the unscaled form
+in temporary registers and the scaled form in architectural ones.
+
+\subsubsection{Register-resident multiplication}
+\label{sec:c25519-mul}
+
+The multiplication patch occupies 66 triads and contains 196 $\mu$ops, an average
+of 2.97 of the three available slots.
+It is straight-line code with no microsequencer control flow.
+This distinguishes it from the Keccak kernel of \Cref{sec:keccak}, where a loop
+was unavoidable because a full permutation cannot be represented in 128 triads.
+A field operation contains no repetition worth keeping resident, and its complete
+body fits, so we spend no triad on loop control and no $\mu$op on a loop variable.
+
+The patch computes the five output positions in sequence.
+Three triads form the prologue, twelve triads compute each output position, and
+three triads perform the final reduction.
+For position $k$ we accumulate the five products required by the recurrence of
+\Cref{sec:c25519-strategy}, extract the low 51 bits as limb $k$, and pass the
+remaining bits to position $k+1$.
+
+\paragraph{The product staircase.}
+The five twelve-triad blocks are the same schedule with different operands.
+This regularity is not incidental, and \Cref{tab:c25519-staircase} shows where it
+comes from.
+The first operand advances through $a_0,\ldots,a_4$ in the same order in every
+block, so its five registers are read in a fixed sequence.
+Only the second operand sequence moves, and it moves by exactly one position per
+block: it begins at $b_k$, descends through the unscaled limbs to $b_0$, and then
+continues into the scaled limbs from $19b_4$ downwards.
+Position four requires no scaled term, because $i+j=9$ has no solution with
+$i,j\leq4$, and position three requires only the single term $19a_4b_4$.
+
+\begin{table}[htbp]
+\centering
+\caption{Second-operand sequence for each output position of the multiplication
+patch. The first operand is always read as $a_0,a_1,a_2,a_3,a_4$ in that order,
+so each row lists only the register staged into \code{RDX} for the corresponding
+product. Unscaled limbs are read from the temporary copies and scaled limbs from
+the architectural registers. The rightmost column names the register that
+receives the completed output limb, which in every case is the architectural
+register whose scaled multiple was last required by the preceding row.}
+\label{tab:c25519-staircase}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}clllllc@{}}
+\toprule
+$k$ & $\times a_0$ & $\times a_1$ & $\times a_2$ & $\times a_3$ & $\times a_4$ & $h_k$ \\
+\midrule
+0 & $b_0$ & $19b_4$ & $19b_3$ & $19b_2$ & $19b_1$ & \code{R15} \\
+1 & $b_1$ & $b_0$    & $19b_4$ & $19b_3$ & $19b_2$ & \code{R13} \\
+2 & $b_2$ & $b_1$    & $b_0$    & $19b_4$ & $19b_3$ & \code{R9}  \\
+3 & $b_3$ & $b_2$    & $b_1$    & $b_0$    & $19b_4$ & \code{R10} \\
+4 & $b_4$ & $b_3$    & $b_2$    & $b_1$    & $b_0$    & \code{RAX} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The staircase determines where the output limbs are placed.
+The scaled multiple $19b_j$ is required for the last time in the block for
+position $4-j$, and the register holding it is dead from that point onward.
+We write the output limb of that block into precisely that register.
+Limb zero therefore lands in \code{R15}, which held $b_0$ and whose value is
+preserved in \code{TMP10}, and limbs one through three land in \code{R13},
+\code{R9} and \code{R10} as $19b_1$, $19b_2$ and $19b_3$ retire in turn.
+Only limb four requires a register that never held part of an operand, and it
+uses \code{RAX}, which the wrapper supplies as a zeroed seed and which is free once
+the low accumulator has been initialised.
+The patch thus completes a full multiplication without ever holding more than one
+copy of any operand limb and without a single spill.
+
+\paragraph{Three accumulators and materialised carries.}
+Each output position sums five 128-bit products.
+We represent the running sum in three registers rather than two.
+\code{TMP0} accumulates the low halves, \code{R8} accumulates the high halves, and
+\code{TMP9} counts the carries that leave \code{TMP0}.
+
+The third accumulator is what the microcode carry interface buys us.
+On Goldmont, each arithmetic $\mu$op records its carry with its destination
+register rather than in a single architectural flag, and
+\code{SETCC\_CONDB\_DR} converts that recorded carry into a zero or one value.
+We place the \code{SETCC} in the slot immediately after the addition that produces
+the carry, so the two occupy one triad and the materialisation costs no additional
+triad.
+The materialised value is then added to \code{TMP9} while the high-half chain
+proceeds in a different slot.
+A conventional \code{ADC} chain would instead serialise the two halves, because
+\code{ADC} reads the architectural carry flag and only one carry can be pending in
+that flag at a time.
+Goldmont implements neither ADX nor a second carry flag, so native code for this
+representation has no equivalent of the third accumulator.
+Keeping the carry count separate costs one triad per output position and removes a
+serialisation point from the dependency path of all five.
+
+Two properties of the microcode interface constrain how this chain is written.
+\code{SETCC\_CONDB\_DR} writes a correct value only when its destination is a
+temporary register, so all three accumulators and the materialised carry are
+temporary registers and the chain never touches architectural state.
+The recorded carry also persists only until the next arithmetic operation writes
+the same destination, which fixes the position of the \code{SETCC} relative to its
+addition and is the reason the two are packed together rather than scheduled
+apart.
+
+\begin{lstlisting}[caption={The opening five triads of an output position, taken
+from position one. Slot~2 of the first triad forms the incoming carry, slot~0 of
+each even triad stages the next second-operand limb into \code{RDX}, and each
+addition into \code{TMP0} is immediately followed by the \code{SETCC} that
+materialises its carry. The high accumulator and the carry accumulator are
+initialised in the third triad, after which both chains advance in parallel with
+the multiplies.},label={lst:c25519-mulblock}]
+{ ZEROEXT_DSZ64_DR(RDX, TMP11), MUL_DSZ64_DRR(RCX, RDI, RDX),
+  OR_DSZ64_DRR(TMP0, TMP8, TMP1), NOP_SEQWORD },
+{ ADD_DSZ64_DRR(TMP0, TMP0, RDX), SETCC_CONDB_DR(TMP15, TMP0),
+  ZEROEXT_DSZ64_DR(RDX, TMP10), NOP_SEQWORD },
+{ ZEROEXT_DSZ64_DR(R8, RCX), MUL_DSZ64_DRR(RCX, RSI, RDX),
+  ZEROEXT_DSZ64_DR(TMP9, TMP15), NOP_SEQWORD },
+{ ADD_DSZ64_DRR(TMP0, TMP0, RDX), SETCC_CONDB_DR(TMP15, TMP0),
+  ZEROEXT_DSZ64_DR(RDX, RBX), NOP_SEQWORD },
+{ ADD_DSZ64_DRR(R8, R8, RCX), MUL_DSZ64_DRR(RCX, R12, RDX),
+  ADD_DSZ64_DRR(TMP9, TMP9, TMP15), NOP_SEQWORD },
+\end{lstlisting}
+
+The three accumulators cannot overflow.
+Each unscaled limb is below $2^{51}$ and each scaled limb is below $19\cdot2^{51}$,
+so every product is below $19\cdot2^{102}$ and its high half is below $2^{43}$.
+Five high halves and at most five materialised carries therefore leave \code{R8}
+below $2^{46}$.
+Two representations of the running sum are consequently never required, and the
+combined value $s_k=\code{R8}\cdot2^{64}+\code{TMP0}$ is well defined at the end of
+each position.
+
+\paragraph{Limb extraction without a mask immediate.}
+At the end of a position we must split $s_k$ into a 51-bit output limb and a carry.
+Immediate operands in this encoding are limited to 16 bits, so the constant
+$2^{51}-1$ cannot appear in a $\mu$op and the mask cannot be applied with a single
+\code{AND}.
+We use two immediate shifts instead.
+Shifting \code{TMP0} left by 13 and back right by 13 clears the upper 13 bits and
+yields the output limb.
+The same 13 bits form the low part of the carry, so we compute
+$\code{TMP8}=\code{TMP0}\gg51$ and $\code{TMP1}=\code{R8}\ll13$ and combine them
+with a single \code{OR} at the top of the following position, which is the
+\code{OR} visible in the first triad of \Cref{lst:c25519-mulblock}.
+This is exact: \code{R8} is below $2^{46}$, so $\code{R8}\ll13$ is below $2^{59}$
+and no bit of the carry is lost from the 64-bit word.
+
+These five extraction $\mu$ops do not occupy triads of their own.
+They share the last three triads of the position with the final additions that
+drain the high and carry accumulators, as \Cref{lst:c25519-extract} shows.
+The result is that the boundary between two output positions costs no triad, in the
+same way that the step boundaries of the Keccak round body merge in
+\Cref{sec:cyclewalk}.
+
+\begin{lstlisting}[caption={The closing three triads of an output position. The
+extraction shifts are interleaved with the additions that drain the high and carry
+accumulators, and the output limb is written in slot~1 of the last triad. Slot~2 of
+that triad reads the value that slot~0 has just written to \code{R8}, which relies
+on the sequential slot semantics of a triad.},label={lst:c25519-extract}]
+{ ADD_DSZ64_DRR(TMP0, TMP0, RDX), SETCC_CONDB_DR(TMP15, TMP0),
+  SHR_DSZ64_DRI(TMP8, TMP0, 51), NOP_SEQWORD },
+{ ADD_DSZ64_DRR(R8, R8, RCX), ADD_DSZ64_DRR(TMP9, TMP9, TMP15),
+  SHL_DSZ64_DRI(TMP2, TMP0, 13), NOP_SEQWORD },
+{ ADD_DSZ64_DRR(R8, R8, TMP9), SHR_DSZ64_DRI(R13, TMP2, 13),
+  SHL_DSZ64_DRI(TMP1, R8, 13), NOP_SEQWORD },
+\end{lstlisting}
+
+The three closing triads of the patch fold the carry leaving position four.
+We multiply it by 19, add the product to limb zero, and propagate once into limb
+one.
+The multiply and the addition occupy adjacent slots of one triad, and the addition
+reads the product that the preceding slot has just written.
+Every output limb is then below $2^{51}$, except that limb one may equal $2^{51}$,
+which leaves the 13 bits of headroom that the native additions and biased
+subtractions of \Cref{sec:c25519-strategy} require.
+This is also the bound discipline of the \texttt{amd64-51} assembly, and
+\Cref{sec:c25519-verification} describes the test that holds us to it.
+
+\subsubsection{A dedicated squaring schedule}
+\label{sec:c25519-square}
+
+Four of the nine patched operations in a ladder step are squarings, and the
+inversion chain is 254 squarings and 11 multiplications.
+We therefore implement squaring as a separate kernel rather than invoking
+multiplication with equal operands.
+Exploiting the symmetry $a_ia_j=a_ja_i$ reduces the 25 partial products to 15
+distinct ones, and the resulting patch occupies 42 triads and 123 $\mu$ops at 2.93
+slots per triad, against 66 triads for multiplication.
+\Cref{tab:c25519-sqproducts} lists the products of each output position.
+
+\begin{table}[htbp]
+\centering
+\caption{Products of the squaring patch. Each output position sums three products
+instead of five, and every off-diagonal term is formed from an operand that the
+wrapper has already doubled or scaled by 19. The patch itself contains no doubling
+of a product and no separate reduction pass.}
+\label{tab:c25519-sqproducts}
+\footnotesize
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}cl@{}}
+\toprule
+$k$ & products summed into $h_k$ \\
+\midrule
+0 & $a_0\!\cdot\!a_0$, \quad $19a_4\!\cdot\!2a_1$, \quad $19a_3\!\cdot\!2a_2$ \\
+1 & $2a_0\!\cdot\!a_1$, \quad $a_3\!\cdot\!19a_3$, \quad $19a_4\!\cdot\!2a_2$ \\
+2 & $2a_0\!\cdot\!a_2$, \quad $a_1\!\cdot\!a_1$, \quad $19a_4\!\cdot\!2a_3$ \\
+3 & $2a_0\!\cdot\!a_3$, \quad $2a_1\!\cdot\!a_2$, \quad $a_4\!\cdot\!19a_4$ \\
+4 & $2a_0\!\cdot\!a_4$, \quad $2a_1\!\cdot\!a_3$, \quad $a_2\!\cdot\!a_2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We form the doubled and scaled operands in the wrapper rather than in the patch.
+Four \code{LEA} instructions and two \code{IMUL} instructions produce
+$2a_0,\ldots,2a_3$, $19a_3$ and $19a_4$ in architectural registers before the
+patch is entered.
+Computing them inside the patch would require six $\mu$ops and therefore two
+further triads, and the combined patch budget of \Cref{sec:c25519-hooks} is the
+binding constraint on this design, whereas the six native instructions are not.
+
+The squaring patch reuses the accumulator organisation of
+\Cref{sec:c25519-mul} unchanged, including the three accumulators, the
+\code{SETCC} carry materialisation, the shift pair that extracts each limb, and
+the final fold through 19.
+Its register discipline is more aggressive, because 15 products need eight distinct
+operand forms of five limbs and there are not enough registers to hold them all.
+\code{RDI} holds $a_0$ on entry and receives $h_0$ at the end of position zero, at
+which point $2a_0$ in \code{R15} is the only surviving form of that limb.
+\code{R13} arrives holding $2a_1$, is overwritten with $a_1$ once the term
+$19a_4\cdot2a_1$ has been formed, and is regenerated as $2a_1$ by a single
+addition when position three requires it.
+Regenerating a doubled operand from its immortal copy costs one $\mu$op, whereas
+reserving a register for it would cost one of the five that receive output limbs.
+Each of these rewrites occurs in a slot of the same triad that last reads the old
+value, which relies on the write-after-read semantics of a triad and is the same
+packing property that \Cref{sec:cyclewalk} uses for the $\pi$ cycle walk.
+
+\subsubsection{Two co-resident patches and hook selection}
+\label{sec:c25519-hooks}
+
+Together the two kernels occupy $66+42=108$ triads and 319 $\mu$ops, and they
+therefore fit simultaneously in the 128-triad patch RAM.
+We place multiplication at \uaddr{7c00} and squaring immediately after it.
+Each triad occupies four address units, so the squaring entry point is
+$\uaddr{7c00}+66\cdot4=\uaddr{7d08}$ and the image ends at \uaddr{7db0}.
+We compute the second entry point from the length of the first rather than writing
+it as a constant, so that a change to the multiplication schedule cannot silently
+overlap the squaring kernel.
+Both addresses are even, as the match mechanism requires.
+
+We bind multiplication to a repurposed \code{VMWRITE} path at \uaddr{0cd8} and
+squaring to a repurposed \code{VMREAD} path at \uaddr{0618}.
+Two properties make these instructions suitable triggers.
+Both have a register-to-register form, so the triggering instruction itself
+neither reads nor writes memory and requires no operand set-up that would disturb
+the register interface.
+Both are also unused by the surrounding program, so no other code path can reach a
+patched entry point.
+For squaring we emit the two opcode bytes and the ModRM byte directly, so that the
+instruction presented to the decoder is exactly the form the match register
+targets.
+
+Using two hooks rather than one is what makes the dedicated squaring schedule
+usable.
+A single hook would require rewriting a match register between a multiplication and
+a squaring, and the ladder alternates between them within every step.
+With both hooks installed once at start-up, each of the 2561 invocations of a
+scalar multiplication reaches its kernel directly.
+The saturated control of \Cref{sec:c25519-challenge} illustrates the alternative:
+its multiplier alone occupies 75 triads, leaving no room for a co-resident squaring
+kernel, so it must compute every square as a multiplication with equal operands.
+
+\subsubsection{Register chaining across field operations}
+\label{sec:c25519-integration}
+
+A conventional C interface reloads the input limbs before every field operation and
+stores the output limbs immediately afterwards.
+We retain the stores, because later consumers read the value from memory, but we
+avoid the reload whenever the next operation consumes the value just produced.
+We place one complete ladder step in a single inline-assembly block, use \code{RBP}
+as the base of a fixed-offset structure holding all fifteen field elements of the
+step, and address every operand as a constant displacement from it.
+Additions and subtractions are then written so that their five results are left in
+\code{RDI}, \code{RSI}, \code{R12}, \code{R11} and \code{R14}, which is exactly the
+first-operand register set of both patches.
+
+The interface of \Cref{tab:c25519-regif} determines where this is possible.
+An addition or subtraction is free to choose its output registers, so it can always
+be chained into a patched operation.
+The output set of squaring shares only \code{RDI} with the first-operand set, so two
+squarings can be chained at a cost of four register renames.
+The output set of multiplication shares no register with the first-operand set, so
+two multiplications cannot be chained and the second reloads from memory.
+\Cref{tab:c25519-chains} lists the seven producer--consumer pairs in a ladder step
+where the reload is removed.
+
+\begin{table}[htbp]
+\centering
+\caption{Producer--consumer pairs in one ladder step for which the consumer reads
+its first operand from registers rather than memory. Each pair removes five loads.
+The producer is a native addition or subtraction in every case, since the output
+register set of a patched multiplication does not match its own first-operand set.}
+\label{tab:c25519-chains}
+\footnotesize
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Producer & Consumer & Result \\
+\midrule
+$A=x_2+z_2$          & squaring          & $AA$      \\
+$B=x_2-z_2$          & squaring          & $BB$      \\
+$D=x_3-z_3$          & multiplication by $A$ & $DA$  \\
+$C=x_3+z_3$          & multiplication by $B$ & $CB$  \\
+$DA+CB$              & squaring          & new $x_3$ \\
+$DA-CB$              & squaring          & $(DA-CB)^2$ \\
+$AA+121665E$         & multiplication by $E$ & new $z_2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Obtaining the fourth pair requires one change to the order of the step.
+The natural order computes $C$, then $D$, then $DA$, then $CB$, which chains only
+$D$ into $DA$.
+We compute $D$ and $DA$ first and then $C$ and $CB$, which chains both.
+The two orders are equivalent because $C$ and $D$ depend only on $x_3$ and $z_3$ and
+feed different multiplications.
+
+The inversion contains far longer chains of a single operation.
+We evaluate $z^{p-2}$ with a fixed addition chain whose runs of consecutive
+squarings have lengths 1, 2, 1, 5, 10, 20, 10, 50, 100, 50 and 5, separated by 11
+multiplications.
+Within a run we rename the four output registers that differ from the input set and
+invoke the patch again, so every intermediate of the run stays in registers.
+Only the first squaring of a run loads a field element and only the last stores one,
+which removes 486 of the 508 field-element transfers that the same chain would perform
+through a per-operation interface.
+We emit the whole inversion as one assembly block, because the register state must
+survive from the beginning of a run to its end and a function boundary would not
+permit that.
+
+\subsubsection{Patch layout and verification}
+\label{sec:c25519-verification}
+
+We validate the installed patches rather than a model of them.
+The wrappers declare every register that a patch clobbers, and each wrapper keeps
+its state or output pointer in a register that the patch leaves intact, so that a
+missing clobber declaration would be observed as a wrong result rather than as a
+silent miscompilation.
+
+We test the complete X25519 implementation rather than the two patched operations
+in isolation.
+The tests comprise the two standalone vectors of RFC~7748, the single-iteration
+vector, and the 1000-iteration chain, and they exercise scalar clamping, all 255
+ladder steps, the inversion, the final reduction and the encoding.
+We run the identical tests for the hand-written C, fiat-crypto, CryptOpt,
+\texttt{amd64-51} and \texttt{amd64-64} contenders of \Cref{sec:c25519-perf}, and we
+compare the microcode output against each native backend after the chain has
+completed.
+
+The 1000-iteration chain also serves a second purpose.
+It is our gate on the limb bound discipline described at the end of
+\Cref{sec:c25519-mul}.
+Each iteration feeds the encoded output of the previous one back as the next scalar
+and point, so an output limb that exceeded its permitted range would propagate into
+the following scalar multiplication and diverge from the reference within a few
+iterations rather than producing a result that happens to agree on one input.
+The same chain gates the substitution of the \texttt{amd64-51} assembly field
+operations into our ladder, which is only sound if the two implementations agree on
+how much headroom a returned limb may consume.
+
+Neither patch contains a conditional operation or an indexed memory access.
+Every operand is a register named in the patch image, every shift amount is an
+immediate fixed at installation time, and the schedule of each output position is
+identical regardless of operand values.
+The surrounding ladder performs its conditional swap arithmetically and iterates a
+fixed 255 times.
+No data-dependent branch or data-dependent address therefore arises, and as in
+\Cref{sec:keccak} we assume that the underlying $\mu$ops have data-independent
+latency.

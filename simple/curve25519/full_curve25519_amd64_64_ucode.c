@@ -287,7 +287,7 @@ static inline uint64_t rdtsc_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define BENCH_REPS 100
+#define BENCH_REPS 1000  /* matches the main harness; was 100 */
 
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;

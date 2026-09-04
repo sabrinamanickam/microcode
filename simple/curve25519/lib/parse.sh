@@ -32,3 +32,43 @@ record_result() {
         best_med_cfg[$label]="$cfg"
     fi
 }
+
+# ── repeat support (n>1 sweeps of each configuration) ─────────────────────
+#
+# A single pass over the grid measures each (config, contender) pair once, so
+# nothing in the output distinguishes a real difference from one process's bad
+# luck. RUNS_PER_CONFIG re-runs each binary within the same configuration and
+# reduces the runs to one number, which also yields a run-to-run reproducibility
+# figure for the methodology section.
+#
+#   cell_runs["cfg|label"]   -> space-separated medians, one per run
+#   REPRO_WORST_PCT          -> largest (max-min)/min spread seen, in percent
+#   REPRO_WORST_WHERE        -> the pair that produced it
+
+REPRO_WORST_PCT="0.000"
+REPRO_WORST_WHERE="—"
+
+# median_of <v1> [v2 ...] — median of the given integers on stdout, using the
+# same convention as bench_stats() in the C harness (upper median for even n).
+median_of() {
+    printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{ if(NR) print a[int(NR/2)+1] }'
+}
+
+# min_of <v1> [v2 ...] — smallest of the given integers on stdout.
+min_of() { printf '%s\n' "$@" | sort -n | head -1; }
+
+# note_repro <cfg> <label> <v1> [v2 ...] — record the run-to-run spread for one
+# pair and keep the worst seen across the whole sweep.
+note_repro() {
+    local cfg="$1" label="$2"; shift 2
+    (( $# > 1 )) || return 0
+    cell_runs["$cfg|$label"]="$*"
+    local lo hi pct
+    lo=$(min_of "$@"); hi=$(printf '%s\n' "$@" | sort -n | tail -1)
+    [[ "$lo" -gt 0 ]] || return 0
+    pct=$(awk -v a="$lo" -v b="$hi" 'BEGIN{printf "%.3f", 100*(b-a)/a}')
+    if awk -v p="$pct" -v w="$REPRO_WORST_PCT" 'BEGIN{exit !(p>w)}'; then
+        REPRO_WORST_PCT="$pct"
+        REPRO_WORST_WHERE="$label @ $cfg"
+    fi
+}
