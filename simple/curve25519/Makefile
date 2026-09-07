@@ -25,7 +25,7 @@ all: $(PROG)_static
 # full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
 # contender; full_curve25519 is kept on disk but no longer benched) and needs
 # the identical flags + external objects.
-ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops,$(PROG)))
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64,$(PROG)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
 
@@ -355,6 +355,27 @@ EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
               $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# bench_table: the 5x51 controlled block + the end-to-end table. #includes
+# inline2 as a library (INLINE2_CONTENDERS_ONLY), so it needs inline2's whole
+# object set. The 4x64 block lives in bench_table_4x64 (separate patch RAM).
+ifeq ($(PROG),bench_table)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# bench_table_4x64: the 4x64 saturated block of the controlled table. Hosts the
+# amd64-64/ucode hybrid (AMD64U), the amd64-64/asm-Clad arm (AMD64A) and stock
+# amd64-64 (AMD64_OBJS, cross-process anchor) in ONE process. Separate binary
+# from bench_table because the 4x64 patch (75 triads @U7c00) cannot coexist
+# with the 5x51 pair (108 triads, also @U7c00) under the 128-triad cap.
+ifeq ($(PROG),bench_table_4x64)
+EXTRA_OBJS := $(AMD64U_OBJS) $(AMD64A_OBJS) $(AMD64_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 

@@ -287,6 +287,12 @@ static inline uint64_t rdtsc_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 
+/* A64U_LIB: include this file purely as a library — the 4x64 patch installer,
+ * the microcode field ops, and the hex/rdtsc/test helpers — with the
+ * standalone main() and its bench constants stripped. Mirrors INLINE2_LIB in
+ * full_curve25519_inline2.c. Used by bench_table_4x64.c. */
+#if !defined(A64U_LIB)
+
 #define BENCH_REPS 1000  /* matches the main harness; was 100 */
 
 static int cmp_u64(const void *a, const void *b) {
@@ -339,3 +345,5 @@ int main(void) {
     do_fix_IN_patch();
     return 0;
 }
+
+#endif /* !A64U_LIB */
