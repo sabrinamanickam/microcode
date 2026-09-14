@@ -25,7 +25,7 @@ all: $(PROG)_static
 # full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
 # contender; full_curve25519 is kept on disk but no longer benched) and needs
 # the identical flags + external objects.
-ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64 bench_kernel inline2_profile test_new_contenders probe_issue probe_sched test_sq_fire test_sq_paths test_invert_bisect test_sq_why probe_sq_lat probe_trigger probe_wrapper probe_oplat probe_ldorder,$(PROG)))
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64 bench_kernel inline2_profile test_sq_soak test_new_contenders probe_issue probe_sched test_sq_fire test_sq_paths test_invert_bisect test_sq_why probe_sq_lat probe_trigger probe_wrapper probe_oplat probe_ldorder,$(PROG)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
 
@@ -450,7 +450,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),test_sq_fire)
+ifneq (,$(filter test_sq_fire test_sq_soak,$(PROG)))
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -548,8 +548,14 @@ endif
 # Build $(PROG)_static from $(PROG).c (+ any extra objs/libs)
 # The matrix builds: full_curve25519, full_curve25519_inline2,
 # full_curve25519_amd64_64_ucode (see lib/build_run.sh).
+# EXTRA_CPPFLAGS is how the parked patches are selected, e.g.
+#   make PROG=test_sq_soak EXTRA_CPPFLAGS="-DSQ_MASK_R8 -DENABLE_SQ_5ACC"
+# It was documented in full_curve25519_inline2.c and bench_kernel.c but never
+# referenced here, so every such build SILENTLY produced the shipped serial
+# fe_sq instead -- a build that looks like it tested the parked patch and did
+# not. Keep it in the recipe.
 $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $< $(EXTRA_OBJS) $(LIBS) $(EXTRA_LIBS) -o $@
+	$(CC) $(LDFLAGS) $(CFLAGS) $(EXTRA_CPPFLAGS) $< $(EXTRA_OBJS) $(LIBS) $(EXTRA_LIBS) -o $@
 
 # Convenience targets
 clean:
