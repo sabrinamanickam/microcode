@@ -46,9 +46,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 /* ---- workload parameters ---------------------------------------------- */
 #define T      40          /* total carry steps (== triad count of the body) */

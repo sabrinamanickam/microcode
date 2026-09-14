@@ -12,9 +12,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 int main(void) {
     assign_to_core(0);

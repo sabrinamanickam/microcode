@@ -1,0 +1,421 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Curve25519 Cycle Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+:root{
+  --ground:#F6F7FA; --panel:#FFFFFF; --ink:#15171C; --body:#2C313C;
+  --muted:#5D6575; --rule:#DCE0E9; --rule-soft:#E9ECF2;
+  --ours:#2E4C9A; --ours-soft:#DDE3F3;
+  --rival:#136F66; --rival-soft:#D6E9E6;
+  --tax:#9C5A2B; --tax-soft:#F0E1D3;
+  --warn:#8C3247; --warn-soft:#F5DEE3;
+  --shadow:0 1px 2px rgba(21,23,28,.05),0 8px 24px -12px rgba(21,23,28,.16);
+  --seg-fg:#FFFFFF;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#131519; --panel:#1A1D23; --ink:#EDEFF4; --body:#C6CBD6;
+    --muted:#8E97A8; --rule:#2C313A; --rule-soft:#22262D;
+    --ours:#7D9BE8; --ours-soft:#232C45;
+    --rival:#4FBCAE; --rival-soft:#16302D;
+    --tax:#D79A63; --tax-soft:#332418;
+    --warn:#E07C93; --warn-soft:#342026;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+    --seg-fg:#12141A;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#131519; --panel:#1A1D23; --ink:#EDEFF4; --body:#C6CBD6;
+  --muted:#8E97A8; --rule:#2C313A; --rule-soft:#22262D;
+  --ours:#7D9BE8; --ours-soft:#232C45;
+  --rival:#4FBCAE; --rival-soft:#16302D;
+  --tax:#D79A63; --tax-soft:#332418;
+  --warn:#E07C93; --warn-soft:#342026;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6);
+  --seg-fg:#12141A;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--body);
+  font-family:"IBM Plex Serif",Georgia,serif; font-size:16.5px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:920px; margin:0 auto; padding-inline:20px; padding-block:0 72px}
+h1,h2,h3,.lab,th,.tag,.num{font-family:"IBM Plex Sans",system-ui,sans-serif}
+.mono,td.n,th.n,.num,code{font-family:"IBM Plex Mono",ui-monospace,monospace; font-variant-numeric:tabular-nums}
+
+/* ---------- masthead ---------- */
+header{padding-block:56px 40px; border-bottom:2px solid var(--ink)}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 18px
+}
+h1{
+  font-size:clamp(30px,5.4vw,46px); line-height:1.08; margin:0 0 18px;
+  color:var(--ink); font-weight:600; letter-spacing:-.02em; text-wrap:balance;
+}
+.standfirst{font-size:18.5px; line-height:1.55; margin:0; max-width:62ch; color:var(--body)}
+.standfirst strong{color:var(--ink); font-weight:600}
+
+/* ---------- headline trio ---------- */
+.trio{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--rule); margin-block:0 0; border-bottom:1px solid var(--rule)}
+.trio>div{background:var(--ground); padding:26px 20px 24px}
+.trio .k{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 10px}
+.trio .v{font-family:"IBM Plex Mono",monospace; font-size:30px; font-weight:600; color:var(--ink); line-height:1; margin:0 0 8px; font-variant-numeric:tabular-nums}
+.trio .v.win{color:var(--rival)} .trio .v.ours{color:var(--ours)}
+.trio .d{font-size:14px; line-height:1.45; color:var(--muted); margin:0}
+@media(max-width:640px){.trio{grid-template-columns:1fr}}
+
+/* ---------- sections ---------- */
+section{padding-block:44px 0}
+.lab{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--ours); margin:0 0 10px; font-weight:500
+}
+h2{font-size:26px; line-height:1.2; margin:0 0 14px; color:var(--ink); font-weight:600; letter-spacing:-.01em; text-wrap:balance}
+h3{font-size:17px; margin:30px 0 10px; color:var(--ink); font-weight:600}
+p{margin:0 0 15px; max-width:68ch}
+.dim{color:var(--muted)}
+strong{color:var(--ink); font-weight:600}
+em{font-style:italic}
+code{font-size:.88em; background:var(--rule-soft); padding:1px 5px; border-radius:3px; color:var(--ink)}
+
+/* ---------- tables ---------- */
+.scroll{overflow-x:auto; margin:20px 0 8px; -webkit-overflow-scrolling:touch}
+table{border-collapse:collapse; width:100%; font-size:14.5px; min-width:460px}
+th{
+  font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
+  font-weight:600; text-align:left; padding:0 14px 9px 0; border-bottom:1px solid var(--rule);
+  white-space:nowrap;
+}
+th.n,td.n{text-align:right; padding-right:0; padding-left:16px}
+td{padding:9px 14px 9px 0; border-bottom:1px solid var(--rule-soft); color:var(--body)}
+tr.me td{color:var(--ink); font-weight:600}
+tr.me td:first-child{box-shadow:inset 3px 0 0 var(--ours); padding-left:11px}
+tr.rival td:first-child{box-shadow:inset 3px 0 0 var(--rival); padding-left:11px}
+tr.tot td{border-top:1.5px solid var(--rule); border-bottom:none; color:var(--ink); font-weight:600}
+caption{caption-side:bottom; text-align:left; font-size:13px; color:var(--muted); padding-top:12px; line-height:1.5}
+.pos{color:var(--tax)} .neg{color:var(--rival)}
+
+/* ---------- the chart ---------- */
+.chart{background:var(--panel); border:1px solid var(--rule); border-radius:4px; padding:26px 24px 18px; margin:24px 0 10px; box-shadow:var(--shadow)}
+.chart-hd{display:flex; justify-content:space-between; align-items:baseline; gap:16px; flex-wrap:wrap; margin-bottom:22px}
+.chart-hd h3{margin:0; font-size:15px}
+.legend{display:flex; gap:16px; flex-wrap:wrap; font-size:12px; color:var(--muted); font-family:"IBM Plex Sans",sans-serif}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.sw{display:inline-block; width:11px; height:11px; border-radius:2px; flex:none}
+.sw.f{background:var(--tax)} .sw.a{background:var(--ours)} .sw.ar{background:var(--rival)}
+.rows{display:flex; flex-direction:column; gap:13px}
+.row{display:grid; grid-template-columns:112px 1fr; gap:12px; align-items:center}
+.row .rl{font-family:"IBM Plex Sans",sans-serif; font-size:12.5px; color:var(--body); line-height:1.25; text-align:right}
+.row .rl b{display:block; color:var(--ink); font-weight:600}
+.bar{display:flex; height:30px; align-items:stretch; position:relative}
+.seg{display:flex; align-items:center; justify-content:flex-end; padding-right:7px; font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:600; color:var(--seg-fg); min-width:0; overflow:hidden}
+.seg.floor{background:var(--tax)}
+.seg.ar-o{background:var(--ours)}
+.seg.ar-r{background:var(--rival)}
+.bar .cap{align-self:center; padding-left:10px; font-family:"IBM Plex Mono",monospace; font-size:12.5px; color:var(--ink); font-weight:600; white-space:nowrap}
+.axis{display:grid; grid-template-columns:112px 1fr; gap:12px; margin-top:14px; padding-top:9px; border-top:1px solid var(--rule-soft)}
+.ticks{display:flex; justify-content:space-between; font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--muted)}
+@media(max-width:560px){
+  .row,.axis{grid-template-columns:1fr; gap:5px}
+  .row .rl{text-align:left}
+  .axis{padding-left:0}
+}
+
+/* ---------- callouts ---------- */
+.note{
+  border-left:3px solid var(--warn); background:var(--warn-soft);
+  padding:16px 18px; margin:22px 0; border-radius:0 3px 3px 0;
+}
+.note p{margin:0; max-width:none; font-size:15px}
+.note .tag{
+  display:block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--warn); margin-bottom:7px; font-weight:600
+}
+.key{
+  border:1px solid var(--rule); border-left:3px solid var(--ours); background:var(--panel);
+  padding:18px 20px; margin:22px 0; border-radius:0 3px 3px 0; box-shadow:var(--shadow);
+}
+.key p{margin:0; max-width:none}
+
+/* ---------- guidance ---------- */
+.guide{display:flex; flex-direction:column; gap:1px; background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; margin:22px 0}
+.g{background:var(--panel); padding:17px 20px}
+.g .gh{display:flex; align-items:baseline; gap:10px; margin-bottom:6px; flex-wrap:wrap}
+.gt{font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.1em; text-transform:uppercase; font-weight:600; padding:2px 7px; border-radius:2px; flex:none}
+.gt.say{color:var(--rival); background:var(--rival-soft)}
+.gt.dont{color:var(--warn); background:var(--warn-soft)}
+.gt.fix{color:var(--tax); background:var(--tax-soft)}
+.g h4{margin:0; font-family:"IBM Plex Sans",sans-serif; font-size:15.5px; color:var(--ink); font-weight:600; line-height:1.35}
+.g p{margin:0; font-size:14.5px; color:var(--muted); max-width:none}
+.g p em{color:var(--body)}
+
+footer{margin-top:52px; padding-top:22px; border-top:1px solid var(--rule); font-size:13px; color:var(--muted)}
+footer p{max-width:none; margin:0 0 8px}
+footer b{color:var(--body); font-weight:600}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Goldmont N3350 · pinned 1.1 GHz · sweep of 2026-09-14 20:21</p>
+  <h1>Curve25519 Cycle Ledger</h1>
+  <p class="standfirst">Every cycle in the microcode-versus-OpenSSL gap, accounted for. The short version: <strong>the arithmetic is tied; the entry cost is not</strong> — and the entry cost now accounts for 96% of the same-ladder gap.</p>
+</header>
+
+<div class="trio">
+  <div>
+    <p class="k">Arithmetic, fe_mul</p>
+    <p class="v ours">0.996×</p>
+    <p class="d">Microcode vs OpenSSL with both invocation floors removed. A tie.</p>
+  </div>
+  <div>
+    <p class="k">Entry cost per firing</p>
+    <p class="v">16.2</p>
+    <p class="d">Cycles to enter patch RAM, flat. A native call costs 10.1.</p>
+  </div>
+  <div>
+    <p class="k">End-to-end standing</p>
+    <p class="v win">279</p>
+    <p class="d">kcycles, 5th — but 2.2% behind amd64-64, not 10.5%.</p>
+  </div>
+</div>
+
+<section>
+  <p class="lab">1 — What a kernel number contains</p>
+  <h2>The published kernel cost includes the cost of getting into the patch</h2>
+  <p>A microcode field operation is not just the patch body. The caller marshals ten limbs into fixed architectural registers, executes the hooked instruction, waits for the sequencer to redirect into patch RAM, and stores five result limbs back. <strong>All of that is inside the 102.8 and 81.8 figures.</strong></p>
+  <p>The harness measures the overhead separately by firing the same wrapper at a one-triad no-op patch. That is the <em>floor</em> — everything except the arithmetic:</p>
+
+  <div class="scroll">
+  <table>
+    <caption>Level 1, <code>bench_kernel.c</code>. Dependent memory-to-memory chain, median cycles per operation, 128 ops per sample, 200 samples, 4 round-robin phases.</caption>
+    <thead><tr><th>Layer</th><th class="n">fe_mul</th><th class="n">fe_sq</th></tr></thead>
+    <tbody>
+      <tr><td>Wrapper instructions alone, no firing</td><td class="n">10.2</td><td class="n">7.5</td></tr>
+      <tr><td>Wrapper + redirection <span class="dim">(1-triad no-op patch)</span> — <strong>the floor</strong></td><td class="n">16.2</td><td class="n">16.2</td></tr>
+      <tr class="me"><td>Wrapper + redirection + real patch body</td><td class="n">102.8</td><td class="n">81.8</td></tr>
+      <tr class="tot"><td>Derived: patch body alone</td><td class="n">86.6</td><td class="n">65.6</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Subtracting that floor from your own number and comparing the remainder against OpenSSL's <em>full</em> operation would be cheating — OpenSSL also pays a call, and also loads ten limbs and stores five. So the harness now measures a native floor too: the same call shape, the same memory traffic, no arithmetic.</p>
+
+  <div class="key">
+    <p>The two floors are <strong>not</strong> the same shape. The microcode floor is flat at <strong>16.2 for both operations</strong>, because redirection costs the same no matter how much data you hand it. The native floor <em>scales with operand traffic</em> — <strong>10.1</strong> for a multiply's ten loads, <strong>6.4</strong> for a square's five. The microcode-specific penalty is therefore 6.1 cycles on a multiply and 9.8 on a square.</p>
+  </div>
+</section>
+
+<section>
+  <p class="lab">2 — The comparison that matters</p>
+  <h2>Strip both floors and the arithmetic is a dead heat</h2>
+
+  <div class="chart">
+    <div class="chart-hd">
+      <h3>Cycles per field operation, split into invocation and arithmetic</h3>
+      <div class="legend">
+        <span><i class="sw f"></i>invocation floor</span>
+        <span><i class="sw a"></i>microcode arithmetic</span>
+        <span><i class="sw ar"></i>OpenSSL arithmetic</span>
+      </div>
+    </div>
+    <div class="rows">
+      <div class="row">
+        <div class="rl"><b>microcode</b>fe_mul</div>
+        <div class="bar">
+          <div class="seg floor" style="width:14.7%">16.2</div>
+          <div class="seg ar-o" style="width:78.7%">86.6</div>
+          <div class="cap">102.8</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="rl"><b>OpenSSL fe51</b>fe_mul</div>
+        <div class="bar">
+          <div class="seg floor" style="width:9.2%">10.1</div>
+          <div class="seg ar-r" style="width:79.1%">87.0</div>
+          <div class="cap">97.1</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="rl"><b>microcode</b>fe_sq</div>
+        <div class="bar">
+          <div class="seg floor" style="width:14.7%">16.2</div>
+          <div class="seg ar-o" style="width:59.6%">65.6</div>
+          <div class="cap">81.8</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="rl"><b>OpenSSL fe51</b>fe_sq</div>
+        <div class="bar">
+          <div class="seg floor" style="width:5.8%">6.4</div>
+          <div class="seg ar-r" style="width:60.7%">66.8</div>
+          <div class="cap">73.2</div>
+        </div>
+      </div>
+    </div>
+    <div class="axis"><div></div><div class="ticks"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span><span>110 cyc</span></div></div>
+  </div>
+
+  <p>Read the coloured segments, not the totals. <strong>86.6 against 87.0 on the multiply</strong> — 0.4% apart, which is a tie. Your 5×51 field arithmetic computes in the same number of cycles as the fastest hand-tuned x86 assembly for this field on this core. The whole visible difference is the grey-brown segment on the left.</p>
+
+  <div class="note">
+    <span class="tag">Quote the multiply, not the square</span>
+    <p>The <code>fe_sq</code> row flatters you and must not be quoted. <code>FE_SQ</code>'s <code>lea</code>/<code>imul</code> precompute (2·a<sub>i</sub> and 19·a<sub>i</sub>) sits inside the <em>microcode floor</em>, so subtracting the floor removes that arithmetic from your side — while OpenSSL's <code>fe51_sqr</code> does its doubling inside the routine and keeps paying for it. <code>fe_mul</code> has no such asymmetry: your 19·b<sub>j</sub> precompute is inside the patch (<code>IMUL64L</code> in PREP), so both sides carry their own. <strong>0.996× is the defensible number; 0.982× is not.</strong></p>
+  </div>
+
+  <h3>Arithmetic only, against the whole field</h3>
+  <div class="scroll">
+  <table>
+    <caption>Each backend's invocation floor removed: 16.2 for microcode, 10.1 / 6.4 for everything reached through a call.</caption>
+    <thead><tr><th>Backend</th><th class="n">fe_mul</th><th class="n">vs ours</th><th class="n">fe_sq</th><th class="n">vs ours</th></tr></thead>
+    <tbody>
+      <tr class="me"><td>microcode 5×51</td><td class="n">86.6</td><td class="n">1.00×</td><td class="n">65.6</td><td class="n">1.00×</td></tr>
+      <tr class="rival"><td>OpenSSL fe51 asm</td><td class="n">87.0</td><td class="n">1.00×</td><td class="n">66.8</td><td class="n">1.02×</td></tr>
+      <tr><td>fiat-crypto</td><td class="n">122.1</td><td class="n">1.41×</td><td class="n">111.1</td><td class="n">1.69×</td></tr>
+      <tr><td>CryptOpt</td><td class="n">131.2</td><td class="n">1.52×</td><td class="n">114.7</td><td class="n">1.75×</td></tr>
+      <tr><td>hand-written C</td><td class="n">134.1</td><td class="n">1.55×</td><td class="n">108.4</td><td class="n">1.65×</td></tr>
+      <tr><td>amd64-51 asm</td><td class="n">135.8</td><td class="n">1.57×</td><td class="n">112.4</td><td class="n">1.71×</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Against everything that is not OpenSSL, you are not close to tied — you are <strong>1.4–1.6× faster on the multiply and 1.65–1.75× on the square</strong>.</p>
+</section>
+
+<section>
+  <p class="lab">3 — Scaling one operation to one X25519</p>
+  <h2>The kernel-level deficit is entirely invocation cost</h2>
+  <p>One X25519 issues <strong>1,287 multiplications and 1,274 squarings</strong> — 255 ladder steps at five and four, plus 254 squarings and 12 multiplications in the inversion and final conversion. That is <strong>2,561 firings</strong>, each paying the entry cost once.</p>
+
+  <div class="scroll">
+  <table>
+    <caption>Per X25519, in cycles. Built from the Level 1 per-operation figures above; nothing here is fitted.</caption>
+    <thead><tr><th>Component</th><th class="n">Cycles</th></tr></thead>
+    <tbody>
+      <tr><td>Microcode field work <span class="dim">(1287 × 102.8 + 1274 × 81.8)</span></td><td class="n">236,414</td></tr>
+      <tr><td>OpenSSL field work <span class="dim">(1287 × 97.1 + 1274 × 73.2)</span></td><td class="n">218,161</td></tr>
+      <tr class="tot"><td>Kernel-level deficit</td><td class="n">18,254</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="scroll">
+  <table>
+    <caption>The same deficit, decomposed. The two terms are measured independently and were not tuned to match.</caption>
+    <thead><tr><th>Term</th><th class="n">Cycles</th></tr></thead>
+    <tbody>
+      <tr><td>Invocation penalty <span class="dim">(1287 × 6.1 + 1274 × 9.8)</span></td><td class="n pos">+20,285</td></tr>
+      <tr><td>Arithmetic advantage <span class="dim">(microcode is marginally faster)</span></td><td class="n neg">−2,031</td></tr>
+      <tr class="tot"><td>Predicted deficit</td><td class="n">18,254</td></tr>
+      <tr class="tot"><td>Measured deficit</td><td class="n">18,254</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="key">
+    <p>The decomposition <strong>closes to 0.0%</strong>. At the level of field operations you can say exactly where every cycle of the OpenSSL gap comes from, and none of it is the arithmetic. This is a stronger result than a narrow win would have been: a win invites the reply <em>“your baseline was weak”</em>; an accounting identity invites nothing.</p>
+  </div>
+
+  <p>It is also the mechanism that ties the two case studies together. Entry cost is fixed per firing, so the benefit of microcode scales with <strong>work per firing</strong>. Keccak amortises one 16-cycle entry over 1,396 triads and wins by 1.084×. X25519 pays that entry 2,561 times and ties. Same curve, two ends.</p>
+</section>
+
+<section>
+  <p class="lab">4 — Where it adds up</p>
+  <h2>At ladder level the entry cost accounts for 96% of the gap</h2>
+  <p>The controlled comparison holds the ladder fixed and changes only the field backend, so the two rows below should differ by the field arithmetic and nothing else.</p>
+
+  <div class="scroll">
+  <table>
+    <caption>Level 2, the controlled comparison. <code>osslops/C-ladder</code> and <code>ucode/C-ladder</code> run the identical C Montgomery ladder — same 15 field ops in the same order, same cswap, same mul121665. RDTSC ticks, best of 24 compiler configurations, sweep of 2026-09-14.</caption>
+    <thead><tr><th>Same-ladder contender</th><th class="n">Ticks / X25519</th></tr></thead>
+    <tbody>
+      <tr class="rival"><td>OpenSSL fe51 field ops</td><td class="n">262,501</td></tr>
+      <tr class="me"><td>Microcode field ops</td><td class="n">283,588</td></tr>
+      <tr class="tot"><td>Measured gap</td><td class="n">21,087</td></tr>
+      <tr><td>Invocation differential <span class="dim">(2,561 firings)</span></td><td class="n">20,285</td></tr>
+      <tr class="tot"><td><span class="neg">Explained</span></td><td class="n neg">96%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The non-field residue — everything that is not a field operation — is <strong>47,174</strong> cycles for microcode against <strong>44,340</strong> for OpenSSL. On an identical ladder those should match, and 2,833 apart is what matching looks like. The entry-cost account therefore survives the step from one operation to a whole scalar multiplication, which is the claim that matters.</p>
+
+  <div class="note">
+    <span class="tag">Retracted — a measurement error, not an effect</span>
+    <p>An earlier version of this page reported ≈27,000 cycles of this gap as unexplained, and offered hook-switching and working-set hypotheses for it. Both were tested and refuted: alternating mul/sq costs +0.2 cycles against a homogeneous chain, and rotating through five field slots instead of two costs +0.0. The residue was an artefact of comparing current kernel measurements against a sweep from 2026-09-09 that predated the five-accumulator <code>fe_mul</code>. With both measured on the same source it is 802 cycles, not 27,000.</p>
+  </div>
+</section>
+
+<section>
+  <p class="lab">5 — Standing</p>
+  <h2>End-to-end, the implementation places fifth</h2>
+  <p>Complete implementations, each at its own best compiler configuration. These differ in representation, ladder structure, inversion and integration all at once, so the table establishes position and attributes nothing.</p>
+  <div class="key"><p>The 2026-09-09 sweep put this work at <strong>302</strong> kcycles and 10.5% behind amd64-64. It had measured the <em>previous</em> 66-triad serial <code>fe_mul</code>; the 58-triad five-accumulator rewrite was sitting uncommitted in the working tree and had never been swept. Re-running it moved every 5×51 microcode contender by 22–26k cycles and nothing else by more than 0.3%.</p></div>
+
+  <div class="scroll">
+  <table>
+    <caption>Level 3. Median core kilocycles per X25519 (RDTSC ticks × 1.00548), 1000 repetitions, interleaved round-robin, best of 24 compiler configurations.</caption>
+    <thead><tr><th>Implementation</th><th>Representation</th><th class="n">kcycles</th><th class="n">Relative</th></tr></thead>
+    <tbody>
+      <tr><td>s2n-bignum verified asm</td><td>4×64</td><td class="n">246</td><td class="n">0.88×</td></tr>
+      <tr class="rival"><td>OpenSSL, own ladder + fe51 asm</td><td>5×51</td><td class="n">255</td><td class="n">0.91×</td></tr>
+      <tr class="rival"><td>OpenSSL fe51 asm on our C ladder</td><td>5×51</td><td class="n">264</td><td class="n">0.95×</td></tr>
+      <tr><td>Bernstein–Schwabe amd64-64 asm</td><td>4×64</td><td class="n">273</td><td class="n">0.98×</td></tr>
+      <tr class="me"><td>This work</td><td>5×51</td><td class="n">279</td><td class="n">1.00×</td></tr>
+      <tr><td>amd64-51 framework + microcode</td><td>5×51</td><td class="n">292</td><td class="n">1.05×</td></tr>
+      <tr><td>donna_c64</td><td>5×51</td><td class="n">340</td><td class="n">1.22×</td></tr>
+      <tr><td>fiat-crypto</td><td>5×51</td><td class="n">358</td><td class="n">1.28×</td></tr>
+      <tr><td>Bernstein–Schwabe amd64-51 asm</td><td>5×51</td><td class="n">359</td><td class="n">1.29×</td></tr>
+      <tr><td>hand-written C / CryptOpt</td><td>5×51</td><td class="n">382</td><td class="n">1.37×</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <span class="tag">No best-config escape route</span>
+    <p>Against OpenSSL on the identical ladder, microcode is ahead in <strong>0 of 24</strong> compiler configurations — paired geometric mean 0.843×. This is a clean sweep, not a close call, and any framing that implies a configuration exists where you win will be checked and will fail.</p>
+  </div>
+
+  <p class="dim">These three contenders were measured on every sweep all along. They were dropped by a stale column list in the table generator — <code>zip()</code> truncating a 15-column table against a 12-name header — and never reached the tables. That is fixed, with an assertion so it cannot recur silently.</p>
+</section>
+
+<section>
+  <p class="lab">6 — Presentation</p>
+  <h2>How to say this</h2>
+
+  <div class="guide">
+    <div class="g">
+      <div class="gh"><span class="gt say">Say</span><h4>Arithmetic parity with the fastest hand-tuned assembly</h4></div>
+      <p>“With each side's invocation cost removed, the microcode field multiplication is within 0.4% of OpenSSL's hand-written fe51 assembly.” <em>Parity</em>, never a win — 0.4% on a derived quantity evaporates if a reviewer disputes the floor by two cycles, and it buys you nothing.</p>
+    </div>
+    <div class="g">
+      <div class="gh"><span class="gt say">Say</span><h4>1.4–1.75× over everything else, on all 24 configurations</h4></div>
+      <p>fiat-crypto, CryptOpt, amd64-51 assembly and hand-written C, beaten on both operations at kernel level and on every matched compiler configuration end-to-end. This is your strongest unqualified result and it does not depend on the floor argument at all.</p>
+    </div>
+    <div class="g">
+      <div class="gh"><span class="gt say">Say</span><h4>Entry cost is the finding, not the excuse</h4></div>
+      <p>A flat 16.2 cycles to enter patch RAM against 10.1 for a native call, paid 2,561 times, decomposing the deficit to 0.0%. It explains Keccak's win and X25519's tie with one mechanism — benefit scales with work per firing. Two case studies, one curve, measured at both ends.</p>
+    </div>
+    <div class="g">
+      <div class="gh"><span class="gt dont">Avoid</span><h4>“Fastest 5×51” or “lowest kernel cost”</h4></div>
+      <p>Both are false with OpenSSL in the table, and OpenSSL is the first baseline any reviewer will ask for. It has been in your benchmark binary the whole time, which makes the omission harder to explain than the loss.</p>
+    </div>
+    <div class="g">
+      <div class="gh"><span class="gt dont">Avoid</span><h4>Quoting the fe_sq parity figure</h4></div>
+      <p>0.982× is an artefact of where the squaring precompute is charged. Use fe_mul, or state the asymmetry in the same breath.</p>
+    </div>
+    <div class="g">
+      <div class="gh"><span class="gt say">Say</span><h4>The account survives the step to a full scalar multiplication</h4></div>
+      <p>The invocation differential predicts 20,285 cycles; the measured same-ladder gap is 21,087. Level 1 and Level 2 agree to 96%, and the non-field residue matches to 2,833 cycles on an identical ladder. This is the sentence that makes the entry-cost model a result rather than a rationalisation.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p><b>Measurement.</b> Intel Celeron N3350, Goldmont, core 0, <code>taskset -c 0</code>. Turbo disabled (<code>no_turbo=1</code>), <code>userspace</code> governor at 1094400 kHz; delivered core 1100 MHz against a 1094 MHz TSC, so RDTSC ticks × 1.00548 = core cycles. That correction is common-mode and every ratio on this page is invariant to it.</p>
+  <p><b>Provenance.</b> Numbers are from the sweep of 2026-09-14 20:21 (24/24 configurations, frequency stable to +0.000% across the run), which is the first sweep to measure the 58-triad five-accumulator <code>fe_mul</code>. Level 1 from <code>bench_kernel.c</code> (128 ops per sample, 200 samples, 4 round-robin phases, drift-rechecked after restore: 102.81 against 102.77, +0.04%). Levels 2 and 3 from <code>bench_supercop_matrix.sh</code> (1000 repetitions, interleaved, 3 runs per configuration reduced to a median of medians, 24 compiler configurations, frequency bracketed before and after). All contenders pass RFC 7748 vectors in-process before any timing.</p>
+  <p><b>Not applied to the paper.</b> <code>gold489.tex</code> is untouched. <code>lib/gen_paper_tables.py</code>, <code>PAPER_TABLES.md</code>, <code>bench_kernel.c</code> and the <code>FIELDOP_ISO</code> list were changed; backups of the first two are in the session scratchpad.</p>
+</footer>
+</div>
+
+</body></html>

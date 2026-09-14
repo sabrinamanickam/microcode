@@ -28,9 +28,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define V_OLD   UINT64_C(0xAAAAAAAAAAAAAAA1)
 #define V_NEW1  UINT64_C(0xBBBBBBBBBBBBBBB2)

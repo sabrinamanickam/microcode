@@ -16,9 +16,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 /* ── Test 1: ADD in slot 0, ADD using result in slot 2 ── */
 static void install_test1(void) {

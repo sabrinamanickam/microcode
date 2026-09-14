@@ -1,0 +1,82 @@
+
+=== probe_carry, 15 candidates, starting at 0 ===
+RDI=0123456789abcdef RSI=fedcba9876543210 R15=aaaaaaaaaaaaaaaa
+RDI+RSI=ffffffffffffffff  RDI+RSI+1=0000000000000000
+RDI+RDI=02468acf13579bde  RDI+RDI+1=02468acf13579bdf
+
+[ 0] CONTROL ADD R15=RDI+RSI
+     expect: R15 = ffffffffffffffff exactly (no carry in anywhere)
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 1] ADC alone, CF at patch entry
+     expect: ffff..ff means CF=0 on entry, 0000..00 means CF=1
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 2] STC then ADC
+     expect: 0000000000000000 if STC drives ADC
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 3] CLC then ADC
+     expect: ffffffffffffffff if CLC drives ADC
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 4] carrying ADD then ADC, no bridge
+     expect: R15+R15 carries out; 0000..00 means ADD's carry reached ADC unaided
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 5] non-carrying ADD then ADC, no bridge
+     expect: control for the previous line; should be ffff..ff either way
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 6] carrying ADD, GFL_RR(TMP0,TMP0), ADC
+     expect: 0000..00 if GENARITHFLAGS bridges a computed carry into ADC
+     R15=0000000000000000  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 7] non-carrying ADD, GFL_RR, ADC
+     expect: ffff..ff; together with the previous line this is the bridge working
+     R15=ffffffffffffffff  R13=00007ffc9d7431c8  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 8] CHAIN: STC, ADC->R15, ADC->R13
+     expect: R15=0000..00 and R13 ending bdf means ADC's carry out fed the next ADC
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[ 9] CHAIN: CLC, ADC->R15, ADC->R13
+     expect: R15=ffff..ff and R13 ending bde; the no carry version of the chain
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[10] SAHF from bit 0 set, then ADC
+     expect: 0000..00 if SAHF takes CF from bit 0 of the register
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[11] SAHF from bit 8 set, then ADC
+     expect: 0000..00 if SAHF takes CF from bit 8, the classic AH position
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[12] SAHF from zero, then ADC
+     expect: ffff..ff; the control for the two SAHF lines above
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[13] SETCC then SAHF bit 0, then ADC
+     expect: sets up a COMPUTED carry; R15 unchanged here, see the next entry
+     R15=aaaaaaaaaaaaaaaa  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+[14] intra-triad ADC, GFL_RR, ADC
+     expect: the pattern recorded earlier as bridging CF inside one triad
+     R15=ffffffffffffffff  R13=02468acf13579bde  flags(LAHF)=0000000000000200
+     RDI intact  RSI intact
+
+=== completed all 15 candidates ===

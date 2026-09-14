@@ -1,0 +1,21 @@
+00 start: about to call lib-micro helpers
+01 helpers done, microcode state is stock
+02 about to patch_ucode + hook (fe_mul 58 triads, fe_sq 40 triads)
+03 patches installed and hooked -- install did NOT crash
+04.0 about to FIRE fe_sq, a = 0000000000000001 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+05.0 fired OK, h = 0000000000000001 0000000000000000 0000000000000000 0000000000000000 0000000000000000
+06.0 matches fiat-crypto
+04.1 about to FIRE fe_sq, a = 0000000000000002 0000000000000003 0000000000000005 0000000000000007 000000000000000b
+05.1 fired OK, h = 0000000000000a1c 0000000000000bd9 0000000000000b8b 0000000000000935 000000000000006f
+06.1 matches fiat-crypto
+04.2 about to FIRE fe_sq, a = 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff
+05.2 fired OK, h = 0008000000000131 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff
+06.2 matches fiat-crypto
+04.3 about to FIRE fe_sq, a = 0007ffffffffffed 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff
+05.3 fired OK, h = 0007ffffffffffed 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff 0007ffffffffffff
+06.3 matches fiat-crypto
+04.4 about to FIRE fe_sq, a = 001fffffffffffff 001fffffffffffff 001fffffffffffff 001fffffffffffff 001fffffffffffff
+05.4 fired OK, h = 0008000000001892 00080000000003c2 0008000000000320 000800000000027e 00080000000001dc
+06.4 matches fiat-crypto
+07 all firings survived; 0 mismatches
+08 about to run the RFC 7748 gate (exercises the full ladder)

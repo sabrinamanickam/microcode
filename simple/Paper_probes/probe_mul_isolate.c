@@ -34,9 +34,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define M  30          /* chain length (~ a fe_mul's MUL count) */
 #define K  3           /* multiplier / addend constant */

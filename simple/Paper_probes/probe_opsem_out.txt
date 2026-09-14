@@ -1,0 +1,75 @@
+
+=== probe_opsem run, 14 candidates, starting at 0 ===
+inputs  RDI=0123456789abcdef RSI=fedcba9876543210 R15=aaaaaaaaaaaaaaaa RCX=cccccccccccccccc RDX=dddddddddddddddd
+
+[ 0] CONTROL ADD_DSZ64_DRR(R15,RDI,RSI)   uop=00400002f9a7
+     expect: R15 = VA+VB, sources untouched
+     R15=ffffffffffffffff  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 1] CONTROL MUL_DSZ64_DRR(R15,RDI,RSI)   uop=026c0002f9a7
+     expect: R15 = hi(VA*VB), RSI = lo (destructive srcB)
+     R15=0121fa00ad77d742  RDI=0123456789abcdef  RSI=2236d88fe5618cf0  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI CLOBBERED | RCX intact | RDX intact
+
+[ 2] IMUL64L_DSZ64 DRR(R15,RDI,RSI)       uop=02640002f9a7
+     expect: hoping R15 = lo(VA*VB) with BOTH sources intact
+     R15=2236d88fe5618cf0  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 3] IMUL64L_DSZ64 DRI(R15,RDI,19)        uop=02641302f227
+     expect: hoping R15 = lo(VA*19), RDI intact
+     R15=159e26af37c048bd  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 4] SHRD DRI(R15,RDI,13)                 uop=09970d02f227
+     expect: hoping R15 = (RDI:R15)>>13 or (R15:RDI)>>13
+     R15=000000006f780000  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 5] SHRD DRR(R15,RDI,RSI)                uop=09970002f9a7
+     expect: hoping R15 = (RDI:R15)>>RSI, variable count
+     R15=0000000076543210  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 6] SHLD DRI(R15,RDI,13)                 uop=09960d02f227
+     expect: hoping R15 = (R15:RDI)<<13
+     R15=000000000001b135  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 7] CONCAT_DSZ32_DRI(R15,RDI,13)         uop=00210d02f227
+     expect: unknown; CONCAT may be a funnel shift or a bitfield insert
+     R15=89abcdef0000000d  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 8] CONCAT_DSZ32_DRR(R15,RDI,RSI)        uop=00210002f9a7
+     expect: unknown
+     R15=89abcdef76543210  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[ 9] READAFLAGS_DR(R15,RDI)               uop=23800002f9c0
+     expect: flags of RDI's domain into R15
+     R15=0123456789abc502  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[10] LAHF DR0(R15,RDI)                    uop=03c00002f027
+     expect: hoping R15 receives the flag byte
+     R15=0000000000000200  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst written | RDI intact | RSI intact | RCX intact | RDX intact
+
+[11] SAHF R0(RDI)                         uop=01bf00000027
+     expect: sets arch flags from RDI; look for an effect on a later ADC
+     R15=aaaaaaaaaaaaaaaa  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst UNCHANGED | RDI intact | RSI intact | RCX intact | RDX intact
+
+[12] STC (no operand)                     uop=033a00000000
+     expect: sets CF
+     R15=aaaaaaaaaaaaaaaa  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst UNCHANGED | RDI intact | RSI intact | RCX intact | RDX intact
+
+[13] CLC (no operand)                     uop=033800000000
+     expect: clears CF
+     R15=aaaaaaaaaaaaaaaa  RDI=0123456789abcdef  RSI=fedcba9876543210  RCX=cccccccccccccccc  RDX=dddddddddddddddd
+     dst UNCHANGED | RDI intact | RSI intact | RCX intact | RDX intact
+
+=== completed all 14 candidates ===

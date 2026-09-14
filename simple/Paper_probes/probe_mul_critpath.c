@@ -31,9 +31,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define REGION 0x7c00
 #define T(n)   (REGION + (n)*4)

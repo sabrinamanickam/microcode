@@ -13,9 +13,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 static uint64_t rol64(uint64_t v, int n) {
     n &= 63;

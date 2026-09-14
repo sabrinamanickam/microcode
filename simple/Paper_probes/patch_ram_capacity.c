@@ -25,9 +25,9 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <setjmp.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define REGION_START  0x7d7c   /* 133 free slots per your dump */
 #define MP_INDEX      19       /* free match-and-patch slot */

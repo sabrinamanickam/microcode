@@ -25,6 +25,8 @@
 \usepackage{tabularx} 
 \usepackage{xcolor}
 \usepackage{pifont}
+\usepackage{tikz}
+\usetikzlibrary{positioning}
 % NOTE: do NOT load geometry here -- iacrtrans.cls already loads it with the
 % journal's required page layout, and reloading it causes an option clash.
 \usepackage{hyperref}
@@ -195,105 +197,8 @@ It exposes a different execution interface, and that interface can change both t
 
 %\yvali{We need to discuss somewhere that short sections of code do not provide benefit, so we aim at larger pieces.}
 
-\section{Methodology}
-\label{sec:methodology}
+\input{methodology}
 
-In this section we describe the methodology used throughout the following case studies.
-We explain how we identify performance critical cryptographic computation and map it to Goldmont microcode.
-We then describe how the constraints of the microcode engine guide the implementation and how we validate correctness and measure performance.
-
-\begin{figure}[t]
-    \centering
-    \begin{tikzpicture}[
-        node distance=0.35cm,
-        every node/.style={
-            draw,
-            rounded corners,
-            align=center,
-            minimum height=0.75cm,
-            text width=2.2cm
-        }
-    ]
-
-    \node (spec) {Algorithm\\specification};
-    \node[right=of spec] (select) {Select performance\\critical kernel};
-    \node[right=of select] (map) {Map operations\\to microcode};
-    \node[right=of map] (design) {Design within\\microcode constraints};
-
-    \node[below=0.6cm of design] (impl) {Install and\\execute patch};
-    \node[left=of impl] (validate) {Validate\\correctness};
-    \node[left=of validate] (measure) {Measure and\\compare performance};
-
-    \draw[->] (spec) -- (select);
-    \draw[->] (select) -- (map);
-    \draw[->] (map) -- (design);
-    \draw[->] (design) -- (impl);
-    \draw[->] (impl) -- (validate);
-    \draw[->] (validate) -- (measure);
-
-    \end{tikzpicture}
-
-    \caption{Methodology used to develop and evaluate the microcode implementations.}
-    \label{fig:methodology}
-\end{figure}
-
-\paragraph{Kernel selection.}
-We begin from the specification of each algorithm and identify the computation that dominates its execution cost.
-The selected kernel is expressed in terms of the operations required by the algorithm rather than the x86 instructions used by an existing implementation.
-This keeps the design independent of an existing instruction mapping and allows the implementation to use capabilities exposed directly by the microcode engine.
-
-\paragraph{Microcode design.}
-We map the selected computation to the micro-operations available on Goldmont.
-Internal temporary registers provide additional storage and some micro-operations expose functionality without a direct x86 equivalent.
-Control flow can also remain inside the microsequencer without returning to ordinary x86 code.
-
-The design must fit within the resources provided by the microcode engine.
-Goldmont provides 128 triads of patch capacity and 16 temporary registers.
-These constraints determine which values remain resident and which values must be moved or recomputed.
-They also determine whether loops remain inside the microsequencer.
-When several mappings are possible we favor fewer executed micro-operations and less data movement.
-
-During the design phase we established several undocumented characteristics of Goldmont microcode experimentally.
-These include triad hazard semantics and memory operation limits as well as addressing restrictions and the construction of control flow inside the microsequencer.
-Each implementation must therefore satisfy both the architectural constraints of the algorithm and the execution constraints that we identified for the microcode engine.
-
-\paragraph{Patch organization.}
-The completed routine is installed as a microcode patch in the Microcode RAM (MSRAM).
-A match register redirects execution from an existing MSROM entry point to code placed in MSRAM.
-Figure~\ref{fig:decodeandpatch} shows this mechanism in the Goldmont decode path.
-
-Each transition from MSROM to MSRAM costs around 7 cycles.
-We therefore place larger computational kernels behind each redirection rather than dividing the implementation across many small patches.
-This amortizes the fixed redirection cost over more useful computation.
-Patch capacity of 128 triads places an upper limit on this granularity and the resulting design tries to balance these two constraints.
-
-The surrounding native program invokes the patched instruction when the cryptographic routine is required.
-No processor hardware is modified.
-The implementation instead uses execution resources already present in the Goldmont core.
-
-\paragraph{Validation and evaluation.}
-We validate functional correctness before evaluating performance.
-Each microcode implementation is tested against an established implementation of the same algorithm.
-Identical inputs must produce the corresponding reference result.
-
-Performance is measured using cycle counts on the same Goldmont system used for the native implementations.
-The evaluation includes optimized implementations for the same x86 platform.
-Repeated measurements characterize execution cost and the median provides the primary comparison.
-%We use ablation experiments where appropriate to isolate design choices that contribute directly to the final result.
-%Each ablation removes one technique while leaving the remainder of the implementation unchanged.
-
-The two case studies exercise different properties of the microcode engine.
-Keccak places pressure on register capacity and relies primarily on bitwise operations and rotations.
-Curve25519 instead relies on multi precision field arithmetic and repeated carry propagation.
-Together they allow us to apply the same methodology to two different forms of cryptographic computation.
-\begin{figure}[tbp]
-  \centering
-  \includegraphics[width=0.9\linewidth]{DecoderAndPatch.png}
-  \caption{Decode path on Goldmont and the effect of a microcode patch.
-  Macroinstructions decoded by the microsequencer have their MSROM address checked against the match registers.
-  An unmatched address (\code{rdrand}) is served from the microcode ROM, while a matched address (\code{cpuid}, redirected to \uaddr{74dc}) is served from the microcode RAM, so that our custom triads are emitted in place of the original ones.}
-  \label{fig:decodeandpatch}
-\end{figure}
 \section{Case Study 1: Keccak-f[1600] in Microcode}
 \label{sec:keccak}
 
@@ -341,7 +246,7 @@ Some techniques remain useful, while others solve problems that are irrelevant i
 \begin{table}[htbp]
 \centering
 \small
-\begin{tabular}{@{}p{0.25\linewidth}p{0.39\linewidth}c@{}}
+\begin{tabularx}{\linewidth}{@{}l >{\raggedright\arraybackslash}X c@{}}
 \toprule
 Technique & Relevance to Goldmont microcode & Used \\
 \midrule
@@ -352,7 +257,7 @@ In-place processing & Avoids a second 25-lane state & \cmark \\
 Whole-state residency & The combined architectural and temporary register file holds all lanes & \cmark \\
 Native \code{NOTAND} & Reduces each $\chi$ output to two $\mu$ops & \cmark \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \caption{Applicability of established Keccak implementation techniques to the Goldmont microcode model.}
 \label{tab:methods}
 \end{table}
@@ -642,10 +547,10 @@ Both known-answer tests are fixed published constants rather than values recompu
 \subsection{Performance Evaluation}
 
 %\paragraph{Experimental setup.}
-%All results come from the Intel Celeron N3350 with the Goldmont core described in \Cref{sec:measurement}. 
+%All results come from the Intel Celeron N3350 with the Goldmont core described in \Cref{sec:methodology}. 
 %Turbo remains disabled, the processor stays pinned to its base
 %frequency, and a single process times every implementation.
-%The native implementations build under the six GCC and Clang releases and four optimisation levels listed in \Cref{sec:measurement}.
+%The native implementations build under the six GCC and Clang releases and four optimisation levels listed in \Cref{sec:methodology}.
 %Each implementation then keeps the configuration that achieved the lowest median.
 
 \paragraph{Constant time behaviour.}
@@ -659,7 +564,7 @@ We assume that the underlying micro-operations have data independent latency, as
 The comparison covers every executable member of the SUPERCOP \texttt{crypto\_hash/\allowbreak keccakc1024} family on this Intel core with 64 bit support.
 The XKCP single permutation kernel and the OpenSSL scalar assembly for x86 64 join the same comparison.
 Each contender computes the same primitive on the same core, and the timed region includes the dispatch or call required to invoke it.
-\Cref{sec:measurement} describes the remaining asymmetry in that region. \Cref{tab:results-keccak} reports the results.
+\Cref{sec:methodology} describes the remaining asymmetry in that region. \Cref{tab:results-keccak} reports the results.
 
 \begin{table}[htbp]
 \centering
@@ -922,12 +827,12 @@ ADD(TMP9, TMP9, TMP15) }
 
 The first triad accumulates the low half of one product, materializes the resulting carry, and prepares an operand for the next multiplication.
 The second accumulates a high half and the materialized carry while issuing that multiplication.
-The sequential semantics within a triad established in \Cref{sec:ucode-layer} permit this packing without additional register moves.
+The sequential semantics within a triad established in \Cref{sec:background} permit this packing without additional register moves.
 
 We repeat this schedule for the products contributing to each output limb.
 After completing one limb, the patch propagates its radix $2^{51}$ carry into the next.
 The thirteen unused bits in each limb provide sufficient headroom for this accumulation and allow the propagation to use ordinary register operations rather than a full width \code{ADC} chain.
-After the fifth limb, the patch folds the remaining carry into the first limb according to the reduction modulo $2^{255}-19$ described in \Cref{sec:curve25519-background}.
+After the fifth limb, the patch folds the remaining carry into the first limb according to the reduction modulo $2^{255}-19$ described in \Cref{sec:c25519-challenge}.
 
 The complete multiplication occupies 66 triads.
 All partial products, accumulators, and carry values remain in registers throughout the patch, so a firing performs no intermediate spills to memory.
@@ -989,79 +894,242 @@ We then verify complete scalar multiplication against the RFC~7748 X25519 test v
 We apply the same tests to the handwritten C, Fiat Cryptography, CryptOpt, \texttt{amd64-51}, and \texttt{amd64-64} implementations used in the evaluation.
 These tests exercise scalar clamping, all 255 ladder iterations, inversion, final reduction, and encoding in addition to the patched multiplication and squaring kernels.
 
-
-\subsection{Performance evaluation}
+\subsection{Performance Evaluation}
 \label{sec:c-perf}
 
-\Cref{tab:res-c25519-e2e} reports complete X25519 scalar multiplications on the Goldmont N3350.
-For each of the 24 compiler and optimization-level configurations described in \Cref{sec:measurement}, we time 100 scalar multiplications and record their median.
-The table retains the lowest median obtained by each contender.
-All contenders execute back to back in the same benchmark process.
+We evaluate the Curve25519 implementation at four levels.
+We first measure our multiplication and squaring kernels in isolation and the cost of entering patch RAM.
+We then replace only the field arithmetic within a common X25519 implementation to determine whether the kernel advantage persists in the complete computation.
+We repeat the controlled replacement for a saturated $4\times64$ representation to determine whether the benefit follows from microcode execution alone.
+Finally, we compare complete X25519 implementations.
 
-In isolation, our squaring patch completes in approximately 37 cycles and our multiplication patch completes in approximately 58 cycles, including the wrapper and patch redirection.
-The difference follows from the 15 partial products used by squaring and the 25 used by multiplication.
+\subsubsection{Field Kernel Performance}
+\label{sec:c25519-kernel-results}
 
-Our inlined microcode implementation completes X25519 in $299{,}967$ median cycles.
-It is the fastest $5\times51$ implementation in the comparison.
-Relative to the best configuration of each contender, it reduces the cycle count by 11\% against \texttt{donna\_c64}, 15\% against fiat-crypto, and 21\% against both the hand-written \texttt{\_\_uint128\_t} implementation and CryptOpt.
-Across all 24 configurations, the geometric means of the per-configuration ratios are $1.31\times$, $1.25\times$, $1.30\times$, and $1.28\times$, respectively, as shown in \Cref{tab:res-c25519-ratio}.
-The fixed microcode bodies do not change across compiler configurations; only the wrapper, ladder control, and remaining native operations do.
+We first measure multiplication and squaring independently of the Montgomery ladder.
+The benchmark forms a dependent memory to memory chain in which each operation consumes the result of the preceding operation.
+Every backend therefore pays the same memory round trip.
+\Cref{tab:res-c25519-kernels} reports the median cycles per field operation.
 
 \begin{table}[htbp]
 \centering
-\caption{End-to-end X25519 on the Goldmont core: best configuration per
-contender across the twenty-four-config sweep, in median cycles per
-scalar multiplication. Smaller is better.}
+\caption{Cost of $5\times51$ field multiplication and squaring on the Goldmont N3350.
+Measurements form a dependent memory to memory chain so that every backend pays the same memory round trip.
+Values are median cycles per field operation.}
+\label{tab:res-c25519-kernels}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Backend & \code{fe\_mul} & \code{fe\_sq} \\
+\midrule
+\textbf{microcode} &
+\textbf{122.9} &
+\textbf{81.1} \\
+fiat-crypto &
+134.9 &
+117.5 \\
+CryptOpt &
+146.7 &
+127.3 \\
+amd64-51 asm &
+151.7 &
+129.6 \\
+hand written \code{\_\_uint128\_t} C &
+145.7 &
+114.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The microcode kernels have the lowest cost for both operations.
+Multiplication requires 122.9 cycles, giving speedups from $1.098\times$ over fiat-crypto to $1.234\times$ over the \texttt{amd64-51} assembly.
+Squaring requires 81.1 cycles and provides a larger advantage, with speedups from $1.416\times$ over the hand written C implementation to $1.598\times$ over the \texttt{amd64-51} assembly.
+Invoking either patched kernel costs approximately 16 cycles, including operand marshalling, the hooked instruction, redirection into patch RAM, and return.
+A trigger-only measurement without operand marshalling requires approximately 7 cycles, with the remaining cost arising from the calling convention.
+This invocation cost is included in the reported 122.9 cycle multiplication and 81.1 cycle squaring measurements.
+
+\subsubsection{Controlled Field Arithmetic Comparison}
+\label{sec:c25519-field-results}
+
+We measure the contribution of the $5\times51$ microcode kernels within a common X25519 implementation.
+All contenders in \Cref{tab:res-c25519-field} use the same C Montgomery ladder, scalar loop, conditional swaps, inversion, and encoding.
+Only field multiplication and squaring change between rows.
+The comparison therefore isolates the effect of the field backend.
+
+\begin{table}[htbp]
+\centering
+\caption{Controlled comparison of $5\times51$ field arithmetic.
+Every row uses the same C X25519 implementation and differs only in multiplication and squaring.
+Best median reports the lowest median obtained by each backend across the 24 compiler and optimization configurations.
+Matched speedup is the geometric mean of the per configuration ratio between the native backend and microcode.
+A value above one indicates that microcode is faster.}
+\label{tab:res-c25519-field}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Field backend & Best median & Matched speedup & Wins \\
+\midrule
+\textbf{microcode $5\times51$} &
+\textbf{307,358} &
+\textbf{1.000$\times$} &
+--- \\
+\midrule
+fiat-crypto &
+355,283 &
+1.195$\times$ &
+24/24 \\
+CryptOpt &
+381,025 &
+1.217$\times$ &
+24/24 \\
+amd64-51 field asm &
+383,608 &
+1.220$\times$ &
+24/24 \\
+hand written \code{\_\_uint128\_t} C &
+381,115 &
+1.241$\times$ &
+24/24 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The microcode backend outperforms every ISA level backend in every matched configuration.
+The geometric mean speedup ranges from $1.195\times$ against fiat-crypto to $1.241\times$ against the hand written C implementation.
+Against the \texttt{amd64-51} field assembly, which uses the same $5\times51$ representation, microcode achieves a $1.220\times$ geometric mean speedup.
+
+The best absolute medians support the same result.
+The microcode backend requires 307,358 cycles on the common ladder.
+The best fiat-crypto configuration requires 355,283 cycles, while CryptOpt, the \texttt{amd64-51} field assembly, and the hand written C backend require between 381,025 and 383,608 cycles.
+We do not use these independently selected best configurations to attribute the speedup.
+The matched comparison provides that attribution.
+
+The kernel and complete computation measurements provide complementary evidence.
+In isolation, both patched kernels outperform all four native alternatives under dependent and independent execution.
+When integrated into the common X25519 implementation, the same field backend remains faster across all 24 matched compiler and optimization configurations.
+
+This result connects to the carry organization of \Cref{sec:c25519-carries}.
+The $5\times51$ representation permits the patch to materialize carries as register values and to maintain the low halves, high halves, and carry counts as separate dependency chains.
+The controlled replacement shows that this organization remains advantageous when the kernels execute as part of the complete field computation.
+
+\subsubsection{Effect of the Field Representation}
+\label{sec:c25519-representation-results}
+
+The preceding experiment establishes an advantage for $5\times51$, but does not show that executing arithmetic in patch RAM is sufficient to obtain that advantage.
+We therefore repeat the controlled field replacement for the saturated $4\times64$ representation used by \texttt{amd64-64}.
+
+Within each representation in \Cref{tab:res-c25519-representation}, the native and microcode variants use the same C ladder and surrounding framework.
+The comparison therefore changes only the multiplication and squaring backend.
+
+\begin{table}[htbp]
+\centering
+\caption{Controlled field backend replacement for the unsaturated $5\times51$ and saturated $4\times64$ representations.
+Within each representation, the native and microcode variants use the same ladder and surrounding framework.
+Matched ratio is the geometric mean of native cycles divided by microcode cycles across the 24 compiler and optimization configurations.
+A value above one indicates that microcode is faster.}
+\label{tab:res-c25519-representation}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+Representation & Native & Microcode & Matched ratio & Microcode kernels \\
+\midrule
+$5\times51$ &
+387,458 &
+329,131 &
+\textbf{1.166$\times$} &
+66 triad mul, 42 triad sq \\
+$4\times64$ &
+306,275 &
+514,891 &
+\textbf{0.595$\times$} &
+75 triad mul, sq as mul \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The two representations produce opposite results.
+For $5\times51$, replacing the native field arithmetic with microcode improves performance by a geometric mean factor of $1.166\times$ while the surrounding implementation remains fixed.
+For $4\times64$, the same replacement reduces performance to $0.595\times$ that of the native backend.
+Equivalently, the saturated microcode field arithmetic is $1.680\times$ slower than the native arithmetic it replaces.
+
+This reversal shows that patch execution alone does not account for the $5\times51$ result.
+The unsaturated representation leaves thirteen unused bits in each limb and permits the implementation to accumulate explicit carry values before radix propagation.
+The saturated representation provides no corresponding headroom.
+Overflow instead propagates across full width limbs through \code{RFLAGS}, which removes the independent carry structure used by the main implementation.
+
+Patch capacity introduces a second constraint.
+The $5\times51$ multiplication and dedicated squaring kernels occupy 66 and 42 triads and coexist within the 128 triads of patch RAM.
+The saturated multiplier occupies 75 triads.
+The remaining capacity is insufficient for a specialized squaring kernel, so the $4\times64$ control computes squaring by invoking multiplication with equal operands.
+
+The negative result therefore identifies a boundary of the optimization.
+Field arithmetic benefits from the microcode interface when its representation exposes a carry structure that the patch can exploit and when the required specialized kernels fit within patch RAM.
+
+\subsubsection{End to End X25519}
+\label{sec:c25519-e2e}
+
+We finally compare complete X25519 implementations.
+Unlike the preceding experiments, the contenders in \Cref{tab:res-c25519-e2e} differ in field representation, ladder organization, field arithmetic, inversion, and integration.
+The table therefore establishes the overall position of our implementation but does not attribute performance differences to microcode.
+
+\begin{table}[htbp]
+\centering
+\caption{End to end X25519 on the Goldmont N3350.
+Each implementation appears in its best configuration across the 24 compiler and optimization configurations.
+Values report median cycles per scalar multiplication.
+The contenders differ in representation and implementation structure.}
 \label{tab:res-c25519-e2e}
-\small
+\footnotesize
+\setlength{\tabcolsep}{4pt}
 \begin{tabular}{@{}llr@{}}
 \toprule
-contender & representation / backend & median (cyc) \\
+Implementation & Representation and backend & Median \\
 \midrule
-amd64-64 / asm       & $4\times64$ saturated, hand asm                     & 271\,326 \\
-\textbf{ours / ucode} & \textbf{$5\times51$, microcode (inlined ladder)} & \textbf{299\,967} \\
-amd64-51 / ucode     & $5\times51$, microcode (B--S framework)             & 314\,416 \\
-donna\_c64           & $5\times51$, portable C                             & 335\,744 \\
-ours / fiat          & $5\times51$, fiat-crypto C                          & 354\,851 \\
-amd64-51 / asm       & $5\times51$, hand asm                               & 356\,038 \\
-ours / hand-C        & $5\times51$, hand-written \texttt{\_\_uint128\_t} C & 379\,433 \\
-ours / cryptopt      & $5\times51$, CryptOpt asm                           & 380\,361 \\
+amd64-64 asm &
+$4\times64$, assembly &
+271,756 \\
+\textbf{this work} &
+\textbf{$5\times51$, microcode} &
+\textbf{300,205} \\
+amd64-51 framework with microcode &
+$5\times51$, microcode &
+314,851 \\
+\code{donna\_c64} &
+$5\times51$, portable C &
+337,876 \\
+fiat-crypto &
+$5\times51$, generated C &
+355,283 \\
+amd64-51 asm &
+$5\times51$, assembly &
+356,704 \\
+CryptOpt &
+$5\times51$, optimized assembly &
+381,025 \\
+hand written C &
+$5\times51$, \code{\_\_uint128\_t} &
+381,115 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-We also insert the same two patches into the lib25519 \texttt{amd64-51} framework.
-That hybrid completes in $314{,}416$ cycles, compared with $356{,}038$ cycles for the \texttt{amd64-51} assembly implementation, and yields a $1.08\times$ geometric-mean speedup across the compiler sweep.
-The result shows that the patched $5\times51$ arithmetic remains effective when used by a separately developed X25519 framework.
+Our complete implementation requires 300,205 cycles and is the fastest $5\times51$ implementation in the comparison.
+It requires 15.8\% fewer cycles than the complete \texttt{amd64-51} assembly implementation and 11.2\% fewer cycles than \texttt{donna\_c64}.
+It also outperforms the fiat-crypto, CryptOpt, and hand written C implementations.
 
-The saturated \texttt{amd64-64} assembly remains the fastest overall contender at $271{,}326$ median cycles.
-It requires 9.5\% fewer cycles than our inlined implementation and gives our implementation a $0.89\times$ geometric-mean ratio across the sweep.
-This result matches the representation tradeoff identified in \Cref{sec:c25519-challenge}: native x86 executes the four-limb \code{ADC} schedule efficiently, whereas our microcode implementation obtains its advantage from the independent explicit-carry chains of the five-limb representation.
-The 75-triad saturated microcode control cannot combine that four-limb representation with a co-resident specialized squaring kernel, so moving the native \texttt{amd64-64} arithmetic into patch RAM does not provide the same structure as our two-patch $5\times51$ design.
+The saturated \texttt{amd64-64} assembly remains the fastest implementation overall at 271,756 cycles and requires 9.5\% fewer cycles than our implementation.
+This result is consistent with the controlled saturated experiment rather than in conflict with the field arithmetic result.
+The $4\times64$ representation is precisely the case in which the available microcode carry mechanism and patch capacity do not provide an effective mapping.
 
-\begin{table}[htbp]
-\centering
-\caption{Geometric-mean speedup of our inlined microcode ladder
-(\texttt{ours/ucode}) over each contender across the
-twenty-four-config sweep, computed as the geomean of the per-config
-ratio (contender median $\div$ microcode median). A value $>1$ means
-our ladder is faster.}
-\label{tab:res-c25519-ratio}
-\small
-\begin{tabular}{@{}lr@{}}
-\toprule
-contender & geomean speedup of ours/ucode \\
-\midrule
-donna\_c64        & $1.31\times$ \\
-ours / hand-C     & $1.30\times$ \\
-ours / cryptopt   & $1.28\times$ \\
-ours / fiat       & $1.25\times$ \\
-amd64-51 / asm    & $1.17\times$ \\
-amd64-51 / ucode  & $1.08\times$ \\
-amd64-64 / asm    & $0.89\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
+Taken together, the experiments identify both the source and the boundary of the Curve25519 result.
+At the kernel level, the patched multiplication and squaring operations outperform the native alternatives under both serial dependencies and exposed instruction level parallelism.
+Within a controlled X25519 implementation, the resulting $5\times51$ backend outperforms every alternative field backend across all 24 matched configurations.
+The saturated control reverses this advantage.
+Microcode therefore does not provide a uniform acceleration for multi precision arithmetic.
+Its benefit depends on the interaction between the field representation, the available carry mechanism, and the finite patch capacity.
 
 \section{Discussion}
 

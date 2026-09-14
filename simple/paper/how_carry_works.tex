@@ -1,0 +1,88 @@
+\subsubsection{Carry Handling in Microcode}
+\label{sec:c25519-carries}
+
+The implementation depends on how Goldmont microcode represents and consumes arithmetic carry state.
+This mechanism differs from the conventional x86 interface and motivates the arithmetic organization used by both Curve25519 implementations.
+
+An arithmetic $\mu$op such as \code{ADD} associates conditional state with its destination register, provided that destination is one of the sixteen internal \code{TMP} registers.
+For an addition, this state records whether the operation produced a carry.
+An architectural destination receives the correct arithmetic result but carries no state that the patch can query, in this domain or in \code{RFLAGS}.
+Every carry producing addition in our patches therefore writes a \code{TMP}, and sums are copied out to architectural registers afterwards.
+The state belongs to the register rather than to the addition, and it survives across triads until the next $\mu$op writes that register.
+Any such write replaces it: a shift installs its own shifted out bit, and a multiply replaces the state of both registers it writes.
+Because the state is held per register, several carries can be outstanding at the same time and can be recovered in any order.
+
+The patch can consume this state in two ways.
+
+The first path uses \code{SETCC\_CONDB}.
+This operation reads the conditional state associated with a previous arithmetic destination and materializes the carry as an ordinary integer equal to zero or one.
+The requirement to use an internal register applies only to the register being read; \code{SETCC\_CONDB} may write its result directly to an architectural register, as a full width zero extending write.
+The patch can then add this value to any accumulator with a subsequent \code{ADD}.
+The carry therefore becomes an explicit register value, at a cost of three $\mu$ops per propagated carry.
+Different additions can materialize their carries into different registers, so several accumulation chains can progress without sharing \code{RFLAGS}.
+
+The second path reconstructs the conventional x86 carry mechanism.
+A microcode \code{ADC} consumes the carry flag in \code{RFLAGS} rather than the conditional state associated with an arithmetic destination.
+That flag is captured from \code{RFLAGS} when the hook fires and is then frozen for the lifetime of the patch: no \code{ADD}, and no earlier \code{ADC}, updates it, so two \code{ADC}s placed back to back observe the same value.
+To use a carry produced by a preceding \code{ADD}, the patch first publishes it with the two operand form \code{GENARITHFLAGS\_RR}, naming the \code{TMP} whose carry is wanted as the first operand.
+\code{GENARITHFLAGS} transfers the associated condition into \code{RFLAGS}, after which \code{ADC} adds its two operands together with the architectural carry flag.
+The operand form is load bearing.
+The one operand \code{GENARITHFLAGS\_R} does not bridge; it writes a second architectural flag image that \code{READAFLAGS} observes and \code{ADC} ignores.
+The register named must also be internal, since an architectural destination has no state to publish, so every accumulator in a chain has to be staged through a \code{TMP} and copied back at the end.
+The destination of an \code{ADC} acquires conditional state of its own, so a fresh \code{GENARITHFLAGS\_RR} extends the chain; we verified chains of this shape to thirty two limbs, at roughly eight cycles per limb.
+Each carry therefore costs two $\mu$ops, and the bridge and the following \code{ADC} can be packed into the same triad as the addition that feeds them.
+We found no other write path into the register \code{ADC} reads, having probed \code{MOVEINSERTFLGS}, \code{MOVEMERGEFLGS} and all six \code{MOVETOCREG} variants directed at \code{CORE\_CR\_EFLAGS}.
+
+Table~\ref{tab:c25519-carrypaths} summarizes the two paths.
+Our $5\times51$ implementation uses the first.
+The saturated $4\times64$ control uses the second.
+
+\begin{table}[htbp]
+\centering
+\caption{Two ways to consume carry state in Goldmont microcode.
+The main $5\times51$ implementation materialises carries as integers and accumulates them explicitly.
+The saturated $4\times64$ control instead publishes carry state to \code{RFLAGS} and consumes it with \code{ADC}.}
+\label{tab:c25519-carrypaths}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{.22\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+\toprule
+Operation path & Effect on carry state & Use in our implementations \\
+\midrule
+\code{ADD} $\rightarrow$ \code{SETCC\_CONDB} $\rightarrow$ \code{ADD}
+&
+An arithmetic $\mu$op records conditional state with its internal destination register, where it stays until the next write to that register.
+\code{SETCC\_CONDB} reads that destination associated state and materialises the carry as an integer equal to zero or one, in an internal or an architectural register.
+A later \code{ADD} accumulates this value in a separate register.
+Three $\mu$ops per carry, and the architectural flags are never touched.
+&
+Used in the main $5\times51$ multiplication and squaring patches, twenty five and fifteen times respectively, with no \code{ADC}.
+This keeps the low sum, high sum, and carry count as separate dependency chains. \\
+\midrule
+\code{ADD} $\rightarrow$ \code{GENARITHFLAGS\_RR} $\rightarrow$ \code{ADC}
+&
+The arithmetic $\mu$op again records conditional state with its internal destination.
+\code{GENARITHFLAGS\_RR}, naming that destination as its first operand, transfers the state into \code{RFLAGS}, which arithmetic $\mu$ops otherwise leave at the value captured when the hook fired.
+A following \code{ADC} then consumes the architectural carry flag in the conventional way, and its own destination carries state that extends the chain.
+Two $\mu$ops per carry, and every destination in the chain must be internal.
+&
+Used in the saturated $4\times64$ control.
+This reconstructs a conventional full width carry chain through \code{RFLAGS}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+This distinction determines how well each field representation maps to the microcode interface.
+The $5\times51$ representation leaves thirteen unused bits in each 64 bit limb, so a column sum absorbs many products before a carry has to leave it; carries are comparatively rare, and paying a third $\mu$op to move one as a value costs little.
+The saturated $4\times64$ representation instead requires full width propagation between adjacent words on every column, which makes the cost of an individual carry the dominant term and suggests the cheaper two $\mu$op path should pay for its staging overhead.
+We built the $4\times64$ control both ways rather than assume that, and measured all three versions back to back in one process at a pinned clock.
+The \code{SETCC} dance form occupies $119$ triads and runs at $211$ cycles per multiplication.
+The \code{ADC} form, with the bridge and the following \code{ADC} packed into shared triads, occupies $75$ triads and runs at $207$ cycles.
+Fusing the schoolbook into the carry chain --- each multiply writing its high half straight to the register the column chain reads, and each low half consumed in the same triad that produced it --- takes the same algorithm to $67$ triads and $191$ cycles.
+The control we report is that last version.
+Two things in those numbers are worth stating plainly.
+The two carry paths are within two percent of each other, so the \code{ADC} path's lower operation count per carry buys almost nothing here; what bought the remaining nine percent was scheduling the multiplies inside the carry chain, which is legal only because a published carry survives an intervening multiply.
+And the saving did not track the triad count: removing $44$ triads between the first two versions was worth $4$ cycles, while the next $8$ were worth $16$, because those eight sat directly between each multiply and the addition consuming it.
+Position on the dependency chain, not patch size, is what a triad costs.
+All three versions remain far behind the $58$ cycle $5\times51$ multiplication, and also behind an ordinary \code{-O3} compilation of the same saturated algorithm in C, which runs at $135$ cycles on this machine.
+It is the representation rather than the carry path that decides the comparison.

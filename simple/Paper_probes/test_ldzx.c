@@ -13,10 +13,10 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <setjmp.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/ldat.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/ldat.h"
+#include "../../../include/misc.h"
 
 static sigjmp_buf jmpbuf;
 static volatile sig_atomic_t got_signal = 0;

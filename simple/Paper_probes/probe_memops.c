@@ -39,9 +39,9 @@
 #include <inttypes.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include "../../../../include/patch.h"
-#include "../../../../include/ucode_macro.h"
-#include "../../../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define SEG 0x18                 /* SEG_DS — confirmed working (probe_seg) */
 #define LOGPATH "probe_memops.log"

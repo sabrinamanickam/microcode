@@ -1,0 +1,5 @@
+ATTEMPT section1 seed=c534f48eb54abb00
+RESULT  section1 ok
+ATTEMPT section2 seed=c534f48eb54abb00
+ATTEMPT section3
+RESULT  section3 ok

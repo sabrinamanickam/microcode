@@ -16,10 +16,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/ldat.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/ldat.h"
+#include "../../../include/misc.h"
 
 /* ── Test 1: Probe seqword array (ms_array 2) size ──────────── */
 

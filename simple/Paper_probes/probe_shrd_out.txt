@@ -1,0 +1,29 @@
+
+=== probe_shrd, 24 candidates, starting at 0 ===
+RDI=0123456789abcdef RSI=fedcba9876543210 R15=aaaaaaaaaaaaaaaa
+a real 64 bit funnel would give one of:
+  (RDI:R15)>>13 = 6f7d555555555555
+  (R15:RDI)>>13 = 5550091a2b3c4d5e
+  (RDI:RSI)>>13 = 6f7ff6e5d4c3b2a1
+
+[ 0] A: 0x997 DRI(R15,RDI,0)                uop=09970002f227
+     R15=0000000000000000  RDI ok RSI ok
+[ 1] A: 0x997 DRI(R15,RDI,1)                uop=09970102f227
+     R15=0000000080000000  RDI ok RSI ok
+[ 2] A: 0x997 DRI(R15,RDI,13)               uop=09970d02f227
+     R15=000000006f780000  RDI ok RSI ok
+[ 3] A: 0x997 DRI(R15,RDI,19)               uop=09971302f227
+     R15=0000000079bde000  RDI ok RSI ok
+[ 4] A: 0x997 DRI(R15,RDI,31)               uop=09971f02f227
+     R15=0000000013579bde  RDI ok RSI ok
+[ 5] A: 0x997 DRI(R15,RDI,32)               uop=09972002f227
+     R15=0000000000000020  RDI ok RSI ok
+[ 6] A: 0x997 DRI(R15,RDI,51)               uop=09973302f227
+     R15=0000000079bde000  RDI ok RSI ok
+[ 7] A: 0x997 DRI(R15,RDI,63)               uop=09973f02f227
+     R15=0000000013579bde  RDI ok RSI ok
+[ 8] SHRD slot32 0x917 DRI(R15,RDI,13)      uop=09170d02f227
+     R15=0000000000000000  RDI ok RSI ok
+[ 9] SHRD slot32 0x917 DRR(R15,RDI,RSI)     uop=09170002f9a7
+     R15=0000000000000000  RDI ok RSI ok
+[10] SHRD slot64 0x957 DRI(R15,RDI,13)      uop=09570d02f227

@@ -14,9 +14,9 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 /* ── Test A: MUL srcB slot 0→1 RAW ── */
 /* MUL(RCX, srcA, RDX) in slot 0: srcA preserved, RDX gets lo, RCX gets hi.

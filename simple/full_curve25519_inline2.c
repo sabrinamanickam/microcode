@@ -392,12 +392,14 @@ static void install_field_patches(void) {
 
 /* FE_SQ(out, a) — fires the sq patch (vmread). Precompute 2*a and 19*a
  * happen inline. Output: rdi=h0, r9=h1, r10=h2, rbx=h3, rax=h4. */
+/* Loads run limb 0 -> limb 4 to match the ascending stores; a descending
+ * order costs ~30 cyc per dependent op on Goldmont (see curve25519/). */
 #define FE_SQ(out, a) \
-    "mov r14, [rbp + " S(a) " + 32]\n\t" \
-    "mov r11, [rbp + " S(a) " + 24]\n\t" \
-    "mov r12, [rbp + " S(a) " + 16]\n\t" \
-    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
     "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t" \
     "lea r15, [rdi + rdi]\n\t"           \
     "lea r13, [rsi + rsi]\n\t"           \
     "lea r9,  [r12 + r12]\n\t"           \

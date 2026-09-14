@@ -17,9 +17,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ldat.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ldat.h"
+#include "../../../include/misc.h"
 
 #define NUM_SLOTS 32
 

@@ -34,9 +34,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define N_CALLS    100000
 #define BENCH_REPS 100

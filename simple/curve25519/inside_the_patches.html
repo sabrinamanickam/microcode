@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html{color-scheme:light dark}body{margin:0}img{max-width:100%}</style>
+</head>
+<body>
+<title>Inside the X25519 Patches</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+:root{
+  --ground:#F6F7FA; --panel:#FFFFFF; --sunk:#EEF1F6; --ink:#15171C; --body:#2C313C;
+  --muted:#5D6575; --rule:#DCE0E9; --rule-soft:#E8EBF1;
+  --impl:#2E4C9A; --impl-soft:#DFE5F4;
+  --rev:#6B3FA0;  --rev-soft:#E8DFF4;
+  --good:#136F66; --good-soft:#D6E9E6;
+  --warn:#9C5A2B; --warn-soft:#F2E4D6;
+  --stop:#8C3247; --stop-soft:#F5DEE3;
+  --shadow:0 1px 2px rgba(21,23,28,.05),0 10px 28px -14px rgba(21,23,28,.18);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#131519; --panel:#1A1D23; --sunk:#15181D; --ink:#EDEFF4; --body:#C6CBD6;
+    --muted:#8E97A8; --rule:#2C313A; --rule-soft:#23272F;
+    --impl:#7D9BE8; --impl-soft:#222B43;
+    --rev:#B291DE;  --rev-soft:#2A2140;
+    --good:#4FBCAE; --good-soft:#16302D;
+    --warn:#D79A63; --warn-soft:#31241A;
+    --stop:#E07C93; --stop-soft:#342026;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.65);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#131519; --panel:#1A1D23; --sunk:#15181D; --ink:#EDEFF4; --body:#C6CBD6;
+  --muted:#8E97A8; --rule:#2C313A; --rule-soft:#23272F;
+  --impl:#7D9BE8; --impl-soft:#222B43;
+  --rev:#B291DE;  --rev-soft:#2A2140;
+  --good:#4FBCAE; --good-soft:#16302D;
+  --warn:#D79A63; --warn-soft:#31241A;
+  --stop:#E07C93; --stop-soft:#342026;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.65);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--body);
+ font-family:"IBM Plex Serif",Georgia,serif;font-size:16.5px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.wrap{max-width:940px;margin:0 auto;padding-inline:20px;padding-block:0 80px}
+h1,h2,h3,h4,.lab,th,.tag,.pn{font-family:"IBM Plex Sans",system-ui,sans-serif}
+.mono,td.n,th.n,code,pre{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+
+header{padding-block:56px 34px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.13em;
+ text-transform:uppercase;color:var(--muted);margin:0 0 18px}
+h1{font-size:clamp(30px,5.4vw,46px);line-height:1.08;margin:0 0 18px;color:var(--ink);
+ font-weight:600;letter-spacing:-.02em;text-wrap:balance}
+.standfirst{font-size:18.5px;line-height:1.55;margin:0;max-width:64ch}
+.standfirst strong{color:var(--ink);font-weight:600}
+
+/* part divider */
+.part{margin-top:56px;padding:22px 0 0;border-top:2px solid var(--ink)}
+.part .pn{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;
+ text-transform:uppercase;font-weight:600;margin:0 0 8px}
+.part h2{font-size:clamp(24px,4vw,34px);margin:0 0 10px;color:var(--ink);font-weight:600;letter-spacing:-.015em}
+.part p{margin:0;max-width:66ch;color:var(--muted);font-size:16px}
+.part.impl .pn{color:var(--impl)} .part.rev .pn{color:var(--rev)}
+
+section{padding-block:38px 0}
+.lab{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;
+ text-transform:uppercase;color:var(--impl);margin:0 0 9px;font-weight:500}
+.rev section .lab, section.r .lab{color:var(--rev)}
+h3{font-size:23px;line-height:1.22;margin:0 0 13px;color:var(--ink);font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+h4{font-size:16.5px;margin:26px 0 9px;color:var(--ink);font-weight:600}
+p{margin:0 0 14px;max-width:68ch}
+strong{color:var(--ink);font-weight:600}
+.dim{color:var(--muted)}
+code{font-size:.87em;background:var(--rule-soft);padding:1px 5px;border-radius:3px;color:var(--ink)}
+ul{margin:0 0 14px;padding-left:20px;max-width:68ch}
+li{margin-bottom:7px}
+
+pre{background:var(--sunk);border:1px solid var(--rule);border-radius:4px;
+ padding:15px 16px;overflow-x:auto;font-size:12.8px;line-height:1.62;margin:16px 0;color:var(--ink)}
+pre .c{color:var(--muted)}
+pre .k{color:var(--impl);font-weight:600}
+pre .h{background:var(--impl-soft);border-radius:2px;padding:0 3px}
+
+.scroll{overflow-x:auto;margin:18px 0 6px}
+table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:440px}
+th{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600;
+ text-align:left;padding:0 14px 9px 0;border-bottom:1px solid var(--rule);white-space:nowrap}
+th.n,td.n{text-align:right;padding-right:0;padding-left:16px}
+td{padding:9px 14px 9px 0;border-bottom:1px solid var(--rule-soft)}
+tr.me td{color:var(--ink);font-weight:600}
+tr.me td:first-child{box-shadow:inset 3px 0 0 var(--impl);padding-left:11px}
+tr.rival td:first-child{box-shadow:inset 3px 0 0 var(--good);padding-left:11px}
+tr.tot td{border-top:1.5px solid var(--rule);border-bottom:none;color:var(--ink);font-weight:600}
+caption{caption-side:bottom;text-align:left;font-size:13px;color:var(--muted);padding-top:11px;line-height:1.5}
+
+.key{border:1px solid var(--rule);border-left:3px solid var(--impl);background:var(--panel);
+ padding:17px 19px;margin:20px 0;border-radius:0 3px 3px 0;box-shadow:var(--shadow)}
+.key p{margin:0;max-width:none}
+.note{border-left:3px solid var(--warn);background:var(--warn-soft);padding:15px 18px;margin:20px 0;border-radius:0 3px 3px 0}
+.note p{margin:0;max-width:none;font-size:15px}
+.note .tag{display:block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+ text-transform:uppercase;color:var(--warn);margin-bottom:6px;font-weight:600}
+
+/* claim cards */
+.claims{display:flex;flex-direction:column;gap:1px;background:var(--rule);border:1px solid var(--rule);
+ border-radius:4px;overflow:hidden;margin:20px 0}
+.cl{background:var(--panel);padding:17px 20px}
+.cl .gh{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.gt{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+ font-weight:600;padding:2px 7px;border-radius:2px;flex:none}
+.gt.a{color:var(--good);background:var(--good-soft)}
+.gt.b{color:var(--stop);background:var(--stop-soft)}
+.gt.c{color:var(--warn);background:var(--warn-soft)}
+.cl h4{margin:0;font-size:16px;line-height:1.35}
+.cl p{margin:0;font-size:14.8px;color:var(--muted);max-width:none}
+.cl p + p{margin-top:8px}
+
+/* layer stack */
+.stack{display:flex;flex-direction:column;gap:1px;background:var(--rule);border:1px solid var(--rule);
+ border-radius:4px;overflow:hidden;margin:20px 0}
+.ly{background:var(--panel);padding:13px 18px;display:grid;grid-template-columns:190px 1fr;gap:16px;align-items:baseline}
+.ly b{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--impl);font-weight:600}
+.ly span{font-size:14.5px;color:var(--body)}
+@media(max-width:620px){.ly{grid-template-columns:1fr;gap:3px}}
+
+footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--rule);font-size:13px;color:var(--muted)}
+footer p{max-width:none;margin:0 0 8px}
+footer b{color:var(--body);font-weight:600}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Goldmont N3350 · Celeron · pinned 1.1 GHz · 2026-09-14</p>
+  <h1>Inside the X25519 Patches</h1>
+  <p class="standfirst">What the implementation actually does, why each decision was made, and the case to put in front of a reviewer — including <strong>the parts that argue against us</strong>, which are the parts a referee will find first.</p>
+</header>
+
+<div class="part impl">
+  <p class="pn">Part I</p>
+  <h2>How the implementation works</h2>
+  <p>Five layers, from the micro-op schedule up to the scalar multiplication. Each one exists because of a measured constraint, not a preference.</p>
+</div>
+
+<section>
+  <p class="lab">1 — The shape of it</p>
+  <h3>Two microcode patches, one inline-assembly ladder</h3>
+  <div class="stack">
+    <div class="ly"><b>fe_mul patch</b><span>58 triads, 174 µops. Five independent 128-bit accumulators. Hooked on <code>vmwrite</code> (0x0cd8).</span></div>
+    <div class="ly"><b>fe_sq patch</b><span>42 triads, 123 µops. Symmetry gives 15 products instead of 25. Hooked on <code>vmread</code> (0x0618).</span></div>
+    <div class="ly"><b>wrapper macros</b><span>Marshal 10 limbs into fixed architectural registers, fire the hooked instruction, store 5 back.</span></div>
+    <div class="ly"><b>ladder_step</b><span>One <code>asm volatile</code> block per ladder iteration. RBP addresses the whole state; five register chains skip reloads.</span></div>
+    <div class="ly"><b>fe_invert</b><span>All 254 squarings of the Fermat chain in one asm block, each run chained through registers.</span></div>
+  </div>
+  <p>100 of the 128 available triads are used. That budget is the binding constraint on everything in Part I — it is why there is no fused multi-operation patch, and it is the reason the 4×64 control loses.</p>
+</section>
+
+<section>
+  <p class="lab">2 — The mechanism</p>
+  <h3>Per-destination carry state is the whole idea</h3>
+  <p>On Goldmont, an arithmetic µop leaves condition state attached to <em>its destination register</em>. <code>SETCC_CONDB</code> materialises that carry as a 0 or 1 into an ordinary register. Five accumulators therefore run five carry chains that never interact.</p>
+  <p>Architectural x86 cannot do this. Every <code>ADC</code> reads the one carry flag in RFLAGS, so independent accumulation chains must be serialised or interleaved by hand — and this core has neither BMI2 nor ADX, so there is no <code>MULX</code>/<code>ADCX</code>/<code>ADOX</code> escape.</p>
+
+  <div class="key">
+    <p><strong>The evidence is a controlled A/B, and it is the strongest thing in the paper.</strong> A variant using the <code>GENARITHFLAGS</code>+<code>ADC</code> bridge is <em>fewer operations</em> — 3 per accumulate instead of 4, 52 triads instead of 58 — and it is <strong>slower: 104.0 against 102.8 cycles</strong>. It loses because all 20 bridged carries funnel through the single architectural CF and serialise, while five SETCC domains do not. Fewer ops, more time: that is the interface difference showing up as a number.</p>
+  </div>
+
+  <h4>What one accumulate looks like</h4>
+<pre><span class="c">/* four µops, not three -- and the fourth is what makes it fast */</span>
+ADD   (lo_j,  lo_j,  lo_p)     <span class="c">// accumulate the product's low half</span>
+SETCC (c,     lo_j)            <span class="c">// materialise THIS accumulator's carry</span>
+ADD   (hi_p,  hi_p,  c)        <span class="c">// fold it into the product's high half...</span>
+ADD   (hi_j,  hi_j,  hi_p)     <span class="c">// ...not into hi_j, halving that chain: 4 deep, not 8</span></pre>
+  <p>Folding the carry into the product's high half rather than the accumulator's is a small thing that halves a dependency chain. Do not "save" the fourth operation.</p>
+</section>
+
+<section>
+  <p class="lab">3 — fe_mul</p>
+  <h3>Three tricks past the obvious schoolbook</h3>
+  <h4>Row 0 initialises for free</h4>
+  <p><code>MUL</code> writes its low half <em>into</em> srcB. So staging b<sub>j</sub> into lo<sub>j</sub> and multiplying <em>is</em> the initialisation of accumulator j — no ADD and no SETCC for the first product of every limb. Five accumulators, five free initialisations.</p>
+  <h4>19·b<sub>j</sub> without destroying b<sub>j</sub></h4>
+  <p><code>IMUL64L</code> is a non-destructive 64-bit low multiply: both sources survive, unlike <code>MUL</code>. Four of them in PREP produce the reduced operands while b stays live for row 0.</p>
+  <h4>Two fully parallel reduction passes</h4>
+  <p>OpenSSL propagates each carry into its 128-bit accumulator — two instructions natively, but <code>ADD</code>+<code>SETCC</code>+<code>ADD</code> in microcode. Splitting every accumulator first instead:</p>
+<pre>r_j = lo_j &amp; MASK51          q_j = (lo_j &gt;&gt; 51) | (hi_j &lt;&lt; 13)</pre>
+  <p>makes every subsequent carry a plain 64-bit <code>ADD</code>, and all five splits issue in parallel. The caller passes 2<sup>51</sup>−1 in RCX so the mask is one <code>AND</code> instead of a <code>SHL13</code>/<code>SHR13</code> pair — RCX was free, because <code>MUL</code>'s destination register is unconstrained.</p>
+  <div class="note">
+    <span class="tag">Input bound</span>
+    <p>Limbs must be below 2<sup>54</sup>. The binding constraint is 19·q<sub>4</sub> &lt; 2<sup>64</sup> with q<sub>4</sub> = acc<sub>4</sub> ≫ 51 and acc<sub>4</sub> &lt; 5·2<sup>2L</sup>, needing L &lt; 54.2. The ladder feeds at most 2<sup>53.1</sup> — <code>FE_SUB</code>'s 2p bias on top of a limb below 2<sup>52</sup>.</p>
+  </div>
+  <p>The result is packed at exactly <strong>3.0 µops per triad</strong> (174 / 58) with a dependency depth of 25.4 against a 48.6 issue floor — no longer dependency-bound, and with no slack to remove a triad without removing work.</p>
+</section>
+
+<section>
+  <p class="lab">4 — The calling convention</p>
+  <h3>A 30-cycle stall that lives in the load order</h3>
+  <p>The patch reads and writes fixed architectural registers, so the wrapper marshals limbs into place before the hooked instruction and stores results after:</p>
+<pre>fe_mul   a → rdi rsi r12 r11 r14      b → r15 r13 r9 r10 rbx    rcx = 2^51-1
+         fire: <span class="k">vmwrite rcx, rdx</span>
+         out ← r15 r13 r9 r10 rax
+
+fe_sq    a → rdi rsi r12 r11 r14   2a → r15 r13 r9 r10   19·a4 → rbx   19·a3 → rdx
+         fire: <span class="k">.byte 0x0f, 0x78, 0xca</span>   <span class="c">(vmread rdx, rcx)</span>
+         out ← rdi r9 r10 rbx rax</pre>
+  <div class="key">
+    <p><strong>The five loads must run limb 0 → 4.</strong> They once ran 4 → 0. Stores are ascending, so a descending load order makes the first load of one operation read <code>[x+32]</code> one instruction after the previous operation's last store wrote it. That store-to-load distance of 1 costs about 30 cycles on Goldmont. Ascending puts each load five instructions after its producing store and the stall disappears: <strong>122.3 → 81.8 cycles</strong> per dependent <code>fe_sq</code>, with the patch untouched. Do not tidy these back into descending order.</p>
+  </div>
+  <p>A firing costs <strong>16.2 cycles</strong> before any arithmetic — measured by firing the real wrapper at a one-triad no-op patch. That number carries most of Part II.</p>
+</section>
+
+<section>
+  <p class="lab">5 — The ladder</p>
+  <h3>One assembly block per step, five register chains</h3>
+  <p>Each Montgomery ladder iteration is a single <code>asm volatile</code> block with RBP holding a pointer to a struct containing every field element at a literal offset. <code>FE_ADD</code> and <code>FE_SUB</code> are written to leave their five results in exactly the registers the following patch firing wants, so a chained consumer skips five reloads:</p>
+<pre>FE_ADD(A, x2, z2)        FE_SQ_FROM_REGS(AA)     <span class="c">// A never reloaded</span>
+FE_SUB(B, x2, z2)        FE_SQ_FROM_REGS(BB)
+FE_SUB_NOSTORE(x3, z3)   FE_MUL_FROM_REGS_A(DA, A)   <span class="c">// D never stored either</span>
+FE_ADD_NOSTORE(x3, z3)   FE_MUL_FROM_REGS_A(CB, B)</pre>
+  <p>Steps 6–9 are <strong>reordered 7-8-6-9</strong>: computing D before C lets both <code>D→DA</code> and <code>C→CB</code> chain, where the natural order chains only one. The dataflow is unchanged — C and D both depend only on x<sub>3</sub> and z<sub>3</sub>, and feed different multiplies.</p>
+  <h4>Dead stores</h4>
+  <p>The step was issuing 90 stores per iteration and 25 of them were never read: C and D are consumed from registers and their slots read by nothing; t<sub>0</sub> is written <em>four</em> times per step and three of those writes are dead. Removing them — 6,375 dead stores per scalar multiplication — was worth <strong>3,179 cycles</strong>, measured against a control band of −776 to +395 across four untouched contenders at a fixed build configuration. The remaining 65 stores are all live.</p>
+  <h4>Inversion</h4>
+  <p>The Fermat chain's 254 squarings fall into runs of 1, 2, 1, 5, 10, 20, 10, 50, 100, 50, 5. Each run is one <code>.rept</code> inside the same asm block: the head loads, the tail stores, and every intermediate stays in registers with four register renames between firings. Only run boundaries touch memory.</p>
+</section>
+
+<section>
+  <p class="lab">6 — The budget</p>
+  <h3>Where 277,794 cycles go</h3>
+  <div class="scroll">
+  <table>
+    <caption>Per X25519, from <code>inline2_profile</code> at the pinned base frequency. Reconstruction accounts for 98.8% of the measured total.</caption>
+    <thead><tr><th>Component</th><th class="n">Cycles</th><th class="n">Share</th></tr></thead>
+    <tbody>
+      <tr class="me"><td>Field operations <span class="dim">(5 mul + 4 sq) × 255</span></td><td class="n">215,960</td><td class="n">77%</td></tr>
+      <tr><td>fe_invert</td><td class="n">21,164</td><td class="n">8%</td></tr>
+      <tr><td>Additions and subtractions</td><td class="n">20,461</td><td class="n">7%</td></tr>
+      <tr><td>Conditional swaps</td><td class="n">5,590</td><td class="n">2%</td></tr>
+      <tr class="tot"><td>Of which: pure patch-entry cost <span class="dim">(2,561 firings × 16.2)</span></td><td class="n">41,437</td><td class="n">15%</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>One scalar multiplication issues <strong>1,287 multiplications and 1,274 squarings</strong> — 255 ladder steps at five and four, plus 254 squarings and 12 multiplications in the inversion and final conversion. 2,561 firings, each paying the entry cost once.</p>
+</section>
+
+<div class="part rev">
+  <p class="pn">Part II</p>
+  <h2>What to put in front of a reviewer</h2>
+  <p>Ordered by how well each claim survives someone actively trying to break it. The weakest thing you can do is lead with a ranking.</p>
+</div>
+
+<section class="r">
+  <p class="lab">7 — The claims</p>
+  <h3>Make these four, in this order</h3>
+
+  <div class="claims">
+    <div class="cl">
+      <div class="gh"><span class="gt a">Claim 1</span><h4>The arithmetic ties the fastest hand-tuned assembly for this field</h4></div>
+      <p>With each side's invocation floor removed, microcode's field multiplication is <strong>86.6 cycles against OpenSSL fe51's 87.0</strong> — 0.4% apart. Both floors are measured, not modelled: 16.2 for microcode (real wrapper, one-triad no-op patch) and 10.1 for a native call (same call shape, same 10-load/5-store traffic, no arithmetic).</p>
+      <p>Say <em>parity</em>, never a win. A 0.4% margin on a derived quantity evaporates if a referee disputes either floor by two cycles, and it buys nothing. Quote <code>fe_mul</code> only — see the caution below.</p>
+    </div>
+    <div class="cl">
+      <div class="gh"><span class="gt a">Claim 2</span><h4>1.26–1.35× over every other 5×51 backend, on all 24 configurations</h4></div>
+      <p>On one fixed C ladder with only the field operations swapped, microcode beats fiat-crypto, CryptOpt, the amd64-51 assembly and hand-written C in <strong>24 of 24</strong> matched compiler and optimisation configurations. This is the strongest unqualified result, and it does not depend on the floor argument at all.</p>
+    </div>
+    <div class="cl">
+      <div class="gh"><span class="gt a">Claim 3</span><h4>Benefit scales with work per firing — and that is the paper's finding</h4></div>
+      <p>Entering patch RAM costs a flat <strong>16.2 cycles regardless of operand count</strong>; an equivalent native call costs 10.1 for a multiply's ten loads and 6.4 for a square's five. Over 2,561 firings the differential is 20,285 cycles, and the measured same-ladder gap to OpenSSL is 21,087 — <strong>96% accounted for</strong>, with the non-field residue matching to 2,833 cycles on an identical ladder.</p>
+      <p>This is what unifies both case studies. Keccak amortises one entry over 1,396 triads and wins by 1.084×; X25519 pays it 2,561 times and ties. Two ends of one measured curve, not two unrelated results.</p>
+    </div>
+    <div class="cl">
+      <div class="gh"><span class="gt a">Claim 4</span><h4>The negative result is a boundary, not an embarrassment</h4></div>
+      <p>The same replacement in a saturated 4×64 representation runs at <strong>0.595×</strong> — microcode 1.68× slower than the assembly it replaces, ladder held constant. The unsaturated form leaves thirteen spare bits per limb so carries can be accumulated explicitly; the saturated form has no headroom and must propagate through RFLAGS, destroying the independent carry structure. Its 75-triad multiplier also leaves no room for a dedicated squarer under the 128-triad cap, so squaring becomes mul(a,a).</p>
+      <p>Lead with this rather than burying it. It converts "microcode is faster" into "microcode is faster when the representation exposes a carry structure the patch can exploit and the kernels fit" — a much harder claim to attack, and the one actually supported.</p>
+    </div>
+  </div>
+</section>
+
+<section class="r">
+  <p class="lab">8 — The traps</p>
+  <h3>Retire these before submission</h3>
+  <div class="claims">
+    <div class="cl">
+      <div class="gh"><span class="gt b">Do not say</span><h4>"Fastest 5×51" or "lowest kernel cost"</h4></div>
+      <p>Both are false with OpenSSL in the table. It beats us at kernel level (97.1 / 73.2 against 102.8 / 81.8) and end to end (253,971 against 277,794), and it has been in the benchmark binary the whole time — which makes an omission harder to explain than the loss. s2n-bignum and the OpenSSL-on-our-ladder control belong in the tables too.</p>
+    </div>
+    <div class="cl">
+      <div class="gh"><span class="gt c">Handle with care</span><h4>The fe_sq parity figure</h4></div>
+      <p>Arithmetic-only <code>fe_sq</code> reads 0.982× in our favour, but the comparison flatters us: <code>FE_SQ</code>'s <code>lea</code>/<code>imul</code> precompute sits inside the <em>microcode</em> floor and is subtracted away, while OpenSSL's <code>fe51_sqr</code> keeps its doubling inside the routine. <code>fe_mul</code> has no such asymmetry — its 19·b<sub>j</sub> precompute is inside the patch. Quote the multiply, or state the asymmetry in the same breath.</p>
+    </div>
+    <div class="cl">
+      <div class="gh"><span class="gt b">Do not ship</span><h4>The five-accumulator fe_sq</h4></div>
+      <p>It is correct in simulation (0/3000), 41 triads against 42, and 2.9× shallower — depth 20.5 against 59.3 — and would be worth about 17,000 cycles. It also hard-resets the machine. Five crashes. The most recent attempt eliminated the one µop form the stable <code>fe_mul</code> never uses (same-register <code>MUL</code>) and it still died. Do not cite predicted numbers from an unshippable patch.</p>
+    </div>
+  </div>
+</section>
+
+<section class="r">
+  <p class="lab">9 — Standing</p>
+  <h3>Report the position honestly; it is defensible</h3>
+  <div class="scroll">
+  <table>
+    <caption>End-to-end, median cycles per X25519, each row at its own best configuration across 24 compiler and optimisation settings. Complete implementations differing in representation, ladder, inversion and integration — this establishes position and attributes nothing.</caption>
+    <thead><tr><th>Implementation</th><th>Representation</th><th class="n">Cycles</th></tr></thead>
+    <tbody>
+      <tr><td>s2n-bignum, verified assembly</td><td>4×64</td><td class="n">244,393</td></tr>
+      <tr class="rival"><td>OpenSSL, own ladder + fe51 assembly</td><td>5×51</td><td class="n">253,971</td></tr>
+      <tr class="rival"><td>OpenSSL fe51 on our C ladder</td><td>5×51</td><td class="n">262,501</td></tr>
+      <tr><td>Bernstein–Schwabe amd64-64</td><td>4×64</td><td class="n">271,735</td></tr>
+      <tr class="me"><td>This work</td><td>5×51</td><td class="n">277,794</td></tr>
+      <tr><td>amd64-51 framework + microcode</td><td>5×51</td><td class="n">290,179</td></tr>
+      <tr><td>donna_c64</td><td>5×51</td><td class="n">337,723</td></tr>
+      <tr><td>fiat-crypto</td><td>5×51</td><td class="n">355,994</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Fifth of fifteen, 2.2% behind amd64-64 — and the dead-store work measured a further 3,179 cycles that the sweep in flight should record, putting it near 274,600 and about 1.1% behind. The honest framing is that <em>a microcode field backend on a passively-cooled Celeron lands within a couple of percent of the reference hand-written assembly for the curve</em>, while tying the fastest available field arithmetic on the operation itself.</p>
+</section>
+
+<section class="r">
+  <p class="lab">10 — Questions to expect</p>
+  <h3>Four a referee will ask</h3>
+  <h4>"Is the comparison fair — you time your own code inline and everyone else through a call."</h4>
+  <p>Answered by measuring both floors. The kernel table reports full invocation cost for every backend; Table K5 strips a symmetric floor from each side. The harness is, if anything, tilted toward microcode — sixteen operations per asm block with no function boundary against a real call per operation for the natives — and microcode still loses to OpenSSL at that level.</p>
+  <h4>"Is it constant time?"</h4>
+  <p>No data-dependent branch and no data-dependent addressing. The patches are straight-line; every field element resolves through a fixed displacement; the conditional swap is mask-and-XOR with no branch. The same assumption every constant-time native implementation makes — that the underlying operations have data-independent latency — applies here too.</p>
+  <h4>"Does this generalise beyond one core?"</h4>
+  <p>No, and say so plainly. This is one microarchitecture, one patch RAM size, one hook mechanism. The 4×64 control shows it does not even generalise across representations on the same core. The contribution is that the microcode interface is a <em>different</em> interface with measurable consequences, not that it is universally faster.</p>
+  <h4>"What about installation cost?"</h4>
+  <p>Once at startup, outside every timed region. Worth one sentence rather than silence.</p>
+</section>
+
+<section class="r">
+  <p class="lab">11 — Methodology</p>
+  <h3>Disclose the measurement, including what nearly went wrong</h3>
+  <ul>
+    <li><strong>Pinned.</strong> Turbo disabled, <code>userspace</code> governor at base. RDTSC ticks at the TSC's nominal 1.094 GHz while the core bursts to 2.4, so an unpinned run reports every number about 2.18× too fast <em>with the ranking intact</em>. That is the shape that reads as a breakthrough. Both the sweep and, now, the standalone binaries refuse to run unpinned.</li>
+    <li><strong>Same process, interleaved.</strong> One repetition of every contender per round, round-robin, so drift lands equally on all of them rather than on whoever ran first. Verified flat: 1, 2, 4 and 15 contenders give the same result to 0.03%.</li>
+    <li><strong>Best of 24 configurations</strong> per implementation — three gcc and three clang releases × four optimisation levels — matching how SUPERCOP selects. Three runs per configuration reduced to a median of medians.</li>
+    <li><strong>Correctness gated in-process.</strong> All fifteen contenders pass RFC 7748 before any timing, in the same binary that then reports the numbers.</li>
+    <li><strong>Frequency bracketed</strong> before and after the sweep; the artifact records the drift (+0.000% on this run).</li>
+  </ul>
+  <div class="note">
+    <span class="tag">Worth a footnote in the paper</span>
+    <p>Two measurement faults were found and fixed on the final day. A stale column list in the table generator silently discarded three contenders — including OpenSSL — that the sweep had been measuring all along, because <code>zip()</code> stops at the shorter sequence. And <code>EXTRA_CPPFLAGS</code>, documented in two source files as the way to select a parked patch, was referenced nowhere in the Makefile, so every such build silently produced the shipped one. Both now fail loudly. A reviewer who asks how you know your tables match your code deserves a better answer than "they should".</p>
+  </div>
+</section>
+
+<footer>
+  <p><b>Hardware.</b> Intel Celeron N3350, Goldmont, core 0, <code>taskset -c 0</code>, turbo off, <code>userspace</code> governor at 1094400 kHz; delivered core 1100 MHz against a 1094 MHz TSC, so ticks × 1.00548 = core cycles. That correction is common-mode and every ratio here is invariant to it.</p>
+  <p><b>Numbers.</b> End-to-end and controlled figures from the sweep of 2026-09-14 20:21 (24/24 configurations, frequency stable to +0.000%). Kernel figures from <code>bench_kernel.c</code>; per-operation and top-down figures from <code>inline2_profile</code>. A further sweep was running when this was written and should lower <em>this work</em> by roughly 3,179 cycles; no other contender is affected.</p>
+  <p><b>Status.</b> The five-accumulator <code>fe_sq</code> is parked behind <code>-DENABLE_SQ_5ACC</code> and is not shipped. Everything reported here is from the shipping configuration: 58-triad <code>fe_mul</code>, 42-triad <code>fe_sq</code>.</p>
+</footer>
+</div>
+
+</body>
+</html>

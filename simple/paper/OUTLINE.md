@@ -116,7 +116,7 @@ machine" story lives.
 ### 3.2 Execution semantics (intra-triad)
 - Fully sequential within a triad: slot k reads everything slots <k wrote. RAW/WAR/WAW all
   confirmed for arch + TMP regs across every slot pair. WAW: later slot wins.
-  (Source: `microcode_findings.md` §3; memory `project_triad_hazards`; `tests/test_raw_war_waw.c`.)
+  (Source: `microcode_findings.md` §3; memory `project_triad_hazards`; `Paper_probes/test_raw_war_waw.c`.)
 - This is what lets us pack 3 dependent ops per triad (the carry-chain "triple-pack").
 
 ### 3.3 The flag domains — the single most important non-obvious fact
@@ -367,7 +367,7 @@ or a citation before it can go in the paper; ✗ = known gap.
 | C9 | Per-`vmwrite` dispatch overhead ≈ 7 cyc, measured directly. | `report.md` §5.3 (8.97 cyc total − 1 cyc/triad). | ✓ |
 | C10 | ADC is unusable in patches; carry chains must go through ADD→TMP + SETCC (two flag domains). | `microcode_findings.md` §4–5; `EXPERIMENTS.md` flag section; `adc_findings.md`. | ✓ |
 | C11 | RSP is usable as a 32nd data register (save/restore once/firing); it unlocked D-in-registers for Keccak. | `keccak_understand.md` Decision 5; `probe_rsp.c` (PASS). | ✓ |
-| C12 | Intra-triad semantics fully sequential (RAW/WAR/WAW, all slot pairs, arch+TMP). | `microcode_findings.md` §3; `tests/test_raw_war_waw.c`. | ✓ |
+| C12 | Intra-triad semantics fully sequential (RAW/WAR/WAW, all slot pairs, arch+TMP). | `microcode_findings.md` §3; `Paper_probes/test_raw_war_waw.c`. | ✓ |
 | C13 | Memory: 8-bit signed offset, ≤1 mem-op/triad, SEG_DS; MOVE traps to ~800k-cyc slow path. | `keccak_understand.md` Decision 4; probes; memory `feedback_move_dsz64`. | ✓ |
 | C14 | Looped microcode works (UJMPCC CONDNZ + intra-triad XOR-sets-ZF, count-up). | `keccak_understand.md` loop-control; `probe_loop.c`; memory `project_microcode_loops`. | ✓ |
 | C15 | Generator+simulator catches hardware-fatal bugs (signed-offset truncation) in software before hardware. | `keccak_understand.md` Decision 3; `keccak_gen.py`. | ✓ |

@@ -1,0 +1,32 @@
+00 helpers (phase A+B, B WILL LIKELY CRASH)
+01 installing patches
+02 installed
+03 about to fire FE_SQ (macro, mem->mem, standalone block)
+04 FE_SQ survived
+      FE_SQ: matches fiat
+05 about to fire FE_SQ_FROM_REGS
+06 FE_SQ_FROM_REGS survived
+      FE_SQ_FROM_REGS: matches fiat
+07 about to fire FE_MUL then FE_SQ_FROM_REGS in one block
+08 mixed mul+sq block survived
+      sq after mul: matches fiat
+09.1 about to fe_sq_ucode_n(n=1)
+10.1 fe_sq_ucode_n(n=1) survived
+      fe_sq_ucode_n(1): matches fiat
+09.2 about to fe_sq_ucode_n(n=2)
+10.2 fe_sq_ucode_n(n=2) survived
+09.3 about to fe_sq_ucode_n(n=3)
+10.3 fe_sq_ucode_n(n=3) survived
+09.4 about to fe_sq_ucode_n(n=4)
+10.4 fe_sq_ucode_n(n=4) survived
+09.5 about to fe_sq_ucode_n(n=5)
+10.5 fe_sq_ucode_n(n=5) survived
+11.10 about to fe_sq_ucode_n(n=10)
+12.10 fe_sq_ucode_n(n=10) survived
+11.20 about to fe_sq_ucode_n(n=20)
+12.20 fe_sq_ucode_n(n=20) survived
+11.50 about to fe_sq_ucode_n(n=50)
+12.50 fe_sq_ucode_n(n=50) survived
+11.100 about to fe_sq_ucode_n(n=100)
+12.100 fe_sq_ucode_n(n=100) survived
+13 about to run fe_invert_ucode (uses n = 1,2,5,10,20,50,100)

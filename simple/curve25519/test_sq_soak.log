@@ -1,0 +1,6 @@
+00 mode=chain n=1000  fe_sq variant=five-accumulator (41 triads, same-register MULs eliminated)
+01 helpers done, microcode state is stock
+02 about to patch_ucode + hook
+03 patches installed and hooked -- install did NOT crash
+04 about to fire fe_sq_ucode_n back-to-back, 1000 deep -- THIS IS THE SHAPE THAT KILLED THE MACHINE on 2026-09-12
+04.hb 0 / 1000 fired so far

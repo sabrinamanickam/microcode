@@ -19,9 +19,9 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <setjmp.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define MP_INDEX    19
 #define HOOK_ADDR   0x0cd8

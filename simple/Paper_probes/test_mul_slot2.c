@@ -40,9 +40,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define IN_A  UINT64_C(0x100000007)   /* 2^32 + 7 */
 #define IN_B  UINT64_C(0x100000003)   /* 2^32 + 3 */

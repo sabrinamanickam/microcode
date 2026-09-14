@@ -12,9 +12,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include "../../include/patch.h"
-#include "../../include/ucode_macro.h"
-#include "../../include/misc.h"
+#include "../../../include/patch.h"
+#include "../../../include/ucode_macro.h"
+#include "../../../include/misc.h"
 
 #define _ADC_DSZ64 (0x37eUL << 32)
 #define ADC_DSZ64_DRR(dst, src0, src1) ( _ADC_DSZ64 | INSTR_DRR(dst, src0, src1) )

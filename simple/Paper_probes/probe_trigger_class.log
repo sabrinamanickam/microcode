@@ -1,0 +1,6 @@
+ATTEMPT arm=1 vmwrite  (0x0cd8)
+RESULT  arm=1 total=896618
+ATTEMPT arm=2 vmread   (0x0618)
+RESULT  arm=2 total=896614
+ATTEMPT arm=3 rdseed   (0x0430)
+RESULT  arm=3 total=896614
