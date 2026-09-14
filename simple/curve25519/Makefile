@@ -25,7 +25,7 @@ all: $(PROG)_static
 # full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
 # contender; full_curve25519 is kept on disk but no longer benched) and needs
 # the identical flags + external objects.
-ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64,$(PROG)))
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64 bench_kernel inline2_profile test_new_contenders probe_issue probe_sched test_sq_fire test_sq_paths test_invert_bisect test_sq_why probe_sq_lat probe_trigger probe_wrapper probe_oplat probe_ldorder,$(PROG)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
 
@@ -324,7 +324,8 @@ ifeq ($(PROG),full_curve25519_inline2)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
-              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o s2n_x25519_alt.o \
+              openssl_x25519_asm.o openssl_x25519.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
@@ -376,6 +377,157 @@ endif
 # with the 5x51 pair (108 triads, also @U7c00) under the 128-triad cap.
 ifeq ($(PROG),bench_table_4x64)
 EXTRA_OBJS := $(AMD64U_OBJS) $(AMD64A_OBJS) $(AMD64_OBJS)
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# bench_kernel: LEVEL 1 of the evaluation — isolated fe_mul/fe_sq kernel cost
+# for every 5x51 backend in ONE process (microcode, fiat, CryptOpt, amd64-51
+# asm, hand-C) plus the microcode wrapper/redirection breakdown. Same include
+# mode and object set as bench_table, since it reuses inline2's contenders.
+# Runs native-only without sudo; the microcode arms need root.
+# OpenSSL fe51 assembly, generated from the shipped perlasm. This build emits
+# the fe51 path only; the fe64 entry points become ud2 stubs because they need
+# ADX, which the N3350 lacks, so OpenSSL selects fe51 on this core regardless.
+S2NB_DIR := ../supercop-20260330/s2n-bignum
+openssl_x25519_asm.o: openssl_x25519_asm.s
+	$(CC) -c $< -o $@
+
+# s2n-bignum verified assembly. Only the _alt variants are usable here: the
+# base bignum_*_p25519 use MULX/ADCX/ADOX and fault on Goldmont.
+s2n_mul_p25519_alt.o: $(S2NB_DIR)/x86/curve25519/bignum_mul_p25519_alt.S
+	$(CC) -I$(S2NB_DIR)/include -c $< -o $@
+s2n_sqr_p25519_alt.o: $(S2NB_DIR)/x86/curve25519/bignum_sqr_p25519_alt.S
+	$(CC) -I$(S2NB_DIR)/include -c $< -o $@
+s2n_x25519_alt.o: $(S2NB_DIR)/x86/curve25519/curve25519_x25519_alt.S
+	$(CC) -I$(S2NB_DIR)/include -c $< -o $@
+
+ifeq ($(PROG),probe_shrd)
+EXTRA_OBJS :=
+endif
+
+ifeq ($(PROG),probe_carry)
+EXTRA_OBJS :=
+endif
+
+ifeq ($(PROG),probe_opsem)
+EXTRA_OBJS :=
+endif
+
+ifeq ($(PROG),probe_issue)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),test_sq_why)
+CFLAGS += -DENABLE_SQ_5ACC -DSQ_MASK_R8
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),test_invert_bisect)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),test_sq_paths)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),test_sq_fire)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),probe_sched)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),test_new_contenders)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              s2n_x25519_alt.o openssl_x25519_asm.o openssl_x25519.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),bench_kernel)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o \
+              openssl_x25519_asm.o s2n_mul_p25519_alt.o s2n_sqr_p25519_alt.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+# probe_sq_lat: diagnostic for the fe_sq dependent-chain deficit. Same
+# include mode / object set as bench_kernel (it reuses inline2's contenders
+# and the production patches). Needs root.
+# probe_trigger: 2x2 cross isolating the trigger instruction (vmwrite vs
+# vmread ucode entry point) from the wrapper, plus the hook-swap price.
+ifeq ($(PROG),probe_ldorder)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),probe_oplat)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),probe_wrapper)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),probe_trigger)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
+ifeq ($(PROG),probe_sq_lat)
+EXTRA_OBJS := $(AMD51_OBJS) \
+              $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
+              $(AMD51A_OBJS) $(AMD51UC_OBJS) \
+              $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 

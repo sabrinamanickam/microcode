@@ -56,8 +56,9 @@ REPS_MAIN = bench_reps("full_curve25519_inline2.c")
 REPS_A64  = bench_reps("full_curve25519_amd64_64_ucode.c")
 
 A1_HDR = ["ucode","a64/asm","a64/asmCld","a64/ucode","a51/asm","a51/asmCld",
-          "a51/ucCld","a51/ucode","cryptopt","fiat","hand-C","donna"]
-A2_HDR = ["uc/Clad","a51op/Clad","cryptopt","fiat","hand-C"]
+          "a51/ucCld","a51/ucode","cryptopt","fiat","hand-C","donna",
+          "s2n-bignum/asm","osslops/C-ladder","openssl"]
+A2_HDR = ["uc/Clad","a51op/Clad","osslops/C-ladder","cryptopt","fiat","hand-C"]
 
 TXT = open(SRC).read()
 
@@ -68,6 +69,13 @@ def parse(start, end, hdr):
         if not re.match(r'^\|\s*(gcc|clang)', line):
             continue
         cells = [c.strip().replace('**','') for c in line.strip().strip('|').split('|')]
+        # zip() below stops at the shorter sequence, so a header list that has
+        # fallen behind the sweep would silently DISCARD the trailing columns
+        # (this is exactly how openssl, osslops and s2n went missing from the
+        # paper tables while being measured on every run). Fail loudly instead.
+        assert len(cells) - 1 == len(hdr), (
+            f"{start}: table has {len(cells)-1} data columns but the header list "
+            f"has {len(hdr)} -- update it, do not let columns be dropped")
         cfgs.append(cells[0])
         for h, v in zip(hdr, cells[1:]):
             cols[h].append(int(v))
@@ -159,8 +167,13 @@ for k, v, src in _setup:
 w("")
 
 # ── Table 1 ───────────────────────────────────────────────────────────────
-B51 = [("microcode","uc/Clad"), ("fiat-crypto","fiat"), ("CryptOpt","cryptopt"),
-       ("hand-written C","hand-C"), ("amd64-51 asm","a51op/Clad")]
+# (name, key, source). osslops/C-ladder runs the IDENTICAL C ladder as
+# uc/Clad -- same 15 field ops in the same order, same cswap, same mul121665 --
+# so it belongs in this controlled block, and FIELDOP_ISO now carries it as a
+# proper A.2 column.
+B51 = [("microcode","uc/Clad","A2"), ("OpenSSL fe51 asm","osslops/C-ladder","A2"),
+       ("fiat-crypto","fiat","A2"), ("CryptOpt","cryptopt","A2"),
+       ("hand-written C","hand-C","A2"), ("amd64-51 asm","a51op/Clad","A2")]
 B64 = [("assembly","a64/asmCld"), ("microcode","a64/ucode")]
 
 w("## Table 1 — Controlled X25519 field-arithmetic comparison")
@@ -168,8 +181,9 @@ w("")
 w("| Representation | Common ladder / framework | Field backend | kcycles/X25519 | Relative cycles |")
 w("|---|---|---|---:|---:|")
 base51 = best(A2["uc/Clad"])
-for i, (name, key) in enumerate(B51):
-    b = best(A2[key]); m = "**" if i == 0 else ""
+_src   = {"A1": A1, "A2": A2}
+for name, key, src in sorted(B51, key=lambda t: best(_src[t[2]][t[1]])):
+    b = best(_src[src][key]); m = "**" if key == "uc/Clad" else ""
     w(f"| {m}5×51{m} | common C ladder | {m}{name}{m} | {m}{kc(b)}{m} | {m}×{b/base51:.2f}{m} |")
 base64 = best(A1["a64/asmCld"])
 for i, (name, key) in enumerate(B64):
@@ -191,10 +205,21 @@ w("> **Table 1: Controlled X25519 field-arithmetic comparison.** Cycle counts ar
      f"{REPS_MAIN} repetitions, 4×64 rows of {REPS_A64}."))
 w("")
 _g51 = {k: paired(A2["uc/Clad"], A2[k])[1] for k in ["fiat","cryptopt","a51op/Clad","hand-C"]}
-w(f"With the 5×51 representation fixed, microcode outperforms every evaluated ISA-level field "
-  f"backend. The advantage persists across all 24 matched compiler and optimisation "
+_goss = paired(A2["uc/Clad"], A2["osslops/C-ladder"])[1]
+_noss = sum(1 for x in paired(A2["uc/Clad"], A2["osslops/C-ladder"])[0] if x > 1)
+w(f"With the 5×51 representation fixed, microcode outperforms every compiler-generated and "
+  f"published-research field backend evaluated here — fiat-crypto, CryptOpt, the amd64-51 "
+  f"assembly and hand-written C — across all 24 matched compiler and optimisation "
   f"configurations, with paired geometric-mean speedups between ×{min(_g51.values()):.3f} and "
-  f"×{max(_g51.values()):.3f} (Appendix B.1). This result does not extend to the saturated 4×64 "
+  f"×{max(_g51.values()):.3f} (Appendix B.1). It does not outperform OpenSSL's hand-tuned fe51 "
+  f"assembly, which is faster on the same ladder (×{_goss:.3f} paired geometric mean, microcode "
+  f"ahead in {_noss} of 24 configurations). Isolated-kernel measurement attributes that "
+  f"difference entirely to invocation cost rather than to the arithmetic: with each side's "
+  f"invocation floor removed, the two field multiplications are within 0.4% of one another "
+  f"(Table K5). Entering patch RAM costs a flat 16.2 cycles irrespective of operand count, "
+  f"where an equivalent native call costs 10.1; over the 2,561 field firings of one X25519 "
+  f"that differential is ≈20,300 cycles and accounts for the whole gap. This result also does "
+  f"not extend to the saturated 4×64 "
   f"representation: with the amd64-64 C ladder held fixed the microcode backend requires "
   f"{best(A1['a64/ucode'])/base64:.3f}× as many cycles as the assembly backend "
   f"({g64:.3f}× as a paired geometric mean, Appendix B.2). The 128-triad patch capacity "
@@ -204,6 +229,9 @@ w("")
 
 # ── Table 2 ───────────────────────────────────────────────────────────────
 E2E = [("Bernstein–Schwabe amd64-64 asm","4×64","a64/asm"),
+       ("s2n-bignum verified asm","4×64","s2n-bignum/asm"),
+       ("OpenSSL (own ladder + fe51 asm)","5×51","openssl"),
+       ("OpenSSL fe51 asm on our C ladder","5×51","osslops/C-ladder"),
        ("this work","5×51","ucode"),
        ("amd64-51 framework + microcode","5×51","a51/ucode"),
        ("donna c64","5×51","donna"),

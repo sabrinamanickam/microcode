@@ -58,6 +58,9 @@ CONTENDERS=(
     "a51ops/C-ladder"  # amd64-51 hand-asm field ops on that SAME C ladder (the control)
     "amd64-51/asm-Clad"    # amd64-51 framework + C ladder + amd64-51 asm field ops
     "amd64-51/ucode-Clad"  # amd64-51 framework + C ladder + 5x51 microcode
+    "s2n-bignum/asm"   # AWS s2n-bignum verified assembly, _alt variant (no MULX/ADX here)
+    "osslops/C-ladder" # OpenSSL fe51 asm field ops on that SAME C ladder
+    "openssl"          # OpenSSL's own ladder + its own asm field ops (end-to-end only)
 )
 
 # How many times each binary is re-run within one configuration. A single pass

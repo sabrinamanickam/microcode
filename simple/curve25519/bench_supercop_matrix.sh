@@ -61,7 +61,7 @@ declare -a failed_cfgs=() # configs/contenders skipped because a binary exited n
 # ── The single end-to-end table: every contender, median cycles, one matrix.
 # (Same-ladder sub-tables and ratio matrices were removed — the asm baselines
 #  amd64-51/asm and amd64-64/asm are already in this one table.)
-TABLE=("ours/ucode" "amd64-64/asm" "amd64-64/asm-Clad" "amd64-64/ucode" "amd64-51/asm" "amd64-51/asm-Clad" "amd64-51/ucode-Clad" "amd64-51/ucode" "ours/cryptopt" "ours/fiat" "ours/hand-C" "donna_c64")
+TABLE=("ours/ucode" "amd64-64/asm" "amd64-64/asm-Clad" "amd64-64/ucode" "amd64-51/asm" "amd64-51/asm-Clad" "amd64-51/ucode-Clad" "amd64-51/ucode" "ours/cryptopt" "ours/fiat" "ours/hand-C" "donna_c64" "s2n-bignum/asm" "osslops/C-ladder" "openssl")
 
 # ── Saturated-representation ladder control. amd64-64/ucode replaces THREE of
 # amd64-64's files (ladderstep + mul + square), so a64/asm vs a64/ucode mixes
@@ -97,7 +97,7 @@ STANDING=("ours/ucode" "amd64-64/asm" "amd64-51/asm" "amd64-51/ucode" "donna_c64
 # held constant — the headline amd64-51/asm vs amd64-51/ucode ratio does NOT
 # hold it constant (that pair also swaps qhasm ladderstep.S for the inline-asm
 # ladder), so it cannot carry the claim on its own.
-FIELDOP_ISO=("ucode/C-ladder" "a51ops/C-ladder" "ours/cryptopt" "ours/fiat" "ours/hand-C")
+FIELDOP_ISO=("ucode/C-ladder" "a51ops/C-ladder" "osslops/C-ladder" "ours/cryptopt" "ours/fiat" "ours/hand-C")
 
 # ── Pipeline ──
 check_cpu_frequency
