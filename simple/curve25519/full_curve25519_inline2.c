@@ -103,12 +103,231 @@ typedef struct {
 #define _S(x) #x
 #define S(x) _S(x)
 
+/* fe_sq wrapper contract, selectable so the parked five-accumulator patch
+ * can be TESTED without changing what production ships. Undefined (the
+ * default) this is byte-identical to the shipped wrapper: the serial fe_sq
+ * uses R8 as a zero-initialised accumulator. Defined, R8 carries 2^51-1 as
+ * the AND mask that sq_patch_5acc wants.
+ *   make PROG=<test> EXTRA_CPPFLAGS="-DSQ_MASK_R8 -DENABLE_SQ_5ACC" */
+#ifdef SQ_MASK_R8
+#define FE_SQ_R8 "mov r8, 0x7FFFFFFFFFFFF\n\t"
+#else
+#define FE_SQ_R8 "xor r8d, r8d\n\t"
+#endif
+
+/* _IMUL64L_DSZ64 (0x264) is in opcode.h but inst.h generates no macro for it.
+ * It is a NON-DESTRUCTIVE 64-bit low multiply: both sources survive, unlike
+ * MUL_DSZ64_*, whose srcB receives the low half. Verified on hardware by
+ * probe_opsem entries [2] and [3] (probe_opsem_out.txt).
+ * ucode_sim.py and ucode_critpath.py both understand these names. */
+#define IMUL64L_DSZ64_DRR(d, a, b) (_IMUL64L_DSZ64 | INSTR_DRR(d, a, b))
+#define IMUL64L_DSZ64_DRI(d, a, i) (_IMUL64L_DSZ64 | INSTR_DRI(d, a, i))
+
 /* ════════════════════════════════════════════════════════════════════
- * MICROCODE PATCH INSTALLATION (verbatim from full_curve25519.c)
+ * MICROCODE PATCH INSTALLATION
+ *
+ * fe_mul: five independent 128-bit accumulators (PLAN_kernel_optimization.md
+ * section 5.0), replacing the single serial accumulator and its
+ * 0->1->2->3->4 carry chain. Structure follows OpenSSL x25519_fe51_mul:
+ *
+ *   PREP      g_j = 19*b_j for j=1..4, one non-destructive IMUL64L each.
+ *   row 0     a0*b_j initialises accumulator j. MUL writes its low half into
+ *             srcB, so staging b_j into lo_j IS the initialisation: no ADD
+ *             and no SETCC for the first product of each limb (PLAN 5.1B).
+ *   rows 1-4  the other 20 products accumulate with NO inter-limb carry
+ *             propagation. Each accumulator runs its own SETCC chain --
+ *             domain #1 flags are PER-REGISTER, so five chains coexist and
+ *             stay mutually independent. One accumulate is
+ *                 ADD(lo_j, lo_j, lo_p)   SETCC(c, lo_j)
+ *                 ADD(hi_p, hi_p, c)      ADD(hi_j, hi_j, hi_p)
+ *             folding the carry into the product's high half rather than
+ *             into hi_j, which halves the hi_j chain (4 deep, not 8).
+ *
+ *             This is 4 ops where the GENARITHFLAGS carry bridge would be
+ *             3 (ADD / GFL_RR(lo_j,lo_j) / ADC), and the bridge was built
+ *             and MEASURED: 52 triads, 154 ops, and 104.0 cyc against this
+ *             version's 102.8. It loses because all 20 bridged carries
+ *             funnel through the ONE architectural CF, so they serialise,
+ *             where five SETCC domains do not. Per-register flags are the
+ *             whole reason the parallel structure pays off; do not "save"
+ *             the fourth op. See PLAN 5.0-lever-1.
+ *   reduce    two fully parallel passes, NOT OpenSSL's partial tree.
+ *             OpenSSL propagates each carry into the 128-bit accumulator
+ *             (add+adc, two instructions); in microcode that costs
+ *             ADD+SETCC+ADD. Splitting every accumulator into
+ *                 r_j = lo_j & MASK        q_j = (lo_j>>51)|(hi_j<<13)
+ *             first makes every carry add a plain 64-bit ADD, and all five
+ *             splits issue in parallel. Pass 1 lands t_j < 2^63.6, pass 2
+ *             lands every limb at < 2^51 + 2^17.
+ *
+ * INPUT BOUND: limbs must be < 2^54. The binding constraint is
+ * 19*q_4 < 2^64 with q_4 = acc_4 >> 51 and acc_4 < 5*2^(2L), which needs
+ * L < 54.2; hi_j<<13 < 2^64 needs L < 54.4. The ladder feeds this at most
+ * 2^53.1 (FE_SUB's 2p bias on top of a < 2^52 limb).
+ *
+ * The wrapper must pass 2^51-1 in RCX (see FE_MUL): the patch masks with a
+ * single AND against that register instead of a SHL13/SHR13 pair (PLAN
+ * 5.1E). RCX was free -- the old patch used it as MUL's high destination,
+ * and MUL's destination is free to be any register.
+ *
+ * fe_sq: UNCHANGED, still the serial single-accumulator design at 42
+ * triads / 81.8 cyc. The five-accumulator rewrite is parked below as
+ * sq_patch_5acc: verified correct, but it hard-reset the machine three
+ * times from inside fe_invert_ucode and the cause was never found. Its
+ * wrapper contract (2^51-1 in R8) has been reverted with it, so every
+ * fe_sq firing site zeroes R8 again as the serial patch expects.
+ *
+ * Register map (fe_mul):
+ *   a0..a4  RDI RSI R12 R11 R14   always MUL srcA, so preserved
+ *   b0..b4  R15 R13 R9  R10 RBX   from the wrapper, consumed as srcB
+ *   g1..g4  TMP0..TMP3            19*b_j
+ *   lo0..4  TMP4..TMP8            MUST be TMP: SETCC reads domain #1
+ *   hi0..4  TMP9..TMP13
+ *   mask    RCX
+ *   carry   TMP14 TMP15 (alternating SETCC destinations)
+ *   scratch RAX R8 RDX, plus every register as it dies: RBX and RDI after
+ *           row 0, then b_j and a_i as their last product is issued.
  * ════════════════════════════════════════════════════════════════════ */
 
 static void install_field_patches(void) {
     ucode_t mul_patch[] = {
+    /* PREP: g_j = 19*b_j, non-destructive, both sources survive */
+    { IMUL64L_DSZ64_DRI(TMP3, RBX, 19), IMUL64L_DSZ64_DRI(TMP2, R10, 19),
+      IMUL64L_DSZ64_DRI(TMP1, R9, 19), NOP_SEQWORD },
+    /* row 0: a0*b_j initialises accumulator j -- no ADD, no SETCC */
+    { IMUL64L_DSZ64_DRI(TMP0, R13, 19), ZEROEXT_DSZ64_DR(TMP4, R15),
+      MUL_DSZ64_DRR(TMP9, RDI, TMP4), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP5, R13), MUL_DSZ64_DRR(TMP10, RDI, TMP5),
+      ZEROEXT_DSZ64_DR(TMP6, R9), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP11, RDI, TMP6), ZEROEXT_DSZ64_DR(TMP7, R10),
+      MUL_DSZ64_DRR(TMP12, RDI, TMP7), NOP_SEQWORD },
+    /* row 1: a1 x b, five independent accumulates */
+    { ZEROEXT_DSZ64_DR(TMP8, RBX), MUL_DSZ64_DRR(TMP13, RDI, TMP8),
+      ZEROEXT_DSZ64_DR(RAX, R15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(R8, RSI, RAX), ZEROEXT_DSZ64_DR(RDX, R13),
+      MUL_DSZ64_DRR(RBX, RSI, RDX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP5, TMP5, RAX), SETCC_CONDB_DR(TMP14, TMP5),
+      ADD_DSZ64_DRR(R8, R8, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP10, TMP10, R8), ZEROEXT_DSZ64_DR(RDI, R9),
+      MUL_DSZ64_DRR(RAX, RSI, RDI), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP6, TMP6, RDX), SETCC_CONDB_DR(TMP15, TMP6),
+      ADD_DSZ64_DRR(RBX, RBX, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP11, TMP11, RBX), MUL_DSZ64_DRR(R8, RSI, R10),
+      ADD_DSZ64_DRR(TMP7, TMP7, RDI), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP14, TMP7), ADD_DSZ64_DRR(RAX, RAX, TMP14),
+      ADD_DSZ64_DRR(TMP12, TMP12, RAX), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(RDX, TMP3), MUL_DSZ64_DRR(RBX, RSI, RDX),
+      ADD_DSZ64_DRR(TMP8, TMP8, R10), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP8), ADD_DSZ64_DRR(R8, R8, TMP15),
+      ADD_DSZ64_DRR(TMP13, TMP13, R8), NOP_SEQWORD },
+    /* row 2: a2 x b, five independent accumulates */
+    { ZEROEXT_DSZ64_DR(RDI, R15), MUL_DSZ64_DRR(RSI, R12, RDI),
+      ADD_DSZ64_DRR(TMP4, TMP4, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP14, TMP4), ADD_DSZ64_DRR(RBX, RBX, TMP14),
+      ADD_DSZ64_DRR(TMP9, TMP9, RBX), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R10, R13), MUL_DSZ64_DRR(RAX, R12, R10),
+      ADD_DSZ64_DRR(TMP6, TMP6, RDI), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP6), ADD_DSZ64_DRR(RSI, RSI, TMP15),
+      ADD_DSZ64_DRR(TMP11, TMP11, RSI), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(R8, R12, R9), ADD_DSZ64_DRR(TMP7, TMP7, R10),
+      SETCC_CONDB_DR(TMP14, TMP7), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RAX, RAX, TMP14), ADD_DSZ64_DRR(TMP12, TMP12, RAX),
+      ZEROEXT_DSZ64_DR(RDX, TMP2), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RBX, R12, RDX), ADD_DSZ64_DRR(TMP8, TMP8, R9),
+      SETCC_CONDB_DR(TMP15, TMP8), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R8, R8, TMP15), ADD_DSZ64_DRR(TMP13, TMP13, R8),
+      ZEROEXT_DSZ64_DR(RDI, TMP3), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RSI, R12, RDI), ADD_DSZ64_DRR(TMP4, TMP4, RDX),
+      SETCC_CONDB_DR(TMP14, TMP4), NOP_SEQWORD },
+    /* row 3: a3 x b, five independent accumulates */
+    { ADD_DSZ64_DRR(RBX, RBX, TMP14), ADD_DSZ64_DRR(TMP9, TMP9, RBX),
+      ZEROEXT_DSZ64_DR(R10, R15), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(R9, R11, R10), ADD_DSZ64_DRR(TMP5, TMP5, RDI),
+      SETCC_CONDB_DR(TMP15, TMP5), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RSI, RSI, TMP15), ADD_DSZ64_DRR(TMP10, TMP10, RSI),
+      MUL_DSZ64_DRR(R12, R11, R13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP7, TMP7, R10), SETCC_CONDB_DR(TMP14, TMP7),
+      ADD_DSZ64_DRR(R9, R9, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP12, TMP12, R9), ZEROEXT_DSZ64_DR(RAX, TMP1),
+      MUL_DSZ64_DRR(R8, R11, RAX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP8, TMP8, R13), SETCC_CONDB_DR(TMP15, TMP8),
+      ADD_DSZ64_DRR(R12, R12, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP13, TMP13, R12), ZEROEXT_DSZ64_DR(R13, TMP2),
+      MUL_DSZ64_DRR(RDX, R11, R13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, RAX), SETCC_CONDB_DR(TMP14, TMP4),
+      ADD_DSZ64_DRR(R8, R8, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP9, TMP9, R8), ZEROEXT_DSZ64_DR(RBX, TMP3),
+      MUL_DSZ64_DRR(RDI, R11, RBX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP5, TMP5, R13), SETCC_CONDB_DR(TMP15, TMP5),
+      ADD_DSZ64_DRR(RDX, RDX, TMP15), NOP_SEQWORD },
+    /* row 4: a4 x b, five independent accumulates */
+    { ADD_DSZ64_DRR(TMP10, TMP10, RDX), MUL_DSZ64_DRR(RDX, R14, R15),
+      ADD_DSZ64_DRR(TMP6, TMP6, RBX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP14, TMP6), ADD_DSZ64_DRR(RDI, RDI, TMP14),
+      ADD_DSZ64_DRR(TMP11, TMP11, RDI), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RBX, R14, TMP0), ADD_DSZ64_DRR(TMP8, TMP8, R15),
+      SETCC_CONDB_DR(TMP15, TMP8), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RDX, RDX, TMP15), ADD_DSZ64_DRR(TMP13, TMP13, RDX),
+      MUL_DSZ64_DRR(R8, R14, TMP1), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, TMP0), SETCC_CONDB_DR(TMP14, TMP4),
+      ADD_DSZ64_DRR(RBX, RBX, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP9, TMP9, RBX), MUL_DSZ64_DRR(TMP0, R14, TMP2),
+      ADD_DSZ64_DRR(TMP5, TMP5, TMP1), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP5), ADD_DSZ64_DRR(R8, R8, TMP15),
+      ADD_DSZ64_DRR(TMP10, TMP10, R8), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(R15, R14, TMP3), ADD_DSZ64_DRR(TMP6, TMP6, TMP2),
+      SETCC_CONDB_DR(TMP14, TMP6), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP0, TMP0, TMP14), ADD_DSZ64_DRR(TMP11, TMP11, TMP0),
+      ADD_DSZ64_DRR(TMP7, TMP7, TMP3), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP7), ADD_DSZ64_DRR(R15, R15, TMP15),
+      ADD_DSZ64_DRR(TMP12, TMP12, R15), NOP_SEQWORD },
+    /* reduce pass 1: split all five accs, r_j = acc_j & M, q_j = acc_j >> 51 */
+    { SHL_DSZ64_DRI(TMP9, TMP9, 13), SHR_DSZ64_DRI(TMP0, TMP4, 51),
+      AND_DSZ64_DRR(TMP4, TMP4, RCX), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP9, TMP0, TMP9), SHL_DSZ64_DRI(TMP10, TMP10, 13),
+      SHR_DSZ64_DRI(TMP1, TMP5, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP5, TMP5, RCX), OR_DSZ64_DRR(TMP10, TMP1, TMP10),
+      SHL_DSZ64_DRI(TMP11, TMP11, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP2, TMP6, 51), AND_DSZ64_DRR(TMP6, TMP6, RCX),
+      OR_DSZ64_DRR(TMP11, TMP2, TMP11), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP12, TMP12, 13), SHR_DSZ64_DRI(TMP0, TMP7, 51),
+      AND_DSZ64_DRR(TMP7, TMP7, RCX), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP12, TMP0, TMP12), SHL_DSZ64_DRI(TMP13, TMP13, 13),
+      SHR_DSZ64_DRI(TMP1, TMP8, 51), NOP_SEQWORD },
+    /* t_j = r_j + q_{j-1}, and t_0 = r_0 + 19*q_4 */
+    { AND_DSZ64_DRR(TMP8, TMP8, RCX), OR_DSZ64_DRR(TMP13, TMP1, TMP13),
+      ADD_DSZ64_DRR(TMP5, TMP5, TMP9), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP6, TMP6, TMP10), ADD_DSZ64_DRR(TMP7, TMP7, TMP11),
+      ADD_DSZ64_DRR(TMP8, TMP8, TMP12), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP3, TMP13, 4), ADD_DSZ64_DRR(TMP14, TMP13, TMP13),
+      ADD_DSZ64_DRR(TMP3, TMP3, TMP14), NOP_SEQWORD },
+    /* reduce pass 2: same split again, t_j < 2^63.6 -> limbs < 2^51 + 2^17 */
+    { ADD_DSZ64_DRR(TMP3, TMP3, TMP13), ADD_DSZ64_DRR(TMP4, TMP4, TMP3),
+      SHR_DSZ64_DRI(TMP9, TMP4, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP4, TMP4, RCX), SHR_DSZ64_DRI(TMP10, TMP5, 51),
+      AND_DSZ64_DRR(TMP5, TMP5, RCX), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP11, TMP6, 51), AND_DSZ64_DRR(TMP6, TMP6, RCX),
+      SHR_DSZ64_DRI(TMP12, TMP7, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP7, TMP7, RCX), SHR_DSZ64_DRI(TMP13, TMP8, 51),
+      AND_DSZ64_DRR(TMP8, TMP8, RCX), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R13, TMP5, TMP9), ADD_DSZ64_DRR(R9, TMP6, TMP10),
+      ADD_DSZ64_DRR(R10, TMP7, TMP11), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RAX, TMP8, TMP12), SHL_DSZ64_DRI(TMP3, TMP13, 4),
+      ADD_DSZ64_DRR(TMP14, TMP13, TMP13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP3, TMP3, TMP14), ADD_DSZ64_DRR(TMP3, TMP3, TMP13),
+      ADD_DSZ64_DRR(R15, TMP4, TMP3), END_SEQWORD },
+    };
+
+
+#if 0
+/* Previous fe_mul: ONE 128-bit accumulator (TMP0 lo / R8 hi) with a serial
+ * 0->1->2->3->4 inter-limb carry chain. 66 triads, 196 ops, dependency
+ * depth 74.9 by lib/ucode_critpath.py, 122.9 cyc in bench_kernel. Kept
+ * compiled out but still parseable, so the A/B stays reproducible:
+ *   python3 lib/ucode_sim.py      full_curve25519_inline2.c mul_patch_serial mul
+ *   python3 lib/ucode_critpath.py full_curve25519_inline2.c mul_patch_serial
+ * It does not need RCX preloaded with the mask; it uses SHL13/SHR13. */
+static const ucode_t mul_patch_serial[] = {
     { ZEROEXT_DSZ64_DR(TMP10, R15), ZEROEXT_DSZ64_DR(TMP11, R13),
       ZEROEXT_DSZ64_DR(TMP12, R9), NOP_SEQWORD },
     { ZEROEXT_DSZ64_DR(TMP13, R10), ZEROEXT_DSZ64_DR(TMP14, RBX),
@@ -247,7 +466,8 @@ static void install_field_patches(void) {
       NOP, NOP_SEQWORD },
     { SHL_DSZ64_DRI(TMP2, R15, 13), SHR_DSZ64_DRI(R15, TMP2, 13),
       NOP, END_SEQWORD }
-    };
+};
+#endif
 
     ucode_t sq_patch[] = {
     /* c0 */
@@ -342,11 +562,126 @@ static void install_field_patches(void) {
       NOP, END_SEQWORD }
     };
 
+
+#ifdef ENABLE_SQ_5ACC
+/* Five-accumulator fe_sq, 40 triads, 112 ops, depth 20.5, predicted 68.3 cyc
+ * against OpenSSL's 73.2. NOT SHIPPED: it is CORRECT -- it matched
+ * fiat-crypto on every path where a result could be checked, including
+ * inputs to 2^53-1, standalone, through both macros, mixed with fe_mul in
+ * one asm block, and looped to n=100 -- but fe_invert_ucode, which is
+ * nothing but those same calls in sequence, hard-resets the machine. Three
+ * boots were spent localising that and the cause is still unknown; see
+ * PLAN_kernel_optimization.md section 3. Requires 2^51-1 in R8, which the
+ * wrapper no longer supplies, so simulate it with:
+ *   python3 lib/ucode_sim.py full_curve25519_inline2.c sq_patch_5acc sq --mask-r8
+ * Regenerate with lib/gen_sq_patch.py. Do not ship without an explanation
+ * for the reset. */
+static const ucode_t sq_patch_5acc[] = {
+    { ZEROEXT_DSZ64_DR(TMP4, RDX), MUL_DSZ64_DRR(TMP9, R9, TMP4),
+      ZEROEXT_DSZ64_DR(TMP5, RSI), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP10, R15, TMP5), ZEROEXT_DSZ64_DR(TMP6, R12),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP11, R15, TMP6), ZEROEXT_DSZ64_DR(TMP7, R11),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP12, R15, TMP7), ZEROEXT_DSZ64_DR(TMP8, R14),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP13, R15, TMP8), NOP,
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(RAX, RDI, RDI), NOP,
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP0, R11, RDX), ADD_DSZ64_DRR(TMP4, TMP4, RDI),
+      SETCC_CONDB_DR(TMP14, TMP4), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RAX, RAX, TMP14), ADD_DSZ64_DRR(TMP9, TMP9, RAX),
+      MUL_DSZ64_DRR(TMP1, RSI, RSI), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP5, TMP5, RDX), SETCC_CONDB_DR(TMP15, TMP5),
+      ADD_DSZ64_DRR(TMP0, TMP0, TMP15), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP10, TMP10, TMP0), ZEROEXT_DSZ64_DR(TMP2, R12),
+      MUL_DSZ64_DRR(TMP3, R13, TMP2), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP6, TMP6, RSI), SETCC_CONDB_DR(TMP14, TMP6),
+      ADD_DSZ64_DRR(TMP1, TMP1, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP11, TMP11, TMP1), MUL_DSZ64_DRR(RDI, R13, R11),
+      ADD_DSZ64_DRR(TMP7, TMP7, TMP2), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP7), ADD_DSZ64_DRR(TMP3, TMP3, TMP15),
+      ADD_DSZ64_DRR(TMP12, TMP12, TMP3), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(RDX, RBX), MUL_DSZ64_DRR(RSI, R13, RDX),
+      ADD_DSZ64_DRR(TMP8, TMP8, R11), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP14, TMP8), ADD_DSZ64_DRR(RDI, RDI, TMP14),
+      ADD_DSZ64_DRR(TMP13, TMP13, RDI), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(R11, RBX), MUL_DSZ64_DRR(RAX, R9, R11),
+      ADD_DSZ64_DRR(TMP4, TMP4, RDX), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP15, TMP4), ADD_DSZ64_DRR(RSI, RSI, TMP15),
+      ADD_DSZ64_DRR(TMP9, TMP9, RSI), NOP_SEQWORD },
+    { ZEROEXT_DSZ64_DR(TMP0, RBX), MUL_DSZ64_DRR(TMP1, R10, TMP0),
+      ADD_DSZ64_DRR(TMP5, TMP5, R11), NOP_SEQWORD },
+    { SETCC_CONDB_DR(TMP14, TMP5), ADD_DSZ64_DRR(RAX, RAX, TMP14),
+      ADD_DSZ64_DRR(TMP10, TMP10, RAX), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP2, R14, RBX), ADD_DSZ64_DRR(TMP6, TMP6, TMP0),
+      SETCC_CONDB_DR(TMP15, TMP6), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP1, TMP1, TMP15), ADD_DSZ64_DRR(TMP11, TMP11, TMP1),
+      MUL_DSZ64_DRR(TMP3, R12, R12), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP7, TMP7, RBX), SETCC_CONDB_DR(TMP14, TMP7),
+      ADD_DSZ64_DRR(TMP2, TMP2, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP12, TMP12, TMP2), ADD_DSZ64_DRR(TMP8, TMP8, R12),
+      SETCC_CONDB_DR(TMP15, TMP8), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP3, TMP3, TMP15), ADD_DSZ64_DRR(TMP13, TMP13, TMP3),
+      SHL_DSZ64_DRI(TMP9, TMP9, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP0, TMP4, 51), AND_DSZ64_DRR(TMP4, TMP4, R8),
+      OR_DSZ64_DRR(TMP9, TMP0, TMP9), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP10, TMP10, 13), SHR_DSZ64_DRI(TMP1, TMP5, 51),
+      AND_DSZ64_DRR(TMP5, TMP5, R8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP10, TMP1, TMP10), SHL_DSZ64_DRI(TMP11, TMP11, 13),
+      SHR_DSZ64_DRI(TMP2, TMP6, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP6, TMP6, R8), OR_DSZ64_DRR(TMP11, TMP2, TMP11),
+      SHL_DSZ64_DRI(TMP12, TMP12, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP0, TMP7, 51), AND_DSZ64_DRR(TMP7, TMP7, R8),
+      OR_DSZ64_DRR(TMP12, TMP0, TMP12), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP13, TMP13, 13), SHR_DSZ64_DRI(TMP1, TMP8, 51),
+      AND_DSZ64_DRR(TMP8, TMP8, R8), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP13, TMP1, TMP13), ADD_DSZ64_DRR(TMP5, TMP5, TMP9),
+      ADD_DSZ64_DRR(TMP6, TMP6, TMP10), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP7, TMP7, TMP11), ADD_DSZ64_DRR(TMP8, TMP8, TMP12),
+      SHL_DSZ64_DRI(TMP3, TMP13, 4), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP14, TMP13, TMP13), ADD_DSZ64_DRR(TMP3, TMP3, TMP14),
+      ADD_DSZ64_DRR(TMP3, TMP3, TMP13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP4, TMP4, TMP3), SHR_DSZ64_DRI(TMP9, TMP4, 51),
+      AND_DSZ64_DRR(TMP4, TMP4, R8), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP10, TMP5, 51), AND_DSZ64_DRR(TMP5, TMP5, R8),
+      SHR_DSZ64_DRI(TMP11, TMP6, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP6, TMP6, R8), SHR_DSZ64_DRI(TMP12, TMP7, 51),
+      AND_DSZ64_DRR(TMP7, TMP7, R8), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP13, TMP8, 51), AND_DSZ64_DRR(TMP8, TMP8, R8),
+      ADD_DSZ64_DRR(R9, TMP5, TMP9), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R10, TMP6, TMP10), ADD_DSZ64_DRR(RBX, TMP7, TMP11),
+      ADD_DSZ64_DRR(RAX, TMP8, TMP12), NOP_SEQWORD },
+    { SHL_DSZ64_DRI(TMP3, TMP13, 4), ADD_DSZ64_DRR(TMP14, TMP13, TMP13),
+      ADD_DSZ64_DRR(TMP3, TMP3, TMP14), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(TMP3, TMP3, TMP13), ADD_DSZ64_DRR(RDI, TMP4, TMP3),
+      NOP, END_SEQWORD },
+};
+#endif
+
+    /* Patch RAM: 128 triads from U7c00, 4 address units each. U7de0-U7df0 is
+     * the lib-micro bootstrap staging area, dead only because the helpers run
+     * before patch_ucode here (project note patch-ram-bootstrap-reclaim).
+     * 58 + 42 = 100 triads, ending at U7d90. */
+    _Static_assert(ARRAY_SZ(mul_patch) + ARRAY_SZ(sq_patch) <= 128,
+                   "fe_mul + fe_sq exceed the 128-triad patch RAM budget");
+
     patch_ucode(0x7c00, mul_patch, ARRAY_SZ(mul_patch));
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
     uint64_t sq_addr = 0x7c00 + ARRAY_SZ(mul_patch) * 4;
     patch_ucode(sq_addr, sq_patch, ARRAY_SZ(sq_patch));
     hook_match_and_patch(1, 0x0618, sq_addr);
+#ifdef ENABLE_SQ_5ACC
+    /* Test builds only: overwrite the fe_sq region with the parked
+     * five-accumulator patch, at the same address, so a probe can study the
+     * thing that resets the machine without production carrying it. Needs
+     * -DSQ_MASK_R8 too, since this patch wants 2^51-1 in R8. */
+    patch_ucode(sq_addr, (ucode_t *)sq_patch_5acc, ARRAY_SZ(sq_patch_5acc));
+    hook_match_and_patch(1, 0x0618, sq_addr);
+    printf("fe_sq : REPLACED by parked five-accumulator patch, %d triads\n",
+           (int)ARRAY_SZ(sq_patch_5acc));
+#endif
     printf("fe_mul: %d triads at U%04lx (vmwrite hook)\n",
            (int)ARRAY_SZ(mul_patch), (unsigned long)0x7c00);
     printf("fe_sq : %d triads at U%04lx (vmread  hook)\n",
@@ -369,7 +704,19 @@ static void install_field_patches(void) {
  * ════════════════════════════════════════════════════════════════════ */
 
 /* FE_MUL(out, a, b) — fires the mul patch with inputs from [rbp+a/b],
- * stores h[0..4] to [rbp+out]. */
+ * stores h[0..4] to [rbp+out].
+ *
+ * rcx carries 2^51-1: the patch masks each limb with one AND against it
+ * instead of a SHL13/SHR13 pair. One extra caller instruction (~0.3 cyc of
+ * invocation floor) for 7 fewer patch ops. rcx was already free — it is the
+ * vmwrite operand and the old patch only used it as MUL's high destination.
+ *
+ * The load and store order is load-bearing: both run limb 0 -> limb 4, and
+ * a descending load order puts the first load of one op one instruction
+ * after the last store of the previous op, which costs ~30 cyc on Goldmont
+ * (probe_ldorder; see the note above FE_SQ). Do not reorder the memory ops.
+ * xor eax/r8d stay so every register the patch could read is defined, which
+ * keeps lib/ucode_sim.py's zero-filled model faithful to the hardware. */
 #define FE_MUL(out, a, b) \
     "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
     "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
@@ -383,6 +730,7 @@ static void install_field_patches(void) {
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
     "xor eax, eax\n\t"                   \
     "xor r8d, r8d\n\t"                   \
+    "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
     "mov [rbp + " S(out) " + 8],  r13\n\t" \
@@ -391,13 +739,22 @@ static void install_field_patches(void) {
     "mov [rbp + " S(out) " + 32], rax\n\t"
 
 /* FE_SQ(out, a) — fires the sq patch (vmread). Precompute 2*a and 19*a
- * happen inline. Output: rdi=h0, r9=h1, r10=h2, rbx=h3, rax=h4. */
+ * happen inline. Output: rdi=h0, r9=h1, r10=h2, rbx=h3, rax=h4.
+ *
+ * The five loads MUST run limb 0 -> limb 4, matching the store order below.
+ * They used to run 4 -> 0. Stores are ascending, so a descending load order
+ * makes the first load of one op read [x+32] one instruction after the last
+ * store of the previous op wrote it; that store-to-load distance of 1 costs
+ * ~30 cyc on Goldmont. Ascending puts each load five instructions after its
+ * producing store and the stall disappears: measured 122.3 -> 81.8 cyc per
+ * dependent fe_sq, with the patch untouched (probe_ldorder, arms A2/A3/B1/B2).
+ * Do not "tidy" these back into descending order. */
 #define FE_SQ(out, a) \
-    "mov r14, [rbp + " S(a) " + 32]\n\t" \
-    "mov r11, [rbp + " S(a) " + 24]\n\t" \
-    "mov r12, [rbp + " S(a) " + 16]\n\t" \
-    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
     "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t" \
     "lea r15, [rdi + rdi]\n\t"           \
     "lea r13, [rsi + rsi]\n\t"           \
     "lea r9,  [r12 + r12]\n\t"           \
@@ -405,7 +762,7 @@ static void install_field_patches(void) {
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
     "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"         \
     "mov [rbp + " S(out) " + 0],  rdi\n\t" \
     "mov [rbp + " S(out) " + 8],  r9\n\t"  \
@@ -452,7 +809,7 @@ static void install_field_patches(void) {
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
     "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"         \
     "mov [rbp + " S(out) " + 0],  rdi\n\t" \
     "mov [rbp + " S(out) " + 8],  r9\n\t"  \
@@ -470,6 +827,7 @@ static void install_field_patches(void) {
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
     "xor eax, eax\n\t"                   \
     "xor r8d, r8d\n\t"                   \
+    "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
     "mov [rbp + " S(out) " + 8],  r13\n\t" \
@@ -519,7 +877,7 @@ static void install_field_patches(void) {
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
     "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"
 
 /* Store sq output to [rbp+out_off]. */
@@ -547,6 +905,7 @@ static void install_field_patches(void) {
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
     "xor eax, eax\n\t"                   \
     "xor r8d, r8d\n\t"                   \
+    "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
     "mov [rbp + " S(out) " + 8],  r13\n\t" \
@@ -559,21 +918,61 @@ static void install_field_patches(void) {
  * ════════════════════════════════════════════════════════════════════ */
 
 static void fe_mul121665_native(uint64_t *out, const uint64_t *a) {
-    __uint128_t c;
-    c = (__uint128_t)a[0] * 121665;
-    out[0] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[1] * 121665;
-    out[1] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[2] * 121665;
-    out[2] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[3] * 121665;
-    out[3] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[4] * 121665;
-    out[4] = (uint64_t)c & MASK51; c >>= 51;
-    out[0] += (uint64_t)c * 19;
-    uint64_t carry = out[0] >> 51;
-    out[0] &= MASK51;
-    out[1] += carry;
+    /* Five independent products, then one carry pass.
+     *
+     * MEASURED OUTCOME: this rewrite bought essentially nothing -- 79.96 ->
+     * 79.06 cyc/op on the profiler arm, ladder_step 981.2 -> 980.2. It is
+     * kept because it is verified equivalent and marginally ahead, but do
+     * NOT redo this experiment expecting a win, and do not cite the 80-cycle
+     * figure as a cost the ladder pays.
+     *
+     * Two reasons it did not pay, both worth recording:
+     *
+     * 1. The 80 cyc/op arm overstates the in-situ cost. TIME_NATIVE runs
+     *    fe_mul121665_native(E, E) IN PLACE, so each iteration's loads read
+     *    the previous iteration's stores at the same addresses -- the ~30
+     *    cycle store-to-load stall documented in probe_ldorder. The ladder
+     *    calls it out-of-place (t0 <- E) with E computed several ops earlier,
+     *    so it never pays that. Budgeting ladder_step against its parts puts
+     *    the real in-situ cost at <= 53 cycles, not 80.
+     *
+     * 2. The serial carry chain was not the binding constraint anyway. x86-64
+     *    has no three-operand widening multiply without BMI2, which Goldmont
+     *    lacks, so all five products still funnel through the one RDX:RAX
+     *    pair (see the disassembly: mov rax,r12 / mul [mem], five times).
+     *    Making the C independent cannot make the machine code independent.
+     *    This is the same lesson as the GENARITHFLAGS carry bridge in fe_mul,
+     *    from the opposite direction: there, per-register flags made five
+     *    chains genuinely parallel; here, one architectural register pair
+     *    keeps five chains serial no matter how the source is written.
+     *
+     * Bounds: the ladder feeds E = AA - BB carrying FE_SUB's 2p bias, so
+     * a_i < 2^53 and p_i = a_i*121665 < 2^70 -- the 128-bit product is still
+     * required. q_i = p_i >> 51 < 2^19, so 19*q_4 < 2^24 and every output
+     * limb lands below 2^51 + 2^20, the same bound the serial form produced
+     * and far inside fe_mul's 2^54 input limit.
+     *
+     * Congruence: sum_i p_i 2^(51i) = sum_i r_i 2^(51i) + sum_i q_i 2^(51(i+1)),
+     * and the q_4 term is q_4 2^255 = 19 q_4 (mod p). */
+    __uint128_t p0 = (__uint128_t)a[0] * 121665;
+    __uint128_t p1 = (__uint128_t)a[1] * 121665;
+    __uint128_t p2 = (__uint128_t)a[2] * 121665;
+    __uint128_t p3 = (__uint128_t)a[3] * 121665;
+    __uint128_t p4 = (__uint128_t)a[4] * 121665;
+
+    uint64_t r0 = (uint64_t)p0 & MASK51, q0 = (uint64_t)(p0 >> 51);
+    uint64_t r1 = (uint64_t)p1 & MASK51, q1 = (uint64_t)(p1 >> 51);
+    uint64_t r2 = (uint64_t)p2 & MASK51, q2 = (uint64_t)(p2 >> 51);
+    uint64_t r3 = (uint64_t)p3 & MASK51, q3 = (uint64_t)(p3 >> 51);
+    uint64_t r4 = (uint64_t)p4 & MASK51, q4 = (uint64_t)(p4 >> 51);
+
+    uint64_t t0    = r0 + 19 * q4;
+    uint64_t carry = t0 >> 51;
+    out[0] = t0 & MASK51;
+    out[1] = r1 + q0 + carry;
+    out[2] = r2 + q1;
+    out[3] = r3 + q2;
+    out[4] = r4 + q3;
 }
 
 static void ladder_step(ladder_state_t *st) {
@@ -1092,6 +1491,9 @@ void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
         "xor eax, eax\n\t"
         "xor r8d, r8d\n\t"
 
+        /* 2^51-1: the patch masks limbs with a single AND against rcx. */
+        "mov rcx, 0x7FFFFFFFFFFFF\n\t"
+
         /* Fire fe_mul microcode via vmwrite */
         "vmwrite rcx, rdx\n\t"
 
@@ -1118,12 +1520,18 @@ void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
         /* Stash out pointer in callee-saved rbp; survives the patch. */
         "mov rbp, rsi\n\t"
 
-        /* Load a[1..4] then a[0] last (a[0] destroys rdi's pointer). */
-        "mov r14, [rdi + 32]\n\t"
-        "mov r11, [rdi + 24]\n\t"
-        "mov r12, [rdi + 16]\n\t"
+        /* Load ascending, limb 0 -> limb 4. a[0] goes via rcx because rdi
+         * still holds the input pointer; the extra reg-move is issue-bound
+         * and overlaps the firing. Loading limb 4 first instead (the old
+         * order) puts the first load one instruction after the previous
+         * call's last store to the same address, which costs ~30 cyc on
+         * Goldmont -- see the FE_SQ macro comment and probe_ldorder. */
+        "mov rcx, [rdi]\n\t"
         "mov rsi, [rdi + 8]\n\t"
-        "mov rdi, [rdi]\n\t"
+        "mov r12, [rdi + 16]\n\t"
+        "mov r11, [rdi + 24]\n\t"
+        "mov r14, [rdi + 32]\n\t"
+        "mov rdi, rcx\n\t"
 
         /* Precompute doubled (2*a_i) and reduced (19*a_i) operands */
         "lea r15, [rdi + rdi]\n\t"
@@ -1135,7 +1543,7 @@ void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
 
         /* Clear accumulators */
         "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
+        FE_SQ_R8
 
         /* Fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
         ".byte 0x0f, 0x78, 0xca\n\t"
@@ -1194,7 +1602,7 @@ static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
         "imul rbx, r14, 19\n\t"
         "imul rdx, r11, 19\n\t"
         "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
+        FE_SQ_R8
 
         /* Fire fe_sq (vmread, 0f 78 ca) */
         ".byte 0x0f, 0x78, 0xca\n\t"
@@ -1384,21 +1792,61 @@ static inline void fe_sub(fe out, const fe a, const fe b) {
 
 /* fe_mul121665: out = a * 121665 */
 static void fe_mul121665(fe out, const fe a) {
-    __uint128_t c;
-    c = (__uint128_t)a[0] * 121665;
-    out[0] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[1] * 121665;
-    out[1] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[2] * 121665;
-    out[2] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[3] * 121665;
-    out[3] = (uint64_t)c & MASK51; c >>= 51;
-    c += (__uint128_t)a[4] * 121665;
-    out[4] = (uint64_t)c & MASK51; c >>= 51;
-    out[0] += (uint64_t)c * 19;
-    uint64_t carry = out[0] >> 51;
-    out[0] &= MASK51;
-    out[1] += carry;
+    /* Five independent products, then one carry pass.
+     *
+     * MEASURED OUTCOME: this rewrite bought essentially nothing -- 79.96 ->
+     * 79.06 cyc/op on the profiler arm, ladder_step 981.2 -> 980.2. It is
+     * kept because it is verified equivalent and marginally ahead, but do
+     * NOT redo this experiment expecting a win, and do not cite the 80-cycle
+     * figure as a cost the ladder pays.
+     *
+     * Two reasons it did not pay, both worth recording:
+     *
+     * 1. The 80 cyc/op arm overstates the in-situ cost. TIME_NATIVE runs
+     *    fe_mul121665_native(E, E) IN PLACE, so each iteration's loads read
+     *    the previous iteration's stores at the same addresses -- the ~30
+     *    cycle store-to-load stall documented in probe_ldorder. The ladder
+     *    calls it out-of-place (t0 <- E) with E computed several ops earlier,
+     *    so it never pays that. Budgeting ladder_step against its parts puts
+     *    the real in-situ cost at <= 53 cycles, not 80.
+     *
+     * 2. The serial carry chain was not the binding constraint anyway. x86-64
+     *    has no three-operand widening multiply without BMI2, which Goldmont
+     *    lacks, so all five products still funnel through the one RDX:RAX
+     *    pair (see the disassembly: mov rax,r12 / mul [mem], five times).
+     *    Making the C independent cannot make the machine code independent.
+     *    This is the same lesson as the GENARITHFLAGS carry bridge in fe_mul,
+     *    from the opposite direction: there, per-register flags made five
+     *    chains genuinely parallel; here, one architectural register pair
+     *    keeps five chains serial no matter how the source is written.
+     *
+     * Bounds: the ladder feeds E = AA - BB carrying FE_SUB's 2p bias, so
+     * a_i < 2^53 and p_i = a_i*121665 < 2^70 -- the 128-bit product is still
+     * required. q_i = p_i >> 51 < 2^19, so 19*q_4 < 2^24 and every output
+     * limb lands below 2^51 + 2^20, the same bound the serial form produced
+     * and far inside fe_mul's 2^54 input limit.
+     *
+     * Congruence: sum_i p_i 2^(51i) = sum_i r_i 2^(51i) + sum_i q_i 2^(51(i+1)),
+     * and the q_4 term is q_4 2^255 = 19 q_4 (mod p). */
+    __uint128_t p0 = (__uint128_t)a[0] * 121665;
+    __uint128_t p1 = (__uint128_t)a[1] * 121665;
+    __uint128_t p2 = (__uint128_t)a[2] * 121665;
+    __uint128_t p3 = (__uint128_t)a[3] * 121665;
+    __uint128_t p4 = (__uint128_t)a[4] * 121665;
+
+    uint64_t r0 = (uint64_t)p0 & MASK51, q0 = (uint64_t)(p0 >> 51);
+    uint64_t r1 = (uint64_t)p1 & MASK51, q1 = (uint64_t)(p1 >> 51);
+    uint64_t r2 = (uint64_t)p2 & MASK51, q2 = (uint64_t)(p2 >> 51);
+    uint64_t r3 = (uint64_t)p3 & MASK51, q3 = (uint64_t)(p3 >> 51);
+    uint64_t r4 = (uint64_t)p4 & MASK51, q4 = (uint64_t)(p4 >> 51);
+
+    uint64_t t0    = r0 + 19 * q4;
+    uint64_t carry = t0 >> 51;
+    out[0] = t0 & MASK51;
+    out[1] = r1 + q0 + carry;
+    out[2] = r2 + q1;
+    out[3] = r3 + q2;
+    out[4] = r4 + q3;
 }
 
 /* constant-time conditional swap — scalar */
@@ -1949,6 +2397,136 @@ static void x25519_a51ops(uint8_t out[32], const uint8_t scalar[32],
 }
 
 /* ════════════════════════════════════════════════════════════════════
+ * OpenSSL fe51 ASM FIELD OPS ON THE SHARED C LADDER  ("osslops/C-ladder")
+ *
+ * OpenSSL's hand-written 5×51 assembly (crypto/ec/asm/x25519-x86_64.pl,
+ * x25519_fe51_mul / x25519_fe51_sqr) substituted into the SAME C ladder,
+ * inversion chain, cswap, pack and driver used by ucode/C-ladder and
+ * a51ops/C-ladder. Only the field backend differs, so the three are directly
+ * comparable and run in the same process.
+ *
+ * This is the control that matters: at the kernel level these routines cost
+ * 97.1 and 73.2 cycles against the microcode's 122.9 and 81.8, so this row
+ * decides whether that per-operation deficit survives a full scalar
+ * multiplication.
+ *
+ * OpenSSL selects this fe51 path on any x86_64 without ADX, which includes
+ * this core, so it is also what OpenSSL itself would execute here.
+ * ════════════════════════════════════════════════════════════════════ */
+void x25519_fe51_mul(uint64_t h[5], const uint64_t f[5], const uint64_t g[5]);
+void x25519_fe51_sqr(uint64_t h[5], const uint64_t f[5]);
+
+static inline void fe_mul_ossl(const uint64_t *a, const uint64_t *b, uint64_t *out) {
+    x25519_fe51_mul(out, a, b);
+}
+
+static inline void fe_sq_ossl(const uint64_t *a, uint64_t *out) {
+    x25519_fe51_sqr(out, a);
+}
+
+static void fe_invert_ossl(fe out, const fe z) {
+    fe z2, z9, z11, t, t0, t1, t2, t3;
+    int i;
+
+    fe_sq_ossl(z, z2);
+    fe_sq_ossl(z2, t);
+    fe_sq_ossl(t, t);
+    fe_mul_ossl(t, z, z9);
+    fe_mul_ossl(z9, z2, z11);
+    fe_sq_ossl(z11, t);
+    fe_mul_ossl(t, z9, t0);
+
+    fe_sq_ossl(t0, t1);
+    for (i = 1; i < 5; i++) fe_sq_ossl(t1, t1);
+    fe_mul_ossl(t1, t0, t1);
+
+    fe_sq_ossl(t1, t2);
+    for (i = 1; i < 10; i++) fe_sq_ossl(t2, t2);
+    fe_mul_ossl(t2, t1, t2);
+
+    fe_sq_ossl(t2, t3);
+    for (i = 1; i < 20; i++) fe_sq_ossl(t3, t3);
+    fe_mul_ossl(t3, t2, t3);
+
+    for (i = 0; i < 10; i++) fe_sq_ossl(t3, t3);
+    fe_mul_ossl(t3, t1, t1);
+
+    fe_sq_ossl(t1, t2);
+    for (i = 1; i < 50; i++) fe_sq_ossl(t2, t2);
+    fe_mul_ossl(t2, t1, t2);
+
+    fe_sq_ossl(t2, t3);
+    for (i = 1; i < 100; i++) fe_sq_ossl(t3, t3);
+    fe_mul_ossl(t3, t2, t3);
+
+    for (i = 0; i < 50; i++) fe_sq_ossl(t3, t3);
+    fe_mul_ossl(t3, t1, t1);
+
+    fe_sq_ossl(t1, t1);
+    fe_sq_ossl(t1, t1);
+    fe_sq_ossl(t1, t1);
+    fe_sq_ossl(t1, t1);
+    fe_sq_ossl(t1, t1);
+    fe_mul_ossl(t1, z11, out);
+}
+
+static void x25519_osslops(uint8_t out[32], const uint8_t scalar[32],
+                            const uint8_t point[32]) {
+    uint8_t e[32];
+    memcpy(e, scalar, 32);
+    scalar_clamp(e);
+
+    fe x1, x2, z2, x3, z3;
+    fe A, AA, B, BB, E, C, D, DA, CB, t0;
+
+    fe_frombytes(x1, point);
+    fe_copy(x2, (const uint64_t[]){1,0,0,0,0});
+    memset(z2, 0, sizeof(fe));
+    fe_copy(x3, x1);
+    fe_copy(z3, (const uint64_t[]){1,0,0,0,0});
+
+    uint64_t swap = 0;
+
+    for (int pos = 254; pos >= 0; pos--) {
+        uint64_t bit = (e[pos >> 3] >> (pos & 7)) & 1;
+        swap ^= bit;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = bit;
+
+        fe_add(A, x2, z2);
+        fe_sq_ossl(A, AA);
+        fe_sub(B, x2, z2);
+        fe_sq_ossl(B, BB);
+        fe_sub(E, AA, BB);
+        fe_add(C, x3, z3);
+        fe_sub(D, x3, z3);
+        fe_mul_ossl(D, A, DA);
+        fe_mul_ossl(C, B, CB);
+
+        fe_add(t0, DA, CB);
+        fe_sq_ossl(t0, x3);
+
+        fe_sub(t0, DA, CB);
+        fe_sq_ossl(t0, z3);
+        fe_mul_ossl(x1, z3, z3);
+
+        fe_mul_ossl(AA, BB, x2);
+
+        fe_mul121665(t0, E);
+        fe_add(t0, AA, t0);
+        fe_mul_ossl(E, t0, z2);
+    }
+
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert_ossl(z2, z2);
+    fe_mul_ossl(x2, z2, x2);
+    fe_tobytes(out, x2);
+}
+
+/* ════════════════════════════════════════════════════════════════════
  * amd64-51/ucode ladderstep — REWRITTEN in the inline-asm style.
  *
  * The amd64-51-ucode hybrid (SUPERCOP amd64-51 driver/invert/pack +
@@ -2377,6 +2955,32 @@ typedef void (*bench_fn)(uint8_t *out, const uint8_t *scalar, const uint8_t *poi
 #define BENCH_THUNK(TH, CALL)                                                \
     static void TH(uint8_t *o, const uint8_t *s, const uint8_t *p) { CALL; }
 
+/* s2n-bignum, AWS formally verified assembly. curve25519_x25519_alt has a
+ * second documented prototype taking byte arrays, backed by the same code
+ * because x86 is little endian, and it performs the RFC 7748 scalar clamping
+ * and point masking itself. We use the _alt variant because the base one is
+ * built from MULX/ADCX/ADOX, which this core does not implement. Operands are
+ * copied into 64 bit aligned buffers first, since the caller's are byte
+ * arrays with no alignment guarantee. */
+extern void curve25519_x25519_alt(uint64_t res[4], const uint64_t scalar[4],
+                                  const uint64_t point[4]);
+static void x25519_s2n(uint8_t out[32], const uint8_t scalar[32],
+                       const uint8_t point[32]) {
+    uint64_t r[4], n[4], q[4];
+    memcpy(n, scalar, 32);
+    memcpy(q, point, 32);
+    curve25519_x25519_alt(r, n, q);
+    memcpy(out, r, 32);
+}
+
+BENCH_THUNK(bt_s2n,      x25519_s2n(o, s, p))
+/* OpenSSL's OWN implementation: its ladder, its inversion, its assembly field
+ * kernels. Extracted in openssl_x25519.c; end-to-end contender only, since it
+ * shares nothing with our ladder. */
+extern void x25519_openssl(uint8_t out[32], const uint8_t scalar[32],
+                           const uint8_t point[32]);
+BENCH_THUNK(bt_openssl,  x25519_openssl(o, s, p))
+BENCH_THUNK(bt_osslops,  x25519_osslops(o, s, p))
 BENCH_THUNK(bt_hand_c,   x25519_native(o, s, p))
 BENCH_THUNK(bt_fiat,     x25519_fiat(o, s, p))
 BENCH_THUNK(bt_cryptopt, x25519_cryptopt(o, s, p))
@@ -2413,28 +3017,81 @@ static const struct { const char *label; bench_fn fn; } BENCH_TAB[] = {
      * end-to-end, and is NOT a headline contender. */
     { "ours/ucode:",           bt_ours_uc  },
     { "ucode/C-ladder:",       bt_uc_clad  },
+    { "s2n-bignum/asm:",       bt_s2n      },
+    { "osslops/C-ladder:",     bt_osslops  },
+    { "openssl:",              bt_openssl  },
 };
 #define N_BENCH ((int)(sizeof BENCH_TAB / sizeof BENCH_TAB[0]))
 
 /* [contender][rep] — ~96 KB in BSS at 12 contenders x 1000 reps. */
 static uint64_t bench_samples[N_BENCH][BENCH_REPS];
 
+/* ── contender filter, for the interleaving-sensitivity experiment ──────
+ * BENCH_ONLY=<substr>[,<substr>...] restricts the round-robin to the named
+ * contenders. Same binary, same compiler, same timing loop, same statistic --
+ * the ONLY thing that changes is how many other contenders run between two
+ * consecutive repetitions of a given one.
+ *
+ * Why this exists: ours/ucode measures ~280k in an isolated loop but ~300k in
+ * the 15-way round-robin, while osslops moves by 73 cycles between its own min
+ * and median. A 7% sensitivity that hits one contender and not another is
+ * either a real property of the implementation (microcode state, or an I-cache
+ * footprint that the other contenders evict) or an artefact of the harness. It
+ * cannot be diagnosed by comparing two different binaries built by two
+ * different compilers, which is how it was first spotted.
+ *
+ * Empty / unset keeps every contender, so the default path is unchanged. */
+static int bench_selected(const char *label) {
+    const char *only = getenv("BENCH_ONLY");
+    if (!only || !*only) return 1;
+    size_t n = strlen(only), i = 0;
+    while (i < n) {
+        size_t j = i;
+        while (j < n && only[j] != ',') j++;
+        if (j > i && strncmp(label, only + i, j - i) == 0) return 1;
+        i = j + 1;
+    }
+    return 0;
+}
+
 static void benchmark(void) {
     uint8_t scalar[32] = {0}, point[32] = {0}, out[32];
     uint64_t mn, med, p10, p90;
+    int sel[N_BENCH], nsel = 0;
+    for (int c = 0; c < N_BENCH; c++)
+        if (bench_selected(BENCH_TAB[c].label)) sel[nsel++] = c;
+    if (nsel == 0) { printf("BENCH_ONLY matched no contender; nothing to do.\n"); return; }
 
     hex_to_bytes("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", scalar, 32);
     hex_to_bytes("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", point, 32);
 
     printf("=== X25519 Benchmark (%d repetitions, interleaved) ===\n\n", BENCH_REPS);
 
-    /* Warm up every contender before any timing starts. */
-    for (int c = 0; c < N_BENCH; c++)
-        BENCH_TAB[c].fn(out, scalar, point);
+    /* Warm up every contender before any timing starts, and gate on RFC 7748
+     * vector 1 so that no contender is reported without having been checked
+     * against the specification in this very process. */
+    {
+        int bad = 0;
+        for (int k = 0; k < nsel; k++) {
+            int c = sel[k];
+            BENCH_TAB[c].fn(out, scalar, point);
+            if (memcmp_hex(out,
+                    "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+                    32) != 0) {
+                printf("  %-20s RFC 7748 vector 1 MISMATCH\n", BENCH_TAB[c].label);
+                bad++;
+            }
+        }
+        printf("  contender verification: %s (%d of %d failed)\n",
+               bad ? "FAIL" : "all pass", bad, nsel);
+        printf("  contenders in the round-robin: %d of %d%s\n\n", nsel, N_BENCH,
+               nsel == N_BENCH ? "" : "  [BENCH_ONLY active]");
+    }
 
     /* Round-robin over contenders; the repetition index is the outer loop. */
     for (int r = 0; r < BENCH_REPS; r++) {
-        for (int c = 0; c < N_BENCH; c++) {
+        for (int k = 0; k < nsel; k++) {
+            int c = sel[k];
             uint64_t t0 = rdtsc_start();
             BENCH_TAB[c].fn(out, scalar, point);
             uint64_t t1 = rdtsc_end();
@@ -2442,7 +3099,8 @@ static void benchmark(void) {
         }
     }
 
-    for (int c = 0; c < N_BENCH; c++) {
+    for (int k = 0; k < nsel; k++) {
+        int c = sel[k];
         bench_stats(bench_samples[c], BENCH_REPS, &mn, &med, &p10, &p90);
         printf("%-20s median %8" PRIu64 "  min %8" PRIu64 "  p10 %8" PRIu64
                "  p90 %8" PRIu64 " cycles\n", BENCH_TAB[c].label, med, mn, p10, p90);
