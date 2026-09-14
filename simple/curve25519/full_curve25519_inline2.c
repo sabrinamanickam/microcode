@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stddef.h>
 #include "../../../include/patch.h"
 #include "../../../include/ucode_macro.h"
 #include "../../../include/misc.h"
@@ -802,6 +803,40 @@ static const ucode_t sq_patch_5acc[] = {
     "mov r11, [rbp + " S(a) " + 24]\n\t" "add r11, rcx\n\t" "sub r11, [rbp + " S(b) " + 24]\n\t" "mov [rbp + " S(out) " + 24], r11\n\t" \
     "mov r14, [rbp + " S(a) " + 32]\n\t" "add r14, rcx\n\t" "sub r14, [rbp + " S(b) " + 32]\n\t" "mov [rbp + " S(out) " + 32], r14\n\t"
 
+/* FE_ADD_NOSTORE / FE_SUB_NOSTORE — FE_ADD / FE_SUB without the store-back.
+ *
+ * The five result limbs are left in {rdi, rsi, r12, r11, r14}, ready for
+ * FE_SQ_FROM_REGS / FE_MUL_FROM_REGS_A, and nothing is written to memory.
+ *
+ * ladder_step issued 90 stores per iteration and 25 of them -- 28% -- were
+ * never read back:
+ *   C, D   consumed from registers by the CB and DA multiplies; the C_OFF and
+ *          D_OFF slots are not read by anything, in this step or the next.
+ *   t0     written FOUR times per step, three of them dead: the add is
+ *          overwritten by the sub, the sub is overwritten by mul121665 (which
+ *          writes t0 without reading it), and the tail add is consumed from
+ *          registers by the z2 multiply.
+ * That was 6,375 dead stores per X25519. Each affected op drops from 15
+ * instructions to 10.
+ *
+ * ONLY use these where the [rbp+out] slot is provably dead. The whole point is
+ * that nothing reloads it, so a later consumer that expects the memory copy
+ * would silently read a stale value from the previous ladder iteration. */
+#define FE_ADD_NOSTORE(a, b) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"   "add rdi, [rbp + " S(b) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"   "add rsi, [rbp + " S(b) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t"  "add r12, [rbp + " S(b) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t"  "add r11, [rbp + " S(b) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t"  "add r14, [rbp + " S(b) " + 32]\n\t"
+
+#define FE_SUB_NOSTORE(a, b) \
+    "mov rdi, [rbp + " S(a) " + 0]\n\t"  "mov rcx, 0xFFFFFFFFFFFDA\n\t" "add rdi, rcx\n\t" "sub rdi, [rbp + " S(b) " + 0]\n\t"  \
+    "mov rcx, 0xFFFFFFFFFFFFE\n\t" \
+    "mov rsi, [rbp + " S(a) " + 8]\n\t"  "add rsi, rcx\n\t" "sub rsi, [rbp + " S(b) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(a) " + 16]\n\t" "add r12, rcx\n\t" "sub r12, [rbp + " S(b) " + 16]\n\t" \
+    "mov r11, [rbp + " S(a) " + 24]\n\t" "add r11, rcx\n\t" "sub r11, [rbp + " S(b) " + 24]\n\t" \
+    "mov r14, [rbp + " S(a) " + 32]\n\t" "add r14, rcx\n\t" "sub r14, [rbp + " S(b) " + 32]\n\t"
+
 /* FE_SQ_FROM_REGS(out) — assumes a[0..4] already in {rdi, rsi, r12, r11, r14}.
  * Skips the 5 input loads vs FE_SQ; everything else identical. */
 #define FE_SQ_FROM_REGS(out) \
@@ -1018,15 +1053,15 @@ static void ladder_step(ladder_state_t *st) {
          * Original: 6 (C=ADD), 7 (D=SUB), 8 (DA=MUL(D,A)), 9 (CB=MUL(C,B)) — one chain (7→8).
          * Reordered: 7 (D=SUB) → 8 (DA chain), 6 (C=ADD) → 9 (CB chain) — two chains.
          * Dataflow is preserved: C and D both depend only on x3, z3, and feed different muls. */
-        FE_SUB(D_OFF, X3_OFF, Z3_OFF)
+        FE_SUB_NOSTORE(X3_OFF, Z3_OFF)          /* D: consumed from regs below */
         FE_MUL_FROM_REGS_A(DA_OFF, A_OFF)
-        FE_ADD(C_OFF, X3_OFF, Z3_OFF)
+        FE_ADD_NOSTORE(X3_OFF, Z3_OFF)          /* C: consumed from regs below */
         FE_MUL_FROM_REGS_A(CB_OFF, B_OFF)
         /* 10→11 chain: FE_ADD leaves t0 in regs; SQ_FROM_REGS picks up. */
-        FE_ADD(T0_OFF, DA_OFF, CB_OFF)
+        FE_ADD_NOSTORE(DA_OFF, CB_OFF)          /* t0: overwritten by the sub */
         FE_SQ_FROM_REGS(X3_OFF)
         /* 12→13 chain: FE_SUB leaves t0 in regs; SQ_FROM_REGS picks up. */
-        FE_SUB(T0_OFF, DA_OFF, CB_OFF)
+        FE_SUB_NOSTORE(DA_OFF, CB_OFF)          /* t0: overwritten by mul121665 */
         FE_SQ_FROM_REGS(Z3_OFF)
         /* Step 14: full FE_MUL (sq output regs don't match mul input regs; reload from mem). */
         FE_MUL(Z3_OFF, X1_OFF, Z3_OFF)
@@ -1045,7 +1080,7 @@ static void ladder_step(ladder_state_t *st) {
     fe_mul121665_native(st->t0, st->E);
     register ladder_state_t *_st2 asm("rbp") = st;
     asm volatile(
-        FE_ADD(T0_OFF, AA_OFF, T0_OFF)
+        FE_ADD_NOSTORE(AA_OFF, T0_OFF)          /* t0: consumed from regs by z2 */
         FE_MUL_FROM_REGS_A(Z2_OFF, E_OFF)
         :
         : "r"(_st2)
@@ -1069,6 +1104,20 @@ static inline void fe_cswap(uint64_t a[5], uint64_t b[5], uint64_t swap) {
     }
 }
 
+/* MEASURED AND REJECTED: merging the ladder's two conditional swaps.
+ *
+ * ladder_state_t lays x2,z2 out contiguously (40..119) and x3,z3 contiguously
+ * (120..199), so `fe_cswap(x2,x3,s); fe_cswap(z2,z3,s);` is one conditional
+ * swap of two adjacent 10-limb blocks. A single 10-iteration fe_cswap2 derived
+ * the mask once instead of twice and let the compiler vectorise all 80 bytes
+ * in one loop; gcc duly emitted pxor/pand/pxor over XMM.
+ *
+ * It was SLOWER: +187 cyc/X25519 at gcc-11 -O3, against a control band of
+ * -11..+21 across the four untouched contenders in the same run, so the sign
+ * is not in doubt. The wider loop spills in the ladder's hot path where the
+ * two narrow ones did not. Two 5-limb cswaps stay.
+ *
+ * Do not retry this without a reason to expect different register pressure. */
 static void fe_frombytes(uint64_t out[5], const uint8_t in[32]) {
     uint64_t t[5];
     t[0]  = ((uint64_t)in[0])  | ((uint64_t)in[1] << 8) | ((uint64_t)in[2] << 16)
