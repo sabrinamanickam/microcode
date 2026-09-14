@@ -412,6 +412,12 @@ int main(void) {
      * regions never print. */
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    /* Every number below is RDTSC. On an unpinned core that is not cycles --
+     * see freq_guard.h. This binary recorded a full unpinned arm set once
+     * already, and the ratios looked plausible, which is what makes it
+     * dangerous. */
+    if (freq_guard()) return 2;
+
     int root = (geteuid() == 0);
     printf("=== LEVEL 1: isolated fe_mul / fe_sq kernel cost (5x51) ===\n");
     printf("harness: %d ops/sample, %d samples, %d phases, ping-pong dependent chain\n",

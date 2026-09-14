@@ -30,6 +30,7 @@
 #include "../../../include/patch.h"
 #include "../../../include/ucode_macro.h"
 #include "../../../include/misc.h"
+#include "freq_guard.h"
 
 typedef uint64_t fe[5];
 #define MASK51 0x7FFFFFFFFFFFFULL
@@ -3118,6 +3119,8 @@ static void benchmark(void) {
 int main(void) {
     printf("=== Full X25519: every contender (inline-asm 5×51 is canonical ours) ===\n\n");
 
+    if (freq_guard()) return 2;
+
     assign_to_core(0);
     init_match_and_patch();
     do_fix_IN_patch();
@@ -3216,6 +3219,7 @@ static void profile_init_state(void) {
 
 int main(void) {
     printf("=== inline2 PER-OP PROFILER ===\n\n");
+    if (freq_guard()) return 2;
     assign_to_core(0);
     init_match_and_patch();
     do_fix_IN_patch();
