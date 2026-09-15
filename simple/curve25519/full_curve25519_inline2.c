@@ -88,6 +88,7 @@ typedef struct {
     uint64_t t1[5];    /* offset 240 */
     uint64_t t2[5];    /* offset 280 */
     uint64_t t3[5];    /* offset 320 */
+    uint64_t sc[5];    /* offset 360 -- ping-pong scratch, SQ_UNCHAINED only */
 } invert_state_t;
 
 #define IZ_OFF    0
@@ -99,6 +100,7 @@ typedef struct {
 #define IT1_OFF   240
 #define IT2_OFF   280
 #define IT3_OFF   320
+#define ISC_OFF   360
 
 /* Two-step stringify so macro args like X2_OFF expand to their integer
  * literal before being placed into the asm string. */
@@ -926,6 +928,56 @@ static const ucode_t sq_patch_5acc[] = {
     "mov [rbp + " S(out) " + 24], rbx\n\t" \
     "mov [rbp + " S(out) " + 32], rax\n\t"
 
+/* ── squaring runs: chained, or memory-to-memory ───────────────────────
+ * The Fermat chain's runs are normally register-chained: the head loads, the
+ * tail stores, and INV_SQ_RENAME carries each intermediate to the next firing
+ * with four movs and no memory access at all.
+ *
+ * That shape is what kills the machine with the five-accumulator fe_sq.
+ * Measured 2026-09-15, all at 100,000+ firings on the 5acc patch:
+ *     separate calls, ping-pong through memory        PASS  (tight)
+ *     alternating fe_mul/fe_sq, separate calls        PASS  (mixed, 200k)
+ *     register-chained, no memory between firings     HARD RESET at <1000
+ * The disassembly agrees: x25519 has 243 firings at a 13-instruction gap and
+ * every one is a chained INV_SQ; ladder_step's minimum gap is 19 and each has
+ * loads or stores in between. That is exactly why the earlier attempt died at
+ * the RFC gate and not on the five isolated firings before it.
+ *
+ * So under SQ_UNCHAINED every squaring round-trips through memory, which is
+ * the shape that survives. Runs ping-pong between the destination slot and a
+ * scratch slot: storing and reloading the SAME address back to back is the
+ * ~30 cycle store-to-load stall probe_ldorder found, and alternating avoids
+ * it. Cost is ~2.9 cyc/sq against the chained form -- far less than the 13.45
+ * the 5acc kernel saves.
+ *
+ * Production (serial fe_sq) is unaffected and keeps the chained runs. */
+#define INV_PAIR(dst, s)  INV_SQ(s, dst) INV_SQ(dst, s)
+
+/* run of n squarings, a -> dst, scratch s. ODD n: one then (n-1)/2 pairs. */
+#define INV_RUN_ODD(dst, s, a, pairs) \
+    INV_SQ(dst, a) ".rept " #pairs "\n\t" INV_PAIR(dst, s) ".endr\n\t"
+/* EVEN n: two then (n-2)/2 pairs. */
+#define INV_RUN_EVEN(dst, s, a, pairs) \
+    INV_SQ(s, a) INV_SQ(dst, s) ".rept " #pairs "\n\t" INV_PAIR(dst, s) ".endr\n\t"
+
+#ifdef SQ_UNCHAINED
+#define INV_RUN2(dst, a)    INV_RUN_EVEN(dst, ISC_OFF, a, 0)
+#define INV_RUN5(dst, a)    INV_RUN_ODD (dst, ISC_OFF, a, 2)
+#define INV_RUN10(dst, a)   INV_RUN_EVEN(dst, ISC_OFF, a, 4)
+#define INV_RUN20(dst, a)   INV_RUN_EVEN(dst, ISC_OFF, a, 9)
+#define INV_RUN50(dst, a)   INV_RUN_EVEN(dst, ISC_OFF, a, 24)
+#define INV_RUN100(dst, a)  INV_RUN_EVEN(dst, ISC_OFF, a, 49)
+#else
+#define INV_RUN_CHAINED(dst, a, rep) \
+    INV_SQ_LOAD(a) INV_SQ_OP ".rept " #rep "\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t" INV_SQ_STORE(dst)
+#define INV_RUN2(dst, a)    INV_SQ_LOAD(a) INV_SQ_OP INV_SQ_RENAME INV_SQ_OP INV_SQ_STORE(dst)
+#define INV_RUN5(dst, a)    INV_RUN_CHAINED(dst, a, 4)
+#define INV_RUN10(dst, a)   INV_RUN_CHAINED(dst, a, 9)
+#define INV_RUN20(dst, a)   INV_RUN_CHAINED(dst, a, 19)
+#define INV_RUN50(dst, a)   INV_RUN_CHAINED(dst, a, 49)
+#define INV_RUN100(dst, a)  INV_RUN_CHAINED(dst, a, 99)
+#endif
+
 /* Single sq (memory → memory). No chain. */
 #define INV_SQ(out, a) INV_SQ_LOAD(a) INV_SQ_OP INV_SQ_STORE(out)
 
@@ -1218,9 +1270,7 @@ static void fe_invert(uint64_t out[5], const uint64_t z[5]) {
         /* z2 = sq(z) */
         INV_SQ(IZ2_OFF, IZ_OFF)
         /* t  = sq^2(z2)  — chain of 2 */
-        INV_SQ_LOAD(IZ2_OFF) INV_SQ_OP
-        INV_SQ_RENAME INV_SQ_OP
-        INV_SQ_STORE(IT_OFF)
+        INV_RUN2(IT_OFF, IZ2_OFF)
         /* z9  = mul(t, z) */
         INV_MUL(IZ9_OFF, IT_OFF, IZ_OFF)
         /* z11 = mul(z9, z2) */
@@ -1230,51 +1280,35 @@ static void fe_invert(uint64_t out[5], const uint64_t z[5]) {
         /* t0  = mul(t, z9) */
         INV_MUL(IT0_OFF, IT_OFF, IZ9_OFF)
         /* t1  = sq^5(t0) */
-        INV_SQ_LOAD(IT0_OFF) INV_SQ_OP
-        ".rept 4\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT1_OFF)
+        INV_RUN5(IT1_OFF, IT0_OFF)
         /* t1  = mul(t1, t0) */
         INV_MUL(IT1_OFF, IT1_OFF, IT0_OFF)
         /* t2  = sq^10(t1) */
-        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
-        ".rept 9\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT2_OFF)
+        INV_RUN10(IT2_OFF, IT1_OFF)
         /* t2  = mul(t2, t1) */
         INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF)
         /* t3  = sq^20(t2) */
-        INV_SQ_LOAD(IT2_OFF) INV_SQ_OP
-        ".rept 19\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT3_OFF)
+        INV_RUN20(IT3_OFF, IT2_OFF)
         /* t3  = mul(t3, t2) */
         INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF)
         /* t3  = sq^10(t3) */
-        INV_SQ_LOAD(IT3_OFF) INV_SQ_OP
-        ".rept 9\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT3_OFF)
+        INV_RUN10(IT3_OFF, IT3_OFF)
         /* t1  = mul(t3, t1) */
         INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF)
         /* t2  = sq^50(t1) */
-        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
-        ".rept 49\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT2_OFF)
+        INV_RUN50(IT2_OFF, IT1_OFF)
         /* t2  = mul(t2, t1) */
         INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF)
         /* t3  = sq^100(t2) */
-        INV_SQ_LOAD(IT2_OFF) INV_SQ_OP
-        ".rept 99\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT3_OFF)
+        INV_RUN100(IT3_OFF, IT2_OFF)
         /* t3  = mul(t3, t2) */
         INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF)
         /* t3  = sq^50(t3) */
-        INV_SQ_LOAD(IT3_OFF) INV_SQ_OP
-        ".rept 49\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT3_OFF)
+        INV_RUN50(IT3_OFF, IT3_OFF)
         /* t1  = mul(t3, t1) */
         INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF)
         /* t1  = sq^5(t1) */
-        INV_SQ_LOAD(IT1_OFF) INV_SQ_OP
-        ".rept 4\n\t" INV_SQ_RENAME INV_SQ_OP ".endr\n\t"
-        INV_SQ_STORE(IT1_OFF)
+        INV_RUN5(IT1_OFF, IT1_OFF)
         /* out = mul(t1, z11)  — final result stored to IT1_OFF slot */
         INV_MUL(IT1_OFF, IT1_OFF, IZ11_OFF)
         :

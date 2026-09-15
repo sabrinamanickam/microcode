@@ -30,6 +30,10 @@
  * MODES
  *   smoke          5 targeted inputs, one firing each (same as test_sq_fire)
  *   soak    <n>    n separate fe_sq_ucode calls, memory round trip between
+ *   tight   <n>    n separate fe_sq_ucode calls ping-ponged with NOTHING
+ *                  between them: maximum firing density, but no RSP use and
+ *                  no in-asm loop. Separates density from the chaining
+ *                  wrapper -- see the comment at the mode itself.
  *   chain   <n>    fe_sq_ucode_n(out,a,n): n firings back to back, state kept
  *                  in arch regs, no memory round trip. This is the shape that
  *                  killed the machine in the 2026-09-12 session.
@@ -142,6 +146,45 @@ int main(int argc, char **argv) {
             if (i % 1000 == 0) bad += check(a, got);
         }
         stage("05 all %ld separate firings survived; %d mismatches", N, bad);
+    } else if (!strcmp(mode, "tight")) {
+        /* THE DISCRIMINATING TEST -- one variable, and it is the only thing
+         * left that separates a pass from a crash.
+         *
+         *   soak  1000  fires fe_sq_ucode with rand_fe() and a periodic
+         *               fiat-crypto check between firings.        PASSES
+         *   chain 1000  fires fe_sq_ucode_n: back to back inside one asm
+         *               block, nothing between.                   CRASHES
+         *
+         * TWO things differ, and we have never separated them:
+         *   (a) firing DENSITY -- chain fires every ~14 instructions,
+         *       soak every ~60+;
+         *   (b) fe_sq_ucode_n keeps its loop counter ON THE STACK
+         *       (`sub rsp,16`, `dec qword ptr [rsp+8]` between firings),
+         *       where fe_sq_ucode never touches RSP at all. RSP is a
+         *       register this core is known to treat specially -- the Keccak
+         *       patch borrows it as a 32nd data register.
+         *
+         * This mode fires fe_sq_ucode in a ping-pong with NOTHING between
+         * the calls: maximum density, but no RSP use and no in-asm loop.
+         *
+         *   CRASHES -> density is the trigger. The chaining wrapper is
+         *              innocent, and 5acc cannot be shipped as it stands.
+         *   PASSES  -> the chaining wrapper is implicated. fe_sq_ucode_n can
+         *              be rewritten to hold its counter in a register the
+         *              patch does not use, and 5acc may be shippable --
+         *              worth ~17,000 cyc/X25519.
+         *
+         * Either answer is worth the boot; today we have neither. */
+        stage("04 about to fire %ld SEPARATE fe_sq_ucode calls, ping-pong,"
+              " nothing between them (no RSP use, no in-asm loop)", N);
+        rand_fe(a);
+        for (long i = 0; i < N; i += 2) {
+            if (i % HEARTBEAT == 0) stage("04.hb %ld / %ld fired so far", i, N);
+            fe_sq_ucode(a, b);
+            fe_sq_ucode(b, a);
+        }
+        bad += check(b, a);   /* last firing: a = sq(b) */
+        stage("05 %ld tight separate firings survived; %d mismatches", N, bad);
     } else if (!strcmp(mode, "chain")) {
         stage("04 about to fire fe_sq_ucode_n back-to-back, %ld deep -- THIS IS THE"
               " SHAPE THAT KILLED THE MACHINE on 2026-09-12", N);
