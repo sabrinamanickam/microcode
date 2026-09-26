@@ -13,7 +13,9 @@
 # Note on what the sweep actually tunes:
 #   - x86_64_asm / x86_64_shld are hand-written .s — assembled identically at
 #     every config (compiler/-O is irrelevant to them).
-#   - opt64lcu24 / opt64lcu24shld are C — these are what the compiler grid tunes.
+#   - openssl is perlasm-generated assembly — likewise compiler-independent.
+#   - opt64*, sseu2, mmxu1, simple, xkcp_g64* are C — these are what the
+#     compiler grid tunes, so all of them are rebuilt at every config.
 #   - microcode is a fixed patch RAM image — compiler-independent; its number is
 #     a flat sanity baseline across configs.
 # So the sweep's job here is to find the genuinely fastest SUPERCOP config (what
@@ -31,6 +33,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Physical core every run is measured on. The harness re-pins itself with
+# sched_setaffinity, so BENCH_CORE is exported into the run as well as being
+# used for the taskset mask — taskset alone would be overridden.
+BENCH_CORE="${BENCH_CORE:-0}"
 
 # Generic helpers shared with the curve matrix (no curve-specific state in them).
 source ../../lib/freq_guard.sh    # check_cpu_frequency()
@@ -81,6 +88,15 @@ CONTENDERS=(
     "keccak/openssl"
     "keccak/microcode"
 )
+# Every native baseline object linked into asm_op_keccak_vs — must match
+# EXTRA_OBJS for that PROG in the Makefile. All are deleted and rebuilt per config.
+BASELINE_OBJS=(
+    keccak_x86_64_asm.o keccak_x86_64_shld.o
+    keccak_opt64lcu24.o keccak_opt64lcu24shld.o
+    keccak_opt64lcu6.o keccak_opt64u6.o
+    keccak_sseu2.o keccak_mmxu1.o keccak_simple.o
+    keccak_xkcp_g64.o keccak_xkcp_g64lc.o keccak_openssl.o
+)
 # Short column headers for the markdown matrix, index-aligned with CONTENDERS.
 SHORT=( "asm" "shld" "opt24" "opt24shld" "lcu6" "u6" "sse" "mmx" "simple" "xg64" "xg64lc" "ossl" "ucode" )
 
@@ -123,10 +139,12 @@ run_matrix() {
         echo "  CFLAGS: $cflags"
         echo "═══════════════════════════════════════════════════════════════"
 
-        # Force clean rebuild — cached .o files hold the previous config's flags.
-        rm -f keccak_x86_64_asm.o keccak_x86_64_shld.o \
-              keccak_opt64lcu24.o keccak_opt64lcu24shld.o \
-              asm_op_keccak_vs_static
+        # Force clean rebuild — cached .o files hold the previous config's flags,
+        # and make does not track CFLAGS, so EVERY baseline object must go. (This
+        # list used to name only 4 of the 12, which left the other 8 frozen at
+        # whatever config last built them for the whole sweep.)
+        rm -f "${BASELINE_OBJS[@]}" asm_op_keccak_vs_static
+        touch .build_stamp
 
         if ! make -s PROG=asm_op_keccak_vs CC="$cc" CFLAGS="$cflags" \
                   >/dev/null 2>build_err.log; then
@@ -136,12 +154,32 @@ run_matrix() {
         fi
         rm -f build_err.log
 
+        # Guard: every baseline object must have been rebuilt for THIS config.
+        # A stale one would make its "winning config" column meaningless.
+        local obj stale=0
+        for obj in "${BASELINE_OBJS[@]}"; do
+            if [ ! "$obj" -nt .build_stamp ]; then
+                echo "[STALE OBJECT] $obj was not rebuilt under $cfg"
+                stale=1
+            fi
+        done
+        if [ "$stale" -ne 0 ]; then
+            echo "[ABORT] stale baseline objects — sweep results would be invalid."
+            exit 1
+        fi
+
         # A run that crashes (SIGSEGV) or exits non-zero must NOT abort the whole
         # sweep (set -e would otherwise kill it and we'd lose every prior config's
         # results before emit_results_md runs). The `if ! ...` form is set-e-safe:
         # the failure is consumed by the conditional. Skip the bad config and keep
         # going so the .md still gets written from the configs that succeeded.
-        if ! output=$(sudo taskset -c 0 ./asm_op_keccak_vs_static 2>&1); then
+        # Re-assert the microcode debug unlock (MSR 0x1E6 bit 9) on the bench
+        # core before every run. It is per-core and can be lost when the core
+        # enters a deep C-state, and this sweep runs for a long time with the
+        # bench core idle between configs. Without it the harness dies with
+        # SIGILL on udbgrd/udbgwr (0F 0E / 0F 0F) before producing any output.
+        sudo wrmsr -p "$BENCH_CORE" 0x1e6 0x200 || true
+        if ! output=$(sudo env BENCH_CORE="$BENCH_CORE" taskset -c "$BENCH_CORE" ./asm_op_keccak_vs_static 2>&1); then
             echo "[RUN FAILED — harness crashed or exited non-zero] skipping config: $cfg"
             echo "$output" | tail -n 8 | sed 's/^/    /'
             continue
@@ -238,7 +276,7 @@ emit_results_md() {
         echo
         echo "Configs that ran: ${#ran_cfgs[@]} / ${#CONFIGS[@]}"
         echo
-        echo "Environment: base-pinned, turbo off. Delivered core freq ${DELIVERED_FREQ_MHZ:-n/a} MHz,"
+        echo "Environment: core ${BENCH_CORE}, base-pinned, turbo off. Delivered core freq ${DELIVERED_FREQ_MHZ:-n/a} MHz,"
         echo "TSC (RDTSC) rate ${TSC_FREQ_MHZ:-n/a} MHz, correction f_core/f_TSC = ${CYCLE_CORRECTION:-n/a}"
         echo "(aperf/mperf under load, verified before the sweep; ratios invariant to it, multiply"
         echo "absolute cycle counts by it for true core cycles)."

@@ -24,6 +24,7 @@
 #include "../../../../include/patch.h"
 #include "../../../../include/ucode_macro.h"
 #include "../../../../include/misc.h"
+#include "../bench_core.h"
 
 /* The two permutation entry points provided by the SUPERCOP sources. Symbol
  * renames are done at link time (see Makefile) so the two implementations can
@@ -153,7 +154,8 @@ static void bench_noop_hook(void) {
 int main(void) {
     printf("=== Phase 0 baseline: Keccak-f[1600] on Goldmont ===\n\n");
 
-    assign_to_core(0);
+    assign_to_core(bench_core());
+    printf("pinned to core %d\n", bench_core());
     init_match_and_patch();
     do_fix_IN_patch();
 

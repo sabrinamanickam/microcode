@@ -41,6 +41,7 @@
 #include "../../../../include/patch.h"
 #include "../../../../include/ucode_macro.h"
 #include "../../../../include/misc.h"
+#include "../bench_core.h"
 
 /* ────────────────────────── statistics ────────────────────────── */
 
@@ -406,7 +407,8 @@ int main(int argc, char **argv)
     if(use_ucode){
         printf("g_keccak_buf @ %p\n",(void*)g_keccak_buf);
         if((uint64_t)g_keccak_buf>=0x100000000ULL){ printf("FATAL >4GB\n"); return 1; }
-        assign_to_core(0);
+        assign_to_core(bench_core());
+        printf("pinned to core %d\n", bench_core());
         init_match_and_patch(); do_fix_IN_patch();
         install_perm_patch(); reset_rc_table();
     } else {

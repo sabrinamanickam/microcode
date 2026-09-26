@@ -21,6 +21,7 @@
 #include "../../../../include/patch.h"
 #include "../../../../include/ucode_macro.h"
 #include "../../../../include/misc.h"
+#include "../bench_core.h"
 
 /* median over a sample of per-rep batch totals (sorts in place). */
 static int cmp_u64(const void *a, const void *b){
@@ -125,7 +126,8 @@ int main(void){
     printf("=== Keccak head-to-head (same process, same frequency) ===\n");
     printf("g_keccak_buf @ %p\n", (void*)g_keccak_buf);
     if((uint64_t)g_keccak_buf>=0x100000000ULL){printf("FATAL >4GB\n");return 1;}
-    assign_to_core(0);
+    assign_to_core(bench_core());
+    printf("pinned to core %d\n", bench_core());
     init_match_and_patch(); do_fix_IN_patch();
     install_perm_patch(); reset_control();
 
