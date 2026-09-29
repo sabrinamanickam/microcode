@@ -1,0 +1,237 @@
+=== LEVEL 1: isolated fe_mul / fe_sq kernel cost (5x51) ===
+harness: 128 ops/sample, 50 samples x 20 round-robin phases = 1000 pooled samples/arm, ping-pong dependent chain
+microcode arms: ENABLED (root)
+
+PINNED core=1 sched_getcpu=1
+OpenSSL fe51 asm and s2n-bignum alt vs fiat-crypto: OK (0 mismatches / 800)
+
+fe_sq : five-accumulator patch, 41 triads (replaces the serial one below)
+fe_mul: 58 triads at U7c00 (vmwrite hook)
+fe_sq : 42 triads at U7ce8 (vmread  hook)
+
+=== RFC 7748 Test Vectors ===
+
+--- Test vector 1 ---
+  native: c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  ucode : c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  native: PASS
+  ucode:  PASS
+
+--- Test vector 2 ---
+  native: 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  ucode : 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  native: PASS
+  ucode:  PASS
+
+--- Iterated test (1 iteration) ---
+  native after 1: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  native: PASS
+  ucode  after 1: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  ucode:  PASS
+
+--- Iterated test (1000 iterations) ---
+  native after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  native: PASS
+  ucode  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  ucode:  PASS
+  fiat   after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  fiat:   PASS
+  a51ops after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51ops: PASS
+  a51/asmCld  1000 : 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51/asm-Clad: PASS
+  a51/ucodeCld 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51/ucode-Clad: PASS
+  donna  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  donna:  PASS
+  amd51  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  amd51:  PASS
+  a51u   after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51u:   PASS
+  amd64  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  amd64:  PASS
+  crypto after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  crypto: PASS
+  inline after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  inline: PASS
+  native==ucode: PASS
+  native==fiat:  PASS
+  native==donna: PASS
+  native==amd51: PASS
+  native==a51u:  PASS
+  native==amd64: PASS
+  native==crypto: PASS
+  native==inline: PASS
+
+=== RFC 7748: 26 passed, 0 failed ===
+
+RFC 7748 OK - the patches being timed are the verified ones.
+
+dispatch-floor probe installed: 1 triad (ZEROEXT rdi,rdi) at both hooks
+
+fe_sq : five-accumulator patch, 41 triads (replaces the serial one below)
+fe_mul: 58 triads at U7c00 (vmwrite hook)
+fe_sq : 42 triads at U7ce8 (vmread  hook)
+
+=== RFC 7748 Test Vectors ===
+
+--- Test vector 1 ---
+  native: c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  ucode : c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  native: PASS
+  ucode:  PASS
+
+--- Test vector 2 ---
+  native: 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  ucode : 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  native: PASS
+  ucode:  PASS
+
+--- Iterated test (1 iteration) ---
+  native after 1: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  native: PASS
+  ucode  after 1: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  ucode:  PASS
+
+--- Iterated test (1000 iterations) ---
+  native after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  native: PASS
+  ucode  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  ucode:  PASS
+  fiat   after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  fiat:   PASS
+  a51ops after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51ops: PASS
+  a51/asmCld  1000 : 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51/asm-Clad: PASS
+  a51/ucodeCld 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51/ucode-Clad: PASS
+  donna  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  donna:  PASS
+  amd51  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  amd51:  PASS
+  a51u   after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  a51u:   PASS
+  amd64  after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  amd64:  PASS
+  crypto after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  crypto: PASS
+  inline after 1000: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  inline: PASS
+  native==ucode: PASS
+  native==fiat:  PASS
+  native==donna: PASS
+  native==amd51: PASS
+  native==a51u:  PASS
+  native==amd64: PASS
+  native==crypto: PASS
+  native==inline: PASS
+
+=== RFC 7748: 26 passed, 0 failed ===
+
+
+=== Table K1 - kernel latency, memory-to-memory dependent chain ===
+  (median cycles per operation; every backend pays the memory round-trip)
+
+  backend                                  fe_mul    fe_sq
+  -------------------------------------- -------- --------
+  microcode (this work), full patch         103.8     73.0
+  fiat-crypto                               128.5    111.1
+  CryptOpt                                  141.4    121.0
+  amd64-51 asm (Bernstein-Schwabe)          146.0    118.8
+  hand-written __uint128_t C                141.7    111.1
+  OpenSSL fe51 asm                           97.1     73.2
+  -- saturated 4x64 (other representation)                  
+  s2n-bignum (verified asm, 4x64)           110.4    105.9
+
+=== Table K2 - where the microcode cycles go ===
+  (median cycles per operation, dependent chain)
+
+  layer                                    fe_mul    fe_sq
+  -------------------------------------- -------- --------
+  wrapper instr. cost (issue-bound)          10.2      7.8
+  wrapper + redirection (1-triad patch)      15.3     15.7
+  wrapper + redirection + patch body        103.8     73.0
+
+  derived:
+  patch body (full - floor)                  88.5     57.4
+  wrapper+redirection, share of total       14.7%    21.5%
+
+  The wrapper row is issue-bound throughput, measured on disjoint
+  slots; in situ it overlaps the firing, so it is context for the
+  floor rather than a term to subtract from it. The floor IS the
+  wrapper+redirection cost a caller cannot avoid (15%/21% of the op).
+
+  drift check: fe_mul re-measured after restore = 103.7 (first pass 103.8, -0.02%)
+
+=== Table K6 - why a firing costs more inside the ladder ===
+  (median cycles per operation; each arm is a dependent chain of
+   16 ops, same shape as Table K1, differing only as noted)
+
+  arm                                       measured  expected    excess
+  ---------------------------------------- --------- --------- ---------
+  microcode, alternating mul/sq                 88.0      88.4      -0.4
+  OpenSSL, alternating (control)                85.6      85.1      +0.5
+  fiat-crypto, alternating (control)           119.3     119.8      -0.5
+  microcode, 5 field slots not 2               103.8     103.8      +0.0
+
+  A ladder step issues 9 firings and switches hook 3 times. If the
+  alternating excess is microcode-specific (large for the first row,
+  ~0 for the controls) the cost is hook/patch-RAM switching. If the
+  scatter row carries it instead, it is the working set. Roughly 12
+  cycles per firing has to be found here to reconcile Table K1 with
+  the measured ladder.
+
+=== Table K5 - arithmetic only, both floors removed ===
+  (median cycles per operation, dependent chain, invocation cost
+   subtracted from BOTH sides: microcode loses wrapper+redirection,
+   the natives lose call + the same 10-load / 5-store round trip)
+
+  microcode floor (wrapper+redirect)         15.3     15.7
+  native floor (call + mem round trip)       10.1      6.4
+
+  backend, arithmetic only                 fe_mul    fe_sq
+  -------------------------------------- -------- --------
+  microcode (this work)                      88.5     57.4
+  OpenSSL fe51 asm                           86.9     66.8
+  fiat-crypto                               118.3    104.7
+  CryptOpt                                  131.2    114.7
+  amd64-51 asm                              135.8    112.4
+  hand-written C                            131.6    104.8
+
+  microcode arithmetic vs OpenSSL arithmetic: mul 1.018x  sq 0.858x  (<1 = microcode faster)
+  CAVEAT: the fe_sq column flatters microcode. FE_SQ's lea/imul
+  precompute sits in the microcode floor and is subtracted away,
+  while OpenSSL's fe51_sqr keeps its doubling inside the routine.
+  fe_mul has no such asymmetry (19*b_j is inside the patch), so the
+  fe_mul column is the clean comparison and the one to quote.
+
+=== Table K3 - independent-op throughput (ILP exposed) ===
+  (median cycles per operation, four independent chains)
+
+  backend                                  fe_mul    fe_sq
+  -------------------------------------- -------- --------
+  microcode (this work)                     100.9     70.0
+  microcode dispatch floor                   15.2     15.7
+  fiat-crypto                               134.5    111.5
+  CryptOpt                                  138.7    121.0
+  amd64-51 asm                              146.0    120.6
+  hand-written __uint128_t C                141.3    117.3
+  OpenSSL fe51 asm                           97.1     73.2
+  s2n-bignum (verified asm, 4x64)           107.8    105.4
+
+=== Table K4 - C/asm backends without the memory barrier ===
+  (their best case: compiler may keep limbs in registers)
+
+  backend                                  fe_mul    fe_sq
+  -------------------------------------- -------- --------
+  fiat-crypto                               128.5    111.1
+  CryptOpt                                  141.4    121.0
+  amd64-51 asm                              146.0    118.8
+  hand-written __uint128_t C                141.7    111.1
+  OpenSSL fe51 asm                           97.1     73.2
+  s2n-bignum (verified asm, 4x64)           110.4    105.9
+
+raw arms written to bench/results/kernel_sweep/gcc-12_O3/kernel_5x51.txt
+
+(checksum 1830414736446666)

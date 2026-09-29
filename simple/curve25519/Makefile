@@ -13,7 +13,11 @@ LDFLAGS := -static
 LIBS    := ../../../build/libmicro.a
 
 # Default program name (override with: make PROG=foo)
+# Tests live in tests/ and benchmarks in bench/: make PROG=tests/test_sq_soak
+# or make PROG=bench/bench_kernel. Always run make from THIS folder; the
+# per-program config below matches on the basename ($(PNAME)).
 PROG ?= yolo
+PNAME := $(notdir $(PROG))
 
 # ---- default target ----
 all: $(PROG)_static
@@ -25,7 +29,7 @@ all: $(PROG)_static
 # full_curve25519_inline2 is the comprehensive benchmark binary (hosts every
 # contender; full_curve25519 is kept on disk but no longer benched) and needs
 # the identical flags + external objects.
-ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64 bench_kernel inline2_profile test_sq_soak test_new_contenders probe_issue probe_sched test_sq_fire test_sq_paths test_invert_bisect test_sq_why probe_sq_lat probe_trigger probe_wrapper probe_oplat probe_ldorder,$(PROG)))
+ifneq (,$(filter full_curve25519 full_curve25519_inline2 bench_attrib bench_fieldop probe_a51ops bench_table bench_table_4x64 bench_kernel bench_kernel_4x64 inline2_profile test_sq_soak test_new_contenders probe_issue probe_sched test_sq_fire test_sq_paths test_invert_bisect test_sq_why probe_sq_lat probe_trigger probe_wrapper probe_oplat probe_ldorder probe_inv_loop probe_glue_ablation probe_patch_loads bench_sq5acc probe_mula24,$(PNAME)))
 CFLAGS := -O3 -fwrapv -fPIC -fPIE -gdwarf-4 -Wall -masm=intel -march=native -mtune=native -I include/
 endif
 
@@ -312,7 +316,7 @@ cryptopt_sq.o: cryptopt_sq.asm
 # objects as full_curve25519 (amd64-51 asm, amd64-51-ucode framework, amd64-64
 # asm, CryptOpt asm). amd64-64/ucode stays its own binary (4x64 patch can't
 # coexist with the 5x51 patches both of these install).
-ifeq ($(PROG),full_curve25519)
+ifeq ($(PNAME),full_curve25519)
 EXTRA_OBJS := $(AMD51_OBJS) $(AMD51U_OBJS) $(AMD64_OBJS) cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -320,7 +324,7 @@ endif
 # inline2 defines supercop_amd64_51_ucode_ladderstep itself (inline-asm style),
 # so the C ladderstep object is excluded — its other amd64-51-ucode framework
 # objects (mont25519/invert/pack/mul/square/...) are still linked.
-ifeq ($(PROG),full_curve25519_inline2)
+ifeq ($(PNAME),full_curve25519_inline2)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -332,7 +336,7 @@ endif
 # Standalone amd64-64/ucode hybrid binary: amd64-64 framework + 4x64 microcode
 # field ops. Installs the 4x64 patch (can't coexist with full_curve25519's
 # 5x51 patches), so it's its own binary — same pattern as inline2.
-ifeq ($(PROG),full_curve25519_amd64_64_ucode)
+ifeq ($(PNAME),full_curve25519_amd64_64_ucode)
 EXTRA_OBJS := $(AMD64U_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -342,7 +346,7 @@ endif
 # amd64-64/asm-Clad back-to-back in ONE process — the ladder-rewrite tax comes
 # out as a same-process ratio, immune to cross-run frequency state. The two
 # object sets use different CRYPTO_NAMESPACE prefixes, so they coexist.
-ifeq ($(PROG),full_curve25519_amd64_64_asmclad)
+ifeq ($(PNAME),full_curve25519_amd64_64_asmclad)
 EXTRA_OBJS := $(AMD64A_OBJS) $(AMD64_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -351,7 +355,7 @@ endif
 # include, native is inline, microcode comes from the INLINE2_LIB include).
 # probe_a51ops includes inline2 as a library to verify/bench the a51ops
 # control without installing any patch (no sudo, no red-unlock needed).
-ifeq ($(PROG),probe_a51ops)
+ifeq ($(PNAME),probe_a51ops)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -362,7 +366,7 @@ endif
 # bench_table: the 5x51 controlled block + the end-to-end table. #includes
 # inline2 as a library (INLINE2_CONTENDERS_ONLY), so it needs inline2's whole
 # object set. The 4x64 block lives in bench_table_4x64 (separate patch RAM).
-ifeq ($(PROG),bench_table)
+ifeq ($(PNAME),bench_table)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -375,7 +379,7 @@ endif
 # amd64-64 (AMD64_OBJS, cross-process anchor) in ONE process. Separate binary
 # from bench_table because the 4x64 patch (75 triads @U7c00) cannot coexist
 # with the 5x51 pair (108 triads, also @U7c00) under the 128-triad cap.
-ifeq ($(PROG),bench_table_4x64)
+ifeq ($(PNAME),bench_table_4x64)
 EXTRA_OBJS := $(AMD64U_OBJS) $(AMD64A_OBJS) $(AMD64_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -401,19 +405,19 @@ s2n_sqr_p25519_alt.o: $(S2NB_DIR)/x86/curve25519/bignum_sqr_p25519_alt.S
 s2n_x25519_alt.o: $(S2NB_DIR)/x86/curve25519/curve25519_x25519_alt.S
 	$(CC) -I$(S2NB_DIR)/include -c $< -o $@
 
-ifeq ($(PROG),probe_shrd)
+ifeq ($(PNAME),probe_shrd)
 EXTRA_OBJS :=
 endif
 
-ifeq ($(PROG),probe_carry)
+ifeq ($(PNAME),probe_carry)
 EXTRA_OBJS :=
 endif
 
-ifeq ($(PROG),probe_opsem)
+ifeq ($(PNAME),probe_opsem)
 EXTRA_OBJS :=
 endif
 
-ifeq ($(PROG),probe_issue)
+ifeq ($(PNAME),probe_issue)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -422,7 +426,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),test_sq_why)
+ifeq ($(PNAME),test_sq_why)
 CFLAGS += -DENABLE_SQ_5ACC -DSQ_MASK_R8
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
@@ -432,7 +436,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),test_invert_bisect)
+ifeq ($(PNAME),test_invert_bisect)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -441,7 +445,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),test_sq_paths)
+ifeq ($(PNAME),test_sq_paths)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -450,7 +454,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifneq (,$(filter test_sq_fire test_sq_soak,$(PROG)))
+ifneq (,$(filter test_sq_fire test_sq_soak probe_inv_loop probe_glue_ablation probe_patch_loads bench_sq5acc probe_mula24,$(PNAME)))
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -459,7 +463,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),probe_sched)
+ifeq ($(PNAME),probe_sched)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -468,7 +472,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),test_new_contenders)
+ifeq ($(PNAME),test_new_contenders)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -477,7 +481,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),bench_kernel)
+ifeq ($(PNAME),bench_kernel)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -486,12 +490,21 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
+# bench_kernel_4x64: LEVEL 1 for the saturated 4x64 representation -- the 4x64
+# microcode fe_mul (sq = mul(a,a)) vs amd64-64 qhasm mul/square vs s2n-bignum
+# _alt, one process. Includes full_curve25519_amd64_64_ucode.c as a library
+# (A64U_LIB), whose RFC 7748 gate needs the amd64-64/ucode X25519 objects.
+ifeq ($(PNAME),bench_kernel_4x64)
+EXTRA_OBJS := $(AMD64U_OBJS) $(AMD64_OBJS) s2n_mul_p25519_alt.o s2n_sqr_p25519_alt.o
+EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
+endif
+
 # probe_sq_lat: diagnostic for the fe_sq dependent-chain deficit. Same
 # include mode / object set as bench_kernel (it reuses inline2's contenders
 # and the production patches). Needs root.
 # probe_trigger: 2x2 cross isolating the trigger instruction (vmwrite vs
 # vmread ucode entry point) from the wrapper, plus the hook-swap price.
-ifeq ($(PROG),probe_ldorder)
+ifeq ($(PNAME),probe_ldorder)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -499,7 +512,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),probe_oplat)
+ifeq ($(PNAME),probe_oplat)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -507,7 +520,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),probe_wrapper)
+ifeq ($(PNAME),probe_wrapper)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -515,7 +528,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),probe_trigger)
+ifeq ($(PNAME),probe_trigger)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -523,7 +536,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),probe_sq_lat)
+ifeq ($(PNAME),probe_sq_lat)
 EXTRA_OBJS := $(AMD51_OBJS) \
               $(filter-out amd64-51-ucode_ladderstep.o,$(AMD51U_OBJS)) \
               $(AMD51A_OBJS) $(AMD51UC_OBJS) \
@@ -531,7 +544,7 @@ EXTRA_OBJS := $(AMD51_OBJS) \
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
-ifeq ($(PROG),bench_fieldop)
+ifeq ($(PNAME),bench_fieldop)
 EXTRA_OBJS := cryptopt_mul.o cryptopt_sq.o
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
@@ -540,25 +553,29 @@ endif
 # same AMD64_OBJS the matrix uses. Pure native (no microcode) — runs without
 # sudo. Pass the amd64-64 include flags ($(AMD64_CPP)) in CFLAGS on the command
 # line so the profiler's own compile sees fe25519.h + the namespace header.
-ifeq ($(PROG),amd64_64_profile)
+ifeq ($(PNAME),amd64_64_profile)
 EXTRA_OBJS := $(AMD64_OBJS)
 EXTRA_LIBS := $(SC_LIB)/libcryptoint.a
 endif
 
 # Build $(PROG)_static from $(PROG).c (+ any extra objs/libs)
+# -I. lets tests/ and bench/ sources #include "full_curve25519_inline2.c" etc.
+# from this folder. It is on the recipe, not in CFLAGS, because the matrix
+# (lib/build_run.sh) overrides CFLAGS on the command line.
 # The matrix builds: full_curve25519, full_curve25519_inline2,
 # full_curve25519_amd64_64_ucode (see lib/build_run.sh).
-# EXTRA_CPPFLAGS is how the parked patches are selected, e.g.
-#   make PROG=test_sq_soak EXTRA_CPPFLAGS="-DSQ_MASK_R8 -DENABLE_SQ_5ACC"
+# EXTRA_CPPFLAGS is how patch variants are selected, e.g.
+#   make PROG=tests/test_sq_soak EXTRA_CPPFLAGS="-DSQ_SERIAL"   (old serial fe_sq;
+#   the five-accumulator fe_sq is the default since 2026-09-29, five_accu.md)
 # It was documented in full_curve25519_inline2.c and bench_kernel.c but never
 # referenced here, so every such build SILENTLY produced the shipped serial
 # fe_sq instead -- a build that looks like it tested the parked patch and did
 # not. Keep it in the recipe.
 $(PROG)_static: $(PROG).c $(LIBS) $(EXTRA_OBJS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(EXTRA_CPPFLAGS) $< $(EXTRA_OBJS) $(LIBS) $(EXTRA_LIBS) -o $@
+	$(CC) $(LDFLAGS) $(CFLAGS) -I. $(EXTRA_CPPFLAGS) $< $(EXTRA_OBJS) $(LIBS) $(EXTRA_LIBS) -o $@
 
 # Convenience targets
 clean:
-	rm -f *_static *.o
+	rm -f *_static *.o tests/*_static bench/*_static
 
 .PHONY: all clean

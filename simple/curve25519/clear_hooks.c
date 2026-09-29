@@ -22,13 +22,14 @@
 #include "../../../include/patch.h"
 #include "../../../include/ucode_macro.h"
 #include "../../../include/misc.h"
+#include "include/bench_core.h"
 
 int main(void) {
     if (geteuid() != 0) {
         printf("needs root: sudo taskset -c 0 ./clear_hooks_static\n");
         return 1;
     }
-    assign_to_core(0);
+    assign_to_core(bench_core());
     init_match_and_patch();
     do_fix_IN_patch();
     printf("match-and-patch state reset; vmwrite/vmread hooks cleared.\n");

@@ -44,16 +44,33 @@ except ValueError:
     CORR = 1.0
 CORR_MEASURED = bool(_corr_raw) and CORR != 1.0
 
-def bench_reps(path, default="?"):
-    """Read BENCH_REPS out of a benchmark source so the stated n cannot drift."""
+def bench_reps(path, name="BENCH_REPS", default="?"):
+    """Read the repetition count out of a benchmark source so the stated n cannot drift."""
     try:
-        m = re.search(r'#define\s+BENCH_REPS\s+(\d+)', open(os.path.join(ROOT, path)).read())
+        m = re.search(r'#define\s+' + name + r'\s+(\d+)', open(os.path.join(ROOT, path)).read())
         return m.group(1) if m else default
     except OSError:
         return default
 
 REPS_MAIN = bench_reps("full_curve25519_inline2.c")
-REPS_A64  = bench_reps("full_curve25519_amd64_64_ucode.c")
+# The two amd64-64 C-ladder rows (asm-Clad, ucode) come from the same-process
+# 4x64 control harness.
+REPS_A64  = bench_reps("bench/bench_table_4x64.c", "REPS")
+BENCH_CORE = env("BENCH_CORE", "0")
+
+# Kernel-derived figures quoted in the Table 1 prose. Read from this run's
+# bench_kernel output when present, instead of numbers pasted from an old run.
+def _kernel(path):
+    A = {}
+    try:
+        for ln in open(os.path.join(ROOT, path)):
+            f = ln.split()
+            if ln.startswith("#") or len(f) < 3: continue
+            A[f[0]] = float(f[1])
+    except OSError:
+        pass
+    return A
+K51 = _kernel(env("KERNEL51_OUT", "bench/bench_kernel_out.txt"))
 
 A1_HDR = ["ucode","a64/asm","a64/asmCld","a64/ucode","a51/asm","a51/asmCld",
           "a51/ucCld","a51/ucode","cryptopt","fiat","hand-C","donna",
@@ -120,7 +137,8 @@ w("| item | value | source |")
 w("|---|---|---|")
 _setup = [
     ("CPU", env("CPU_MODEL", "Intel Celeron N3350 (Goldmont), nominal 1.10 GHz"), "`/proc/cpuinfo`"),
-    ("Core / pinning", "core 0, `taskset -c 0`", "`lib/build_run.sh`"),
+    ("Core / pinning", f"core {BENCH_CORE}, `taskset -c {BENCH_CORE}` + in-process "
+     f"`sched_setaffinity` (BENCH_CORE={BENCH_CORE})", "`lib/isolation.sh`"),
     ("Governor", f"`{env('GOVERNOR','?')}`, requested {env('PINNED_FREQ_KHZ','?')} kHz",
      "`lib/freq_guard.sh`"),
     ("Turbo", f"disabled (`no_turbo = {env('NO_TURBO','?')}`)", "`lib/freq_guard.sh`"),
@@ -151,8 +169,8 @@ _setup = [
      "`note_repro`"),
     ("Repetitions",
      (f"**{REPS_MAIN}** per contender, all binaries" if REPS_MAIN == REPS_A64 else
-      f"**{REPS_MAIN}** per contender; **{REPS_A64}** for the two `amd64-64` rows "
-      "(separate binaries)"), "`BENCH_REPS`"),
+      f"**{REPS_MAIN}** per contender; **{REPS_A64}** for the two `amd64-64` C-ladder rows "
+      "(same-process 4x64 harness)"), "`BENCH_REPS`"),
     ("Warm-up", "RFC 7748 verification, then one untimed call per contender",
      "`benchmark()`"),
     ("Inputs", "fixed RFC 7748 vector 1, byte-identical across all repetitions",
@@ -204,6 +222,22 @@ w("> **Table 1: Controlled X25519 field-arithmetic comparison.** Cycle counts ar
      f"dedicated squarer inside the 128-triad patch capacity. 5×51 rows are the median of "
      f"{REPS_MAIN} repetitions, 4×64 rows of {REPS_A64}."))
 w("")
+def _kernel_prose():
+    need = ("uc_mul_lat", "ossl_mul_lat", "floor_mul_lat", "nfloor_mul")
+    if not all(k in K51 for k in need):
+        return ("(Kernel-level attribution omitted: this run has no microcode kernel "
+                "measurement.) ")
+    um, om = K51["uc_mul_lat"], K51["ossl_mul_lat"]
+    uf, nf = K51["floor_mul_lat"], K51["nfloor_mul"]
+    ua, oa = um - uf, om - nf
+    firings = 2561
+    return (f"Isolated-kernel measurement relates that difference to invocation cost: with "
+            f"each side's invocation floor removed, microcode multiplication costs {ua:.1f} "
+            f"cycles against OpenSSL's {oa:.1f} ({100*(ua/oa-1):+.1f}%, Table K5). Entering "
+            f"patch RAM costs {uf:.1f} cycles where an equivalent native call costs {nf:.1f}; "
+            f"over the {firings:,} field firings of one X25519 that differential is "
+            f"≈{firings*(uf-nf):,.0f} cycles. ")
+
 _g51 = {k: paired(A2["uc/Clad"], A2[k])[1] for k in ["fiat","cryptopt","a51op/Clad","hand-C"]}
 _goss = paired(A2["uc/Clad"], A2["osslops/C-ladder"])[1]
 _noss = sum(1 for x in paired(A2["uc/Clad"], A2["osslops/C-ladder"])[0] if x > 1)
@@ -213,12 +247,7 @@ w(f"With the 5×51 representation fixed, microcode outperforms every compiler-ge
   f"configurations, with paired geometric-mean speedups between ×{min(_g51.values()):.3f} and "
   f"×{max(_g51.values()):.3f} (Appendix B.1). It does not outperform OpenSSL's hand-tuned fe51 "
   f"assembly, which is faster on the same ladder (×{_goss:.3f} paired geometric mean, microcode "
-  f"ahead in {_noss} of 24 configurations). Isolated-kernel measurement attributes that "
-  f"difference entirely to invocation cost rather than to the arithmetic: with each side's "
-  f"invocation floor removed, the two field multiplications are within 0.4% of one another "
-  f"(Table K5). Entering patch RAM costs a flat 16.2 cycles irrespective of operand count, "
-  f"where an equivalent native call costs 10.1; over the 2,561 field firings of one X25519 "
-  f"that differential is ≈20,300 cycles and accounts for the whole gap. This result also does "
+  f"ahead in {_noss} of 24 configurations). " + _kernel_prose() + "This result also does "
   f"not extend to the saturated 4×64 "
   f"representation: with the amd64-64 C ladder held fixed the microcode backend requires "
   f"{best(A1['a64/ucode'])/base64:.3f}× as many cycles as the assembly backend "
@@ -288,8 +317,7 @@ w("")
 w(f"> **Table 3: 5×51 integration and ladder decomposition.** All rows use the amd64-51 "
   f"framework. Register-chaining the ladder helps in {nwin} of 24 configurations "
   f"(paired geometric mean ×{g3k:.3f}); under gcc `-Os` the inline-assembly ladder degrades "
-  f"sharply in this framework (×{min(r3):.2f}, reproducible across gcc-11/12/13 to within 43 "
-  f"ticks), which pulls the all-configuration geometric mean down to ×{g3:.3f}. The same "
+  f"sharply in this framework (×{min(r3):.2f}), which pulls the all-configuration geometric mean down to ×{g3:.3f}. The same "
   f"chained ladder in our own framework shows no such degradation, so this is a "
   f"compiler/framework interaction rather than a property of the ladder. The final row is "
   f"`amd64-51/ucode`, **not** the canonical implementation reported in Table 2.")
@@ -356,7 +384,7 @@ NAMES = {"ucode":"this work (5×51, chained ladder)", "a64/asm":"amd64-64 asm",
          "fiat":"fiat-crypto", "hand-C":"hand-written C", "donna":"donna c64"}
 w("## Appendix C — dispersion at each selected configuration")
 w("")
-w(f"_Median of {REPS_MAIN} repetitions ({REPS_A64} for the two `amd64-64` rows). Raw RDTSC ticks._")
+w(f"_Median of {REPS_MAIN} repetitions ({REPS_A64} for the two `amd64-64` C-ladder rows). Raw RDTSC ticks._")
 w("")
 w("| contender | median | min | p10 | p90 | p90−p10 | best config |")
 w("|---|---:|---:|---:|---:|---:|---|")

@@ -37,8 +37,9 @@ emit_paper_tables() {
     CYCLE_CORRECTION="${CYCLE_CORRECTION:-}" \
     DELIVERED_FREQ_MHZ="${DELIVERED_FREQ_MHZ:-}" \
     TSC_FREQ_MHZ="${TSC_FREQ_MHZ:-}" \
-    PINNED_FREQ_KHZ="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo '?')" \
-    GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo '?')" \
+    BENCH_CORE="${BENCH_CORE:-0}" \
+    PINNED_FREQ_KHZ="$(cat /sys/devices/system/cpu/cpu${BENCH_CORE:-0}/cpufreq/scaling_cur_freq 2>/dev/null || echo '?')" \
+    GOVERNOR="$(cat /sys/devices/system/cpu/cpu${BENCH_CORE:-0}/cpufreq/scaling_governor 2>/dev/null || echo '?')" \
     NO_TURBO="$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo '?')" \
     CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo)" \
     CONFIGS_RAN="${#ran_cfgs[@]}" \

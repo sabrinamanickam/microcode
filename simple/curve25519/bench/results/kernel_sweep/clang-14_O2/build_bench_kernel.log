@@ -1,0 +1,11 @@
+bench/bench_kernel.c:140:26: warning: unknown attribute 'noclone' ignored [-Wunknown-attributes]
+__attribute__((noinline, noclone))
+                         ^~~~~~~
+bench/bench_kernel.c:147:26: warning: unknown attribute 'noclone' ignored [-Wunknown-attributes]
+__attribute__((noinline, noclone))
+                         ^~~~~~~
+In file included from bench/bench_kernel.c:61:
+./full_curve25519_inline2.c:3383:13: warning: unused function 'benchmark' [-Wunused-function]
+static void benchmark(void) {
+            ^
+3 warnings generated.

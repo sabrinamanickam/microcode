@@ -402,8 +402,8 @@ md_standing() {
 emit_results_md() {
     local out="${1:-RESULTS.md}"
     local freq gov turbo cpu
-    freq=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo "?")
-    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "?")
+    freq=$(cat /sys/devices/system/cpu/cpu${BENCH_CORE:-0}/cpufreq/scaling_cur_freq 2>/dev/null || echo "?")
+    gov=$(cat /sys/devices/system/cpu/cpu${BENCH_CORE:-0}/cpufreq/scaling_governor 2>/dev/null || echo "?")
     turbo=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo "?")
     cpu=$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo)
 
@@ -420,7 +420,7 @@ emit_results_md() {
         echo "**Runs per config:** ${RUNS_PER_CONFIG:-1} (recorded median is the median of those runs; worst run-to-run spread ${REPRO_WORST_PCT:-n/a}% at ${REPRO_WORST_WHERE:-—})"
         echo "**Timing:** contenders measured INTERLEAVED (round-robin, one repetition of each per round) so measurement order cannot bias the ranking"
         echo "**Configs that ran:** ${#ran_cfgs[@]} / ${#ACTIVE_CONFIGS[@]}"
-        echo "**Pipeline:** \`taskset -c 0 ./full_curve25519_inline2_static\` (+ amd64-64/ucode) for each (compiler, -O) combo"
+        echo "**Pipeline:** \`BENCH_CORE=${BENCH_CORE:-0} taskset -c ${BENCH_CORE:-0} ./full_curve25519_inline2_static\` + \`./bench/bench_table_4x64_static\` (4x64 control, same process) for each (compiler, -O) combo"
         echo "**Metric:** median cycles per X25519 (headline; best config per contender in **bold**). Min and the p10–p90 spread are in the dispersion table below."
         echo
         echo "## Contender legend"

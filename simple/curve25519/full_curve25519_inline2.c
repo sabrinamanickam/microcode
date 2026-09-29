@@ -31,6 +31,7 @@
 #include "../../../include/patch.h"
 #include "../../../include/ucode_macro.h"
 #include "../../../include/misc.h"
+#include "include/bench_core.h"
 #include "freq_guard.h"
 
 typedef uint64_t fe[5];
@@ -107,16 +108,61 @@ typedef struct {
 #define _S(x) #x
 #define S(x) _S(x)
 
-/* fe_sq wrapper contract, selectable so the parked five-accumulator patch
- * can be TESTED without changing what production ships. Undefined (the
- * default) this is byte-identical to the shipped wrapper: the serial fe_sq
- * uses R8 as a zero-initialised accumulator. Defined, R8 carries 2^51-1 as
- * the AND mask that sq_patch_5acc wants.
- *   make PROG=<test> EXTRA_CPPFLAGS="-DSQ_MASK_R8 -DENABLE_SQ_5ACC" */
+/* ── fe_sq selection (SHIPPED 2026-09-29) ─────────────────────────────
+ * Default: the five-accumulator fe_sq (sq_patch_5acc, 41 triads), which is
+ * 13.9k cyc/X25519 faster than the serial one (tests/bench_sq5acc, same
+ * process, OpenSSL control identical). It hard-resets the machine when fe_sq
+ * firings are REGISTER-CHAINED (one firing's outputs renamed straight into
+ * the next firing's inputs), and only then: 2000 full X25519 with no chained
+ * firing passed (test_sq_soak ladder 2000, ~5.1M firings). So a 5acc build
+ *   - implies SQ_MASK_R8 (the patch takes 2^51-1 in R8) and SQ_UNCHAINED
+ *     (the inline fe_invert round-trips every squaring through memory);
+ *   - does not define INV_SQ_RENAME, so a chained inline sequence fails to
+ *     COMPILE instead of resetting the box;
+ *   - turns fe_sq_ucode_n into separate fe_sq_ucode calls (memory ping-pong).
+ * -DSQ_SERIAL selects the old serial 42-triad fe_sq and its chained paths.
+ * See five_accu.md. */
+#ifndef SQ_SERIAL
+#  ifndef ENABLE_SQ_5ACC
+#    define ENABLE_SQ_5ACC
+#  endif
+#  ifndef SQ_MASK_R8
+#    define SQ_MASK_R8
+#  endif
+#  ifndef SQ_UNCHAINED
+#    define SQ_UNCHAINED
+#  endif
+#endif
+#if defined(SQ_SERIAL) && defined(ENABLE_SQ_5ACC)
+#error "SQ_SERIAL and ENABLE_SQ_5ACC are mutually exclusive"
+#endif
+#if defined(ENABLE_SQ_5ACC) && !(defined(SQ_MASK_R8) && defined(SQ_UNCHAINED))
+#error "the five-accumulator fe_sq needs SQ_MASK_R8 and SQ_UNCHAINED (chained firings reset the machine)"
+#endif
+
+/* fe_sq wrapper contract: the serial fe_sq initialises its R8 accumulator
+ * itself, so nothing is loaded; the five-accumulator fe_sq takes 2^51-1 in R8
+ * as its AND mask. */
+/* fe_mul entry contract under -DMUL_A24 (fused z2 = E*(AA + 121665*E)).
+ * The vmwrite hook then enters a one-triad check, not the fe_mul body:
+ * R8 == MUL_A24_MARK sends the firing through the mul121665 prologue, anything
+ * else falls straight into fe_mul. Every normal fe_mul firing must therefore
+ * zero R8 (the patch writes R8 before reading it, so R8 otherwise holds
+ * whatever the previous firing left). Without MUL_A24 nothing is loaded. */
+#define MUL_A24_MARK 0x5A24
+#if defined(MUL_A24)
+#define FE_MUL_R8 "xor r8d, r8d\n\t"
+#elif defined(FE_MUL_XOR_ZERO)
+/* A/B control: the two zeroing instructions the trim removed (2026-09-29). */
+#define FE_MUL_R8 "xor eax, eax\n\t" "xor r8d, r8d\n\t"
+#else
+#define FE_MUL_R8 ""
+#endif
+
 #ifdef SQ_MASK_R8
 #define FE_SQ_R8 "mov r8, 0x7FFFFFFFFFFFF\n\t"
 #else
-#define FE_SQ_R8 "xor r8d, r8d\n\t"
+#define FE_SQ_R8 ""        /* serial fe_sq initialises R8 itself (sq_patch c0) */
 #endif
 
 /* _IMUL64L_DSZ64 (0x264) is in opcode.h but inst.h generates no macro for it.
@@ -174,12 +220,12 @@ typedef struct {
  * 5.1E). RCX was free -- the old patch used it as MUL's high destination,
  * and MUL's destination is free to be any register.
  *
- * fe_sq: UNCHANGED, still the serial single-accumulator design at 42
- * triads / 81.8 cyc. The five-accumulator rewrite is parked below as
- * sq_patch_5acc: verified correct, but it hard-reset the machine three
- * times from inside fe_invert_ucode and the cause was never found. Its
- * wrapper contract (2^51-1 in R8) has been reverted with it, so every
- * fe_sq firing site zeroes R8 again as the serial patch expects.
+ * fe_sq: the five-accumulator sq_patch_5acc is the DEFAULT since
+ * 2026-09-29 (see "fe_sq selection" above). It hard-reset the machine six
+ * times in 2026-09 and the cause is now known: register-chained fe_sq
+ * firings. The serial single-accumulator sq_patch (42 triads) is kept for
+ * -DSQ_SERIAL builds. Wrapper contract: 2^51-1 in R8 for 5acc; the serial
+ * patch needs nothing in R8 or RAX.
  *
  * Register map (fe_mul):
  *   a0..a4  RDI RSI R12 R11 R14   always MUL srcA, so preserved
@@ -474,11 +520,15 @@ static const ucode_t mul_patch_serial[] = {
 #endif
 
     ucode_t sq_patch[] = {
-    /* c0 */
-    { ZEROEXT_DSZ64_DR(TMP0, RAX), MUL_DSZ64_DRR(RCX, RDI, RDI),
+    /* c0. The column accumulator starts at zero inside the patch (TMP0 = 0,
+     * R8 = first high half) instead of reading RAX/R8, so the wrapper no
+     * longer zeroes them: two caller instructions per firing, ~1 cyc
+     * (probe_patch_loads, arm A2). lib/ucode_sim.py --poison RAX,R8 checks
+     * that nothing reads either register before writing it. */
+    { ZEROEXT_DSZ32_DI(TMP0, 0), MUL_DSZ64_DRR(RCX, RDI, RDI),
       NOP, NOP_SEQWORD },
     { ADD_DSZ64_DRR(TMP0, TMP0, RDI), SETCC_CONDB_DR(TMP15, TMP0),
-      ADD_DSZ64_DRR(R8, R8, RCX), NOP_SEQWORD },
+      ZEROEXT_DSZ64_DR(R8, RCX), NOP_SEQWORD },
     { ZEROEXT_DSZ64_DR(TMP9, TMP15), MUL_DSZ64_DRR(RCX, RBX, R13),
       ADD_DSZ64_DRR(TMP0, TMP0, R13), NOP_SEQWORD },
     { SETCC_CONDB_DR(TMP15, TMP0), ADD_DSZ64_DRR(R8, R8, RCX),
@@ -666,6 +716,84 @@ static const ucode_t sq_patch_5acc[] = {
 };
 #endif
 
+#ifdef MUL_A24
+    /* mul121665 prologue: b_j <- AA_j + 121665*E_j, then fe_mul computes
+     * E * b = z2 = E*(AA + a24*E). Entry: E in the a registers (RDI RSI R12
+     * R11 R14, preserved), AA in the b registers (R15 R13 R9 R10 RBX, updated
+     * in place), 121665 in RAX (it does not fit a 16-bit immediate), 2^51-1 in
+     * RCX. Per limb: copy E_j (MUL destroys srcB), one MUL -> hi:lo, split at
+     * bit 51 (r = lo & M, q = lo>>51 | hi<<13, q < 2^20), b_j += r_j and
+     * b_{j+1} += q_j, with 19*q_4 folded into b_0. E_j < 2^54 keeps hi < 2^7;
+     * outputs stay below 2^53, inside fe_mul's 2^54 bound. One multiply per
+     * triad (probe_sched). Ends with R8 = 0 so the check falls through into
+     * fe_mul when the SEQ_GOTO0 below returns to it. Simulate with
+     *   python3 lib/ucode_sim.py full_curve25519_inline2.c mul_a24_prologue+mul_patch mula24 */
+    ucode_t mul_a24_prologue[] = {
+    { ZEROEXT_DSZ64_DR(TMP0, RDI), MUL_DSZ64_DRR(TMP5, RAX, TMP0),
+      ZEROEXT_DSZ64_DR(TMP1, RSI), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP6, RAX, TMP1), ZEROEXT_DSZ64_DR(TMP2, R12),
+      ZEROEXT_DSZ64_DR(TMP3, R11), NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP7, RAX, TMP2), ZEROEXT_DSZ64_DR(TMP4, R14),
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP8, RAX, TMP3), NOP,
+      NOP, NOP_SEQWORD },
+    { MUL_DSZ64_DRR(TMP9, RAX, TMP4), SHL_DSZ64_DRI(TMP5, TMP5, 13),
+      SHR_DSZ64_DRI(TMP10, TMP0, 51), NOP_SEQWORD },
+    { AND_DSZ64_DRR(TMP0, TMP0, RCX), OR_DSZ64_DRR(TMP10, TMP10, TMP5),
+      SHL_DSZ64_DRI(TMP6, TMP6, 13), NOP_SEQWORD },
+    { SHR_DSZ64_DRI(TMP11, TMP1, 51), AND_DSZ64_DRR(TMP1, TMP1, RCX),
+      ADD_DSZ64_DRR(R15, R15, TMP0), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP11, TMP11, TMP6), ADD_DSZ64_DRR(R13, R13, TMP1),
+      SHL_DSZ64_DRI(TMP7, TMP7, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R13, R13, TMP10), SHR_DSZ64_DRI(TMP12, TMP2, 51),
+      AND_DSZ64_DRR(TMP2, TMP2, RCX), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP12, TMP12, TMP7), ADD_DSZ64_DRR(R9, R9, TMP2),
+      SHL_DSZ64_DRI(TMP8, TMP8, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R9, R9, TMP11), SHR_DSZ64_DRI(TMP13, TMP3, 51),
+      AND_DSZ64_DRR(TMP3, TMP3, RCX), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP13, TMP13, TMP8), ADD_DSZ64_DRR(R10, R10, TMP3),
+      SHL_DSZ64_DRI(TMP9, TMP9, 13), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R10, R10, TMP12), SHR_DSZ64_DRI(TMP14, TMP4, 51),
+      AND_DSZ64_DRR(TMP4, TMP4, RCX), NOP_SEQWORD },
+    { OR_DSZ64_DRR(TMP14, TMP14, TMP9), ADD_DSZ64_DRR(RBX, RBX, TMP4),
+      NOP, NOP_SEQWORD },
+    { ADD_DSZ64_DRR(RBX, RBX, TMP13), IMUL64L_DSZ64_DRI(TMP15, TMP14, 19),
+      ZEROEXT_DSZ32_DI(R8, 0), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R15, R15, TMP15), NOP,
+      NOP, NOP_SEQWORD }
+    };
+
+    /* Layout (triads):  [check][fe_mul 58][fe_sq 42][prologue 16][goto]
+     *   check     XOR(R8 ^ MARK) + forward UJMPCC CONDZ -> prologue: the same
+     *             one-triad flag+branch idiom the loop probes proved. A normal
+     *             fe_mul firing (R8 = 0) falls through into the body.
+     *   goto      SEQ_GOTO0 back to the check, a triad with no multiply, as in
+     *             probe_looped_fieldop; the prologue left R8 = 0, so the check
+     *             now falls through. Backward UJMPCC is never used.
+     * 1 + 58 + 42 + 16 + 1 = 118 triads, ending at U7dd8, below U7de0. */
+    const uint64_t chk_addr = 0x7c00;
+    const uint64_t mul_addr = chk_addr + 4;
+    const uint64_t sq_addr  = mul_addr + ARRAY_SZ(mul_patch) * 4;
+    const uint64_t pro_addr = sq_addr  + ARRAY_SZ(sq_patch) * 4;
+    const uint64_t end_addr = pro_addr + (ARRAY_SZ(mul_a24_prologue) + 1) * 4;
+    _Static_assert(1 + ARRAY_SZ(mul_patch) + ARRAY_SZ(sq_patch) + ARRAY_SZ(mul_a24_prologue) + 1 <= 120,
+                   "MUL_A24 layout would reach the U7de0 staging area");
+    ucode_t chk[] = {
+        { XOR_DSZ64_DRI(TMP13, R8, MUL_A24_MARK), NOP,
+          UJMPCC_DIRECT_NOTTAKEN_CONDZ_RI(TMP13, pro_addr), NOP_SEQWORD } };
+    ucode_t back[] = { { NOP, NOP, NOP, SEQ_GOTO0(chk_addr) } };
+
+    patch_ucode(chk_addr, chk, 1);
+    patch_ucode(mul_addr, mul_patch, ARRAY_SZ(mul_patch));
+    patch_ucode(sq_addr, sq_patch, ARRAY_SZ(sq_patch));
+    patch_ucode(pro_addr, mul_a24_prologue, ARRAY_SZ(mul_a24_prologue));
+    patch_ucode(pro_addr + ARRAY_SZ(mul_a24_prologue) * 4, back, 1);
+    hook_match_and_patch(0, 0x0cd8, chk_addr);
+    hook_match_and_patch(1, 0x0618, sq_addr);
+    printf("MUL_A24: check U%04lx, fe_mul U%04lx, fe_sq U%04lx, prologue U%04lx-U%04lx\n",
+           (unsigned long)chk_addr, (unsigned long)mul_addr, (unsigned long)sq_addr,
+           (unsigned long)pro_addr, (unsigned long)end_addr);
+#else
     /* Patch RAM: 128 triads from U7c00, 4 address units each. U7de0-U7df0 is
      * the lib-micro bootstrap staging area, dead only because the helpers run
      * before patch_ucode here (project note patch-ram-bootstrap-reclaim).
@@ -673,23 +801,25 @@ static const ucode_t sq_patch_5acc[] = {
     _Static_assert(ARRAY_SZ(mul_patch) + ARRAY_SZ(sq_patch) <= 128,
                    "fe_mul + fe_sq exceed the 128-triad patch RAM budget");
 
+    const uint64_t mul_addr = 0x7c00;
     patch_ucode(0x7c00, mul_patch, ARRAY_SZ(mul_patch));
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
     uint64_t sq_addr = 0x7c00 + ARRAY_SZ(mul_patch) * 4;
     patch_ucode(sq_addr, sq_patch, ARRAY_SZ(sq_patch));
     hook_match_and_patch(1, 0x0618, sq_addr);
+#endif
 #ifdef ENABLE_SQ_5ACC
-    /* Test builds only: overwrite the fe_sq region with the parked
-     * five-accumulator patch, at the same address, so a probe can study the
-     * thing that resets the machine without production carrying it. Needs
-     * -DSQ_MASK_R8 too, since this patch wants 2^51-1 in R8. */
+    /* Default build: overwrite the fe_sq region with the five-accumulator
+     * patch, at the same address -- exactly the install sequence validated
+     * by test_sq_soak ladder 2000 and bench_sq5acc. It wants 2^51-1 in R8
+     * (FE_SQ_R8 under SQ_MASK_R8). */
     patch_ucode(sq_addr, (ucode_t *)sq_patch_5acc, ARRAY_SZ(sq_patch_5acc));
     hook_match_and_patch(1, 0x0618, sq_addr);
-    printf("fe_sq : REPLACED by parked five-accumulator patch, %d triads\n",
+    printf("fe_sq : five-accumulator patch, %d triads (replaces the serial one below)\n",
            (int)ARRAY_SZ(sq_patch_5acc));
 #endif
     printf("fe_mul: %d triads at U%04lx (vmwrite hook)\n",
-           (int)ARRAY_SZ(mul_patch), (unsigned long)0x7c00);
+           (int)ARRAY_SZ(mul_patch), (unsigned long)mul_addr);
     printf("fe_sq : %d triads at U%04lx (vmread  hook)\n",
            (int)ARRAY_SZ(sq_patch),  (unsigned long)sq_addr);
 }
@@ -721,8 +851,10 @@ static const ucode_t sq_patch_5acc[] = {
  * a descending load order puts the first load of one op one instruction
  * after the last store of the previous op, which costs ~30 cyc on Goldmont
  * (probe_ldorder; see the note above FE_SQ). Do not reorder the memory ops.
- * xor eax/r8d stay so every register the patch could read is defined, which
- * keeps lib/ucode_sim.py's zero-filled model faithful to the hardware. */
+ * There is no xor eax / xor r8d: the patch writes RAX and R8 before reading
+ * them, so zeroing them only added two caller instructions per firing, worth
+ * 1.04 cyc/mul (probe_patch_loads, arm A2). If the patch ever changes, rerun
+ *   python3 lib/ucode_sim.py full_curve25519_inline2.c mul_patch mul --poison RAX,R8 */
 #define FE_MUL(out, a, b) \
     "mov rdi, [rbp + " S(a) " + 0]\n\t"  \
     "mov rsi, [rbp + " S(a) " + 8]\n\t"  \
@@ -734,8 +866,7 @@ static const ucode_t sq_patch_5acc[] = {
     "mov r9,  [rbp + " S(b) " + 16]\n\t" \
     "mov r10, [rbp + " S(b) " + 24]\n\t" \
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
-    "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_MUL_R8                            \
     "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
@@ -767,7 +898,6 @@ static const ucode_t sq_patch_5acc[] = {
     "lea r10, [r11 + r11]\n\t"           \
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
-    "xor eax, eax\n\t"                   \
     FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"         \
     "mov [rbp + " S(out) " + 0],  rdi\n\t" \
@@ -848,7 +978,6 @@ static const ucode_t sq_patch_5acc[] = {
     "lea r10, [r11 + r11]\n\t"           \
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
-    "xor eax, eax\n\t"                   \
     FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"         \
     "mov [rbp + " S(out) " + 0],  rdi\n\t" \
@@ -865,8 +994,31 @@ static const ucode_t sq_patch_5acc[] = {
     "mov r9,  [rbp + " S(b) " + 16]\n\t" \
     "mov r10, [rbp + " S(b) " + 24]\n\t" \
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
-    "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_MUL_R8                            \
+    "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
+    "vmwrite rcx, rdx\n\t"               \
+    "mov [rbp + " S(out) " + 0],  r15\n\t" \
+    "mov [rbp + " S(out) " + 8],  r13\n\t" \
+    "mov [rbp + " S(out) " + 16], r9\n\t"  \
+    "mov [rbp + " S(out) " + 24], r10\n\t" \
+    "mov [rbp + " S(out) " + 32], rax\n\t"
+
+/* FE_MUL_A24(out, e, aa) -- MUL_A24 builds only: out = e * (aa + 121665*e),
+ * one firing. R8 = MUL_A24_MARK routes the vmwrite through the mul121665
+ * prologue; RAX carries 121665. Same load/store order as FE_MUL. */
+#define FE_MUL_A24(out, e, aa) \
+    "mov rdi, [rbp + " S(e) " + 0]\n\t"  \
+    "mov rsi, [rbp + " S(e) " + 8]\n\t"  \
+    "mov r12, [rbp + " S(e) " + 16]\n\t" \
+    "mov r11, [rbp + " S(e) " + 24]\n\t" \
+    "mov r14, [rbp + " S(e) " + 32]\n\t" \
+    "mov r15, [rbp + " S(aa) " + 0]\n\t"  \
+    "mov r13, [rbp + " S(aa) " + 8]\n\t"  \
+    "mov r9,  [rbp + " S(aa) " + 16]\n\t" \
+    "mov r10, [rbp + " S(aa) " + 24]\n\t" \
+    "mov rbx, [rbp + " S(aa) " + 32]\n\t" \
+    "mov eax, 121665\n\t"                \
+    "mov r8d, " S(MUL_A24_MARK) "\n\t"   \
     "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
@@ -900,12 +1052,16 @@ static const ucode_t sq_patch_5acc[] = {
     "mov r14, [rbp + " S(a) " + 32]\n\t"
 
 /* Rename previous sq's output {rdi, r9, r10, rbx, rax} → input {rdi, rsi, r12, r11, r14}.
- * rdi is already correct (h[0] = a[0]); 4 movs cover the other 4 limbs. */
+ * rdi is already correct (h[0] = a[0]); 4 movs cover the other 4 limbs.
+ * This IS register chaining, which resets the machine with the
+ * five-accumulator fe_sq -- so it only exists in -DSQ_SERIAL builds. */
+#ifndef ENABLE_SQ_5ACC
 #define INV_SQ_RENAME \
     "mov rsi, r9\n\t"  \
     "mov r12, r10\n\t" \
     "mov r11, rbx\n\t" \
     "mov r14, rax\n\t"
+#endif
 
 /* Execute one squaring: inputs assumed already in sq input regs; outputs to sq output regs.
  * Identical to FE_SQ's body without the load/store wrappers. */
@@ -916,7 +1072,6 @@ static const ucode_t sq_patch_5acc[] = {
     "lea r10, [r11 + r11]\n\t"           \
     "imul rbx, r14, 19\n\t"              \
     "imul rdx, r11, 19\n\t"              \
-    "xor eax, eax\n\t"                   \
     FE_SQ_R8                             \
     ".byte 0x0f, 0x78, 0xca\n\t"
 
@@ -993,8 +1148,7 @@ static const ucode_t sq_patch_5acc[] = {
     "mov r9,  [rbp + " S(b) " + 16]\n\t" \
     "mov r10, [rbp + " S(b) " + 24]\n\t" \
     "mov rbx, [rbp + " S(b) " + 32]\n\t" \
-    "xor eax, eax\n\t"                   \
-    "xor r8d, r8d\n\t"                   \
+    FE_MUL_R8                            \
     "mov rcx, 0x7FFFFFFFFFFFF\n\t"       \
     "vmwrite rcx, rdx\n\t"               \
     "mov [rbp + " S(out) " + 0],  r15\n\t" \
@@ -1128,6 +1282,20 @@ static void ladder_step(ladder_state_t *st) {
     /* Tail: mul121665 (C) + add + mul (inline asm).
      * Chain: FE_ADD leaves t0 in {rdi,rsi,r12,r11,r14}; FE_MUL_FROM_REGS_A
      * consumes t0 as its `a` operand. Since mul commutes, t0*E = E*t0 = z2. */
+#ifdef MUL_A24
+    /* z2 = E * (AA + 121665*E) in ONE firing: the mul121665 prologue runs in
+     * microcode in front of the fe_mul body (install_field_patches). Replaces
+     * the native mul121665 call, the t0 store, and the add's 10 loads. */
+    register ladder_state_t *_st2 asm("rbp") = st;
+    asm volatile(
+        FE_MUL_A24(Z2_OFF, E_OFF, AA_OFF)
+        :
+        : "r"(_st2)
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+          "memory", "cc"
+    );
+#else
     fe_mul121665_native(st->t0, st->E);
     register ladder_state_t *_st2 asm("rbp") = st;
     asm volatile(
@@ -1139,6 +1307,7 @@ static void ladder_step(ladder_state_t *st) {
           "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
           "memory", "cc"
     );
+#endif
 }
 
 /* ════════════════════════════════════════════════════════════════════
@@ -1260,11 +1429,73 @@ static void fe_tobytes(uint8_t out[32], const uint64_t in[5]) {
  * sq doesn't match mul input register set).
  *
  * Final result is computed into the t1 slot and copied to *out. */
+/* One firing per asm block. Under SQ_UNCHAINED the Fermat chain is emitted as
+ * a sequence of small asm blocks instead of one ~2,500-instruction block
+ * containing all 266 firings.
+ *
+ * Why: measured 2026-09-15 on the five-accumulator fe_sq, the variable that
+ * separates every clean run from every crash is FIRINGS PER ASM BLOCK, not the
+ * patch, the operands, the wrapper, the RCX state, or firing density --
+ *     tight 100,000 firings, 1 per block            PASS
+ *     mixed 200,000 firings, 1 per block            PASS
+ *     ctx   100,000 firings, 2 per block            PASS
+ *     step  180,000 firings, 7 and 2 per block      PASS   (full ladder_step)
+ *     rfc     2,561 firings, 266 in ONE block       HARD RESET
+ * 580,000 firings survived at <= 7 per block; the only construct never
+ * exercised below a crash was fe_invert's single giant block.
+ *
+ * Each INV_BLK is its own asm volatile, so the compiler re-establishes RBP and
+ * the firing sits in a block the size of the ones proven above. The runs
+ * ping-pong through a scratch slot: storing and reloading the SAME address
+ * back to back is the ~30 cycle store-to-load stall probe_ldorder found. */
+#define INV_CLOB "rax","rbx","rcx","rdx","rsi","rdi", \
+                 "r8","r9","r10","r11","r12","r13","r14","r15","memory","cc"
+#define INV_BLK(code) do {                                        \
+        register invert_state_t *_b asm("rbp") = &st;             \
+        asm volatile(code : : "r"(_b) : INV_CLOB);                \
+    } while (0)
+/* n squarings a -> dst. ODD: one, then (n-1)/2 ping-pong pairs.  */
+#define INV_C_ODD(dst, a, pairs) do {                             \
+        INV_BLK(INV_SQ(dst, a));                                  \
+        for (int _i = 0; _i < (pairs); _i++) {                    \
+            INV_BLK(INV_SQ(ISC_OFF, dst));                        \
+            INV_BLK(INV_SQ(dst, ISC_OFF)); } } while (0)
+/* EVEN: two, then (n-2)/2 pairs. */
+#define INV_C_EVEN(dst, a, pairs) do {                            \
+        INV_BLK(INV_SQ(ISC_OFF, a));                              \
+        INV_BLK(INV_SQ(dst, ISC_OFF));                            \
+        for (int _i = 0; _i < (pairs); _i++) {                    \
+            INV_BLK(INV_SQ(ISC_OFF, dst));                        \
+            INV_BLK(INV_SQ(dst, ISC_OFF)); } } while (0)
+
 static void fe_invert(uint64_t out[5], const uint64_t z[5]) {
     invert_state_t st;
-    /* Copy z into st.z so the asm block can address it via [rbp+IZ_OFF]. */
     st.z[0] = z[0]; st.z[1] = z[1]; st.z[2] = z[2]; st.z[3] = z[3]; st.z[4] = z[4];
 
+#ifdef SQ_UNCHAINED
+    INV_BLK(INV_SQ(IZ2_OFF, IZ_OFF));                 /* z2  = z^2        */
+    INV_C_EVEN(IT_OFF, IZ2_OFF, 0);                   /* t   = z2^(2^2)   */
+    INV_BLK(INV_MUL(IZ9_OFF,  IT_OFF,  IZ_OFF));      /* z9  = t * z      */
+    INV_BLK(INV_MUL(IZ11_OFF, IZ9_OFF, IZ2_OFF));     /* z11 = z9 * z2    */
+    INV_BLK(INV_SQ(IT_OFF, IZ11_OFF));                /* t   = z11^2      */
+    INV_BLK(INV_MUL(IT0_OFF, IT_OFF, IZ9_OFF));       /* t0  = t * z9     */
+    INV_C_ODD (IT1_OFF, IT0_OFF, 2);                  /* t1  = t0^(2^5)   */
+    INV_BLK(INV_MUL(IT1_OFF, IT1_OFF, IT0_OFF));
+    INV_C_EVEN(IT2_OFF, IT1_OFF, 4);                  /* t2  = t1^(2^10)  */
+    INV_BLK(INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF));
+    INV_C_EVEN(IT3_OFF, IT2_OFF, 9);                  /* t3  = t2^(2^20)  */
+    INV_BLK(INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF));
+    INV_C_EVEN(IT3_OFF, IT3_OFF, 4);                  /* t3  = t3^(2^10)  */
+    INV_BLK(INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF));
+    INV_C_EVEN(IT2_OFF, IT1_OFF, 24);                 /* t2  = t1^(2^50)  */
+    INV_BLK(INV_MUL(IT2_OFF, IT2_OFF, IT1_OFF));
+    INV_C_EVEN(IT3_OFF, IT2_OFF, 49);                 /* t3  = t2^(2^100) */
+    INV_BLK(INV_MUL(IT3_OFF, IT3_OFF, IT2_OFF));
+    INV_C_EVEN(IT3_OFF, IT3_OFF, 24);                 /* t3  = t3^(2^50)  */
+    INV_BLK(INV_MUL(IT1_OFF, IT3_OFF, IT1_OFF));
+    INV_C_ODD (IT1_OFF, IT1_OFF, 2);                  /* t1  = t1^(2^5)   */
+    INV_BLK(INV_MUL(IT1_OFF, IT1_OFF, IZ11_OFF));     /* out = t1 * z11   */
+#else
     register invert_state_t *_st asm("rbp") = &st;
     asm volatile(
         /* z2 = sq(z) */
@@ -1317,6 +1548,8 @@ static void fe_invert(uint64_t out[5], const uint64_t z[5]) {
           "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
           "memory", "cc"
     );
+
+#endif
 
     out[0] = st.t1[0]; out[1] = st.t1[1]; out[2] = st.t1[2];
     out[3] = st.t1[3]; out[4] = st.t1[4];
@@ -1572,11 +1805,9 @@ void fe_mul_ucode(const uint64_t *a, const uint64_t *b, uint64_t *out) {
         "mov r14, [rdi + 32]\n\t"
         "mov rdi, [rdi]\n\t"
 
-        /* Clear accumulators */
-        "xor eax, eax\n\t"
-        "xor r8d, r8d\n\t"
 
         /* 2^51-1: the patch masks limbs with a single AND against rcx. */
+        FE_MUL_R8
         "mov rcx, 0x7FFFFFFFFFFFF\n\t"
 
         /* Fire fe_mul microcode via vmwrite */
@@ -1626,8 +1857,6 @@ void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
         "imul rbx, r14, 19\n\t"
         "imul rdx, r11, 19\n\t"
 
-        /* Clear accumulators */
-        "xor eax, eax\n\t"
         FE_SQ_R8
 
         /* Fire fe_sq microcode via vmread (opcode: 0f 78 ca) */
@@ -1659,6 +1888,19 @@ void fe_sq_ucode(const uint64_t *a, uint64_t *out) {
  * Only rdi is already in place; 4 reg-moves stage the next iter.
  *
  * n must be >= 1. */
+#ifdef ENABLE_SQ_5ACC
+/* Five-accumulator build: n SEPARATE fe_sq_ucode calls, each round-tripping
+ * through memory, ping-ponged between two buffers so no store is reloaded
+ * from the same address straight away (probe_ldorder). This is the `tight`
+ * shape that survived 100,000 firings; the register-chained loop below it
+ * is the shape that resets the machine with this patch. */
+static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
+    uint64_t t[2][5];
+    fe_sq_ucode(a, t[0]);
+    for (int i = 1; i < n; i++) fe_sq_ucode(t[(i - 1) & 1], t[i & 1]);
+    memcpy(out, t[(n - 1) & 1], 40);
+}
+#else
 static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
     register const uint64_t *_a   asm("rdi") = a;
     register       uint64_t *_out asm("rsi") = out;
@@ -1686,7 +1928,6 @@ static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
         "lea r10, [r11 + r11]\n\t"
         "imul rbx, r14, 19\n\t"
         "imul rdx, r11, 19\n\t"
-        "xor eax, eax\n\t"
         FE_SQ_R8
 
         /* Fire fe_sq (vmread, 0f 78 ca) */
@@ -1720,6 +1961,7 @@ static void fe_sq_ucode_n(uint64_t *out, const uint64_t *a, int n) {
           "memory", "cc"
     );
 }
+#endif
 
 /* fe_add_sq_ucode: fused (x + y) → A_out, then A_out² → AA_out.
  *
@@ -3202,7 +3444,7 @@ int main(void) {
 
     if (freq_guard()) return 2;
 
-    assign_to_core(0);
+    bench_pin();
     init_match_and_patch();
     do_fix_IN_patch();
     install_field_patches();
@@ -3301,7 +3543,7 @@ static void profile_init_state(void) {
 int main(void) {
     printf("=== inline2 PER-OP PROFILER ===\n\n");
     if (freq_guard()) return 2;
-    assign_to_core(0);
+    bench_pin();
     init_match_and_patch();
     do_fix_IN_patch();
     install_field_patches();

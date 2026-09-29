@@ -67,17 +67,24 @@ static double fg_tsc_ghz(void)
 /* 0 = rdtsc ticks may be read as core cycles; non-zero = do not publish. */
 static int frequency_guard(void)
 {
+    /* Read the core being measured (BENCH_CORE), not a hard-coded cpu0. */
+    const char *bc = getenv("BENCH_CORE");
+    int core = (bc && *bc) ? atoi(bc) : 0;
+    char pc[96], pm[96], pg[96];
+    snprintf(pc, sizeof pc, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", core);
+    snprintf(pm, sizeof pm, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq", core);
+    snprintf(pg, sizeof pg, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor", core);
     long no_turbo = fg_read_long("/sys/devices/system/cpu/intel_pstate/no_turbo", -1);
-    long cur_khz  = fg_read_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", -1);
-    long max_khz  = fg_read_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", -1);
+    long cur_khz  = fg_read_long(pc, -1);
+    long max_khz  = fg_read_long(pm, -1);
     char gov[64];
-    fg_read_str("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov, sizeof gov);
+    fg_read_str(pg, gov, sizeof gov);
 
     double tsc_ghz  = fg_tsc_ghz();
     double core_ghz = cur_khz > 0 ? (double)cur_khz / 1e6 : 0.0;
     double ratio    = core_ghz > 0 ? tsc_ghz / core_ghz : 0.0;
 
-    printf("--- measurement conditions ---\n");
+    printf("--- measurement conditions (cpu%d) ---\n", core);
     printf("  TSC rate            %.4f GHz  (calibrated vs CLOCK_MONOTONIC)\n", tsc_ghz);
     printf("  core clock          %.4f GHz  (scaling_cur_freq)\n", core_ghz);
     printf("  scaling_max_freq    %.4f GHz\n", max_khz > 0 ? (double)max_khz / 1e6 : 0.0);
@@ -86,8 +93,8 @@ static int frequency_guard(void)
            no_turbo == 1 ? "OFF (no_turbo=1)" :
            no_turbo == 0 ? "ON  (no_turbo=0)" : "unknown (no intel_pstate knob)");
     printf("  TSC / core          %.4f\n", ratio);
-    printf("FGUARD tsc_ghz=%.4f core_ghz=%.4f ratio=%.4f no_turbo=%ld governor=%s\n",
-           tsc_ghz, core_ghz, ratio, no_turbo, gov);
+    printf("FGUARD core=%d tsc_ghz=%.4f core_ghz=%.4f ratio=%.4f no_turbo=%ld governor=%s\n",
+           core, tsc_ghz, core_ghz, ratio, no_turbo, gov);
 
     int bad = 0;
     if (no_turbo != 1) {
@@ -109,8 +116,8 @@ static int frequency_guard(void)
     }
     printf("\n  Refusing to produce publishable numbers unpinned. Fix with:\n"
            "    echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo\n"
-           "    echo userspace | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor\n"
-           "    echo 1100000  | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed\n"
+           "    echo userspace | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor\n"
+           "    echo 1100000  | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_setspeed\n"
            "  (or re-run with ALLOW_UNPINNED=1 for ratios only)\n\n");
     return 1;
 }

@@ -1,0 +1,88 @@
+=== LEVEL 1: isolated fe_mul / fe_sq kernel cost (4x64 saturated) ===
+harness: 128 ops/sample, 50 samples x 20 round-robin phases = 1000 pooled samples/arm, ping-pong dependent chain
+
+PINNED core=1 sched_getcpu=1
+--- measurement conditions (cpu1) ---
+  TSC rate            1.0944 GHz  (calibrated vs CLOCK_MONOTONIC)
+  core clock          1.0944 GHz  (scaling_cur_freq)
+  scaling_max_freq    1.1000 GHz
+  governor            userspace
+  turbo               OFF (no_turbo=1)
+  TSC / core          1.0000
+FGUARD core=1 tsc_ghz=1.0944 core_ghz=1.0944 ratio=1.0000 no_turbo=1 governor=userspace
+  => pinned: rdtsc ticks == core cycles, absolute counts are valid
+
+4x64 mul patch: 75 triads at U7c00 (vmwrite hook)
+microcode and amd64-64 asm vs s2n-bignum: OK (0 mismatches / 8000)
+=== RFC 7748 Test Vectors (amd64-64 ladder + 4×64 microcode) ===
+
+--- Vector 1 ---
+  got     : c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  expect: c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  PASS
+
+--- Vector 2 ---
+  got     : 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  expect: 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  PASS
+
+--- Iterated test (1 round, scalar=u=9) ---
+  got     : 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  expect: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  PASS
+
+--- Iterated test (1000 rounds) ---
+  got     : 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  expect: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  PASS
+
+=== RFC 7748: 4 / 4 passed ===
+
+RFC 7748 OK - the patch being timed is the verified one.
+
+dispatch-floor probe installed: 1 triad (ZEROEXT rdi,rdi) at the vmwrite hook
+4x64 mul patch: 75 triads at U7c00 (vmwrite hook)
+=== RFC 7748 Test Vectors (amd64-64 ladder + 4×64 microcode) ===
+
+--- Vector 1 ---
+  got     : c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  expect: c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+  PASS
+
+--- Vector 2 ---
+  got     : 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  expect: 95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957
+  PASS
+
+--- Iterated test (1 round, scalar=u=9) ---
+  got     : 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  expect: 422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079
+  PASS
+
+--- Iterated test (1000 rounds) ---
+  got     : 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  expect: 684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51
+  PASS
+
+=== RFC 7748: 4 / 4 passed ===
+
+
+=== Table K1 (4x64) - kernel latency, dependent chain ===
+  backend                                    fe_mul    fe_sq
+  microcode 4x64 (sq = mul(a,a))              186.3    190.1
+  amd64-64 qhasm asm                          100.9     90.4
+  s2n-bignum verified asm (_alt)              110.3    108.4
+
+=== floors ===
+  microcode wrapper + redirection              35.3     35.3
+  native call + memory round trip              10.4      7.4
+
+=== Table K3 (4x64) - four independent chains ===
+  microcode 4x64                              189.2    186.7
+  amd64-64 qhasm asm                          102.4     85.5
+  s2n-bignum verified asm (_alt)              107.7    104.8
+
+  drift check: fe_mul re-measured after the floor block = 188.4 (main 186.3, +1.12%)
+
+raw arms written to bench/results/kernel_sweep/gcc-13_Os/kernel_4x64.txt
+(checksum 17229240352073152228)

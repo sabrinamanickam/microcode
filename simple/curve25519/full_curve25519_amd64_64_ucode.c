@@ -35,6 +35,7 @@
 #include "../../../include/patch.h"
 #include "../../../include/ucode_macro.h"
 #include "../../../include/misc.h"
+#include "include/bench_core.h"
 
 typedef uint64_t fe4[4];
 
@@ -131,11 +132,17 @@ static void install_mul_patch(void) {
       ADC_DSZ64_DRR(TMP4, TMP4, TMP9), NOP_SEQWORD },
     { GENARITHFLAGS_RR(TMP4, TMP4), ADC_DSZ64_DRR(TMP5, TMP5, TMP9),
       GENARITHFLAGS_RR(TMP5, TMP5), NOP_SEQWORD },
-    { ADC_DSZ64_DRR(TMP6, TMP6, TMP9), NOP, NOP, NOP_SEQWORD },
-
-    { ZEROEXT_DSZ64_DR(R15, TMP3), ZEROEXT_DSZ64_DR(R9, TMP4),
-      ZEROEXT_DSZ64_DR(R10, TMP5), NOP_SEQWORD },
-    { ZEROEXT_DSZ64_DR(R13, TMP6), NOP, NOP, END_SEQWORD }
+    /* Third fold: the carry out of TMP6 above is worth 2^256 = 38 (mod p) and
+     * used to be DROPPED -- all-ones operands came out 38 short (found
+     * 2026-09-27 by bench_kernel_4x64's edge-case check, confirmed in
+     * lib/ucode_sim.py). A carry here means the sum wrapped, so TMP3 < 2^11
+     * and adding 38*c cannot carry again. Same 3-triad footprint as before;
+     * the ADC->SETCC flag read is slot 1 -> slot 2, the confirmed ordering. */
+    { ZEROEXT_DSZ64_DR(R9, TMP4), ADC_DSZ64_DRR(TMP6, TMP6, TMP9),
+      SETCC_CONDB_DR(TMP8, TMP6), NOP_SEQWORD },
+    { MUL_DSZ64_DIR(RCX, 38, TMP8), ZEROEXT_DSZ64_DR(R10, TMP5),
+      ZEROEXT_DSZ64_DR(R13, TMP6), NOP_SEQWORD },
+    { ADD_DSZ64_DRR(R15, TMP3, TMP8), NOP, NOP, END_SEQWORD }
     };
     patch_ucode(0x7c00, patch, ARRAY_SZ(patch));
     hook_match_and_patch(0, 0x0cd8, 0x7c00);
@@ -303,7 +310,7 @@ static int cmp_u64(const void *a, const void *b) {
 int main(void) {
     printf("=== X25519: amd64-64 ladder + 4×64 chained-ADC microcode field ops ===\n\n");
 
-    assign_to_core(0);
+    bench_pin();
     init_match_and_patch();
     do_fix_IN_patch();
     install_mul_patch();

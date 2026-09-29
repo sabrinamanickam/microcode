@@ -1,0 +1,19 @@
+00 MUL_A24 + 5acc fe_sq (unchained inversion)
+10 about to install the MUL_A24 layout
+11 installed
+20 about to fire ONE normal fe_mul (check triad must fall through)
+20 survived: correct
+21 about to fire 1000 normal fe_mul, random limbs < 2^54
+21 survived, 0 wrong
+30 about to fire ONE fused firing (check jumps to prologue, goto back)
+30 survived: correct
+31 about to fire fused edge cases
+31 survived, 0 wrong
+32 about to fire 10000 fused + 10000 normal, interleaved
+32 survived, 0 wrong
+40 about to run RFC 7748 (vector 1 + iterated x1000) through the fused ladder
+40 fused OK, native-tail OK, production x25519 OK
+50 timing
+51 timing done
+52 RFC through fused ladder after timing: OK
+99 microcode restored; verdict PASS

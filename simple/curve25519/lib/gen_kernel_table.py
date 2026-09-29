@@ -2,12 +2,12 @@
 """gen_kernel_table.py — turn bench_kernel_out.txt into the paper's LEVEL 1
 kernel-latency table (markdown + LaTeX).
 
-Usage:  python3 lib/gen_kernel_table.py [bench_kernel_out.txt]
+Usage:  python3 lib/gen_kernel_table.py [bench/bench_kernel_out.txt]
 Writes: KERNEL_TABLE.md, kernel_table.tex
 """
 import sys, os, datetime
 
-src = sys.argv[1] if len(sys.argv) > 1 else "bench_kernel_out.txt"
+src = sys.argv[1] if len(sys.argv) > 1 else "bench/bench_kernel_out.txt"
 A, meta = {}, {}
 for ln in open(src):
     if ln.startswith("#"):
@@ -16,7 +16,7 @@ for ln in open(src):
                 k, v = tok.split("=", 1); meta[k] = v
         continue
     f = ln.split()
-    if len(f) == 3:
+    if len(f) >= 3:            # label median min [p10 p90]
         A[f[0]] = (float(f[1]), float(f[2]))
 
 def m(k):
@@ -74,7 +74,7 @@ three-level evaluation:
   of memory. Operands **ping-pong between two distinct field slots**, so the
   dependency is real without the same-address store-then-load STLF stall that
   inflated earlier `fe_sq` microbenchmarks.
-* Round-robin phases; per-arm median of the samples, best median across phases.
+* Round-robin phases; every sample of an arm pooled, median of the pool.
 * Frequency pinned (`no_turbo=1`, `userspace` governor at 1.1 GHz) so RDTSC
   ticks are core cycles. **An unpinned run understates every number below by
   roughly 2.2×** — see the units note at the end.

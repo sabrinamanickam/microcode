@@ -1,0 +1,64 @@
+# bench_kernel raw arms: label median min p10 p90 (cycles/op, pooled)
+# root=1 ops_per_sample=128 samples=50 phases=20 pooled=1000 core=1
+# selection=best-config-per-contender configs=24 key=<contender>_mul_lat
+# contender uc: gcc-11 -O2 (103.73)
+# contender ossl: gcc-11 -O3 (97.09)
+# contender fiat: gcc-13 -O3 (127.84)
+# contender copt: clang-17 -O3 (141.30)
+# contender a51: gcc-11 -O3 (145.95)
+# contender hc: clang-14 -O3 (140.17)
+# contender s2n: gcc-11 -Os (108.83)
+# contender nfloor: clang-14 -Os (9.14)
+uc_mul_lat         103.73   103.62   103.65   103.81
+uc_sq_lat           73.02    72.92    72.95    73.09
+uc_mul_tput        100.95   100.84   100.87   101.02
+uc_sq_tput          70.00    69.91    69.93    70.07
+wrap_mul            10.21    10.16    10.18    10.23
+wrap_sq              7.77     7.73     7.76     7.80
+uc_alt_lat          87.98    87.88    87.91    88.05
+uc_scat_lat        103.73   103.62   103.65   103.81
+ossl_alt_lat        85.63    85.53    85.56    85.70
+fiat_alt_lat       118.06   117.91   117.95   118.23
+fiat_mul_lat       127.84   127.73   127.75   127.93
+fiat_sq_lat        107.09   106.96   107.00   107.16
+copt_mul_lat       141.30   141.20   141.23   141.39
+copt_sq_lat        118.82   118.71   118.74   118.91
+a51_mul_lat        145.95   145.83   145.86   146.03
+a51_sq_lat         118.79   118.66   118.70   118.87
+hc_mul_lat         140.17   140.04   140.06   140.26
+hc_sq_lat          106.46   106.30   106.37   106.55
+fiat_mul_nb        127.84   127.73   127.75   127.92
+fiat_sq_nb         107.08   106.97   107.00   107.16
+copt_mul_nb        141.31   141.20   141.23   141.39
+copt_sq_nb         118.82   118.71   118.74   118.91
+a51_mul_nb         145.95   145.83   145.86   146.03
+a51_sq_nb          118.79   118.66   118.70   118.87
+hc_mul_nb          136.66   136.52   136.57   136.76
+hc_sq_nb           103.91   103.79   103.82   103.99
+fiat_mul_tput      122.62   122.49   122.52   122.70
+fiat_sq_tput       106.62   106.50   106.53   106.70
+copt_mul_tput      139.25   139.12   139.16   139.34
+copt_sq_tput       120.79   120.68   120.70   120.88
+a51_mul_tput       145.95   145.83   145.87   146.04
+a51_sq_tput        119.53   119.41   119.44   119.61
+hc_mul_tput        144.79   144.66   144.70   144.88
+hc_sq_tput         108.62   108.50   108.54   108.71
+ossl_mul_lat        97.09    96.98    97.01    97.16
+ossl_sq_lat         73.17    73.07    73.10    73.23
+ossl_mul_nb         97.09    96.98    97.00    97.17
+ossl_sq_nb          73.17    73.08    73.10    73.23
+ossl_mul_tput       97.09    96.98    97.01    97.16
+ossl_sq_tput        73.18    73.08    73.11    73.24
+s2n_mul_lat        108.83   108.72   108.73   108.91
+s2n_sq_lat         106.83   106.72   106.75   106.91
+s2n_mul_nb         108.82   108.70   108.73   108.90
+s2n_sq_nb          106.83   106.72   106.75   106.91
+s2n_mul_tput       108.46   108.34   108.38   108.55
+s2n_sq_tput        104.54   102.53   104.46   104.62
+nfloor_mul           9.14     9.10     9.12     9.16
+nfloor_sq            7.34     7.31     7.33     7.37
+floor_mul_lat       15.25    15.20    15.22    15.27
+floor_sq_lat        15.68    15.63    15.66    15.70
+floor_mul_tput      15.25    15.20    15.23    15.27
+floor_sq_tput       15.68    15.63    15.66    15.70
+uc_mul_recheck     103.77   103.68   103.71   103.87

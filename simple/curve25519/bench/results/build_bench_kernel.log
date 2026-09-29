@@ -1,0 +1,4 @@
+In file included from bench/bench_kernel.c:61:
+./full_curve25519_inline2.c:3206:13: warning: ‘benchmark’ defined but not used [-Wunused-function]
+ 3206 | static void benchmark(void) {
+      |             ^~~~~~~~~

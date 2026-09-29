@@ -1,0 +1,24 @@
+# bench_kernel_4x64 raw arms: label median min p10 p90 (cycles/op, pooled)
+# root=1 ops_per_sample=128 samples=50 phases=20 pooled=1000 core=1
+# selection=best-config-per-contender configs=24 key=<contender>_mul_lat
+# contender uc4: gcc-11 -O3 (179.03)
+# contender a64: clang-17 -O3 (98.89)
+# contender s2n: gcc-11 -O3 (108.80)
+# contender nfloor4: clang-14 -O3 (7.16)
+uc4_mul_lat        179.03   178.92   178.95   179.11
+uc4_sq_lat         183.93   183.80   183.87   184.01
+a64_mul_lat         98.89    98.78    98.81    98.97
+a64_sq_lat          90.89    90.78    90.81    90.97
+s2n_mul_lat        108.80   108.69   108.72   108.88
+s2n_sq_lat         107.41   107.29   107.32   107.48
+uc4_mul_tput       177.54   177.43   177.46   177.62
+uc4_sq_tput        177.54   177.43   177.46   177.62
+a64_mul_tput        98.68    98.51    98.59    98.77
+a64_sq_tput         85.58    85.44    85.50    85.72
+s2n_mul_tput       105.46   105.06   105.38   105.54
+s2n_sq_tput        102.14   102.02   102.05   102.22
+nfloor4_mul          7.16     7.12     7.14     7.17
+nfloor4_sq           6.17     6.14     6.16     6.19
+floor4_mul_lat      31.19    31.12    31.16    31.22
+floor4_mul_tput     31.19    31.12    31.16    31.22
+uc4_mul_recheck    179.10   179.00   179.03   179.18

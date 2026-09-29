@@ -1,0 +1,7 @@
+bench/bench_kernel_4x64.c:62:26: warning: unknown attribute 'noclone' ignored [-Wunknown-attributes]
+   62 | __attribute__((noinline, noclone))
+      |                          ^~~~~~~
+bench/bench_kernel_4x64.c:68:26: warning: unknown attribute 'noclone' ignored [-Wunknown-attributes]
+   68 | __attribute__((noinline, noclone))
+      |                          ^~~~~~~
+2 warnings generated.

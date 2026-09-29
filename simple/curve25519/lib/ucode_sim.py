@@ -15,6 +15,18 @@ Usage:
   python3 lib/ucode_sim.py full_curve25519_inline2.c sq_patch  sq
   python3 lib/ucode_sim.py full_curve25519_inline2.c mul_patch mul
   python3 lib/ucode_sim.py full_curve25519_inline2.c sq_patch_5acc sq --mask-r8
+  python3 lib/ucode_sim.py full_curve25519_inline2.c mul_patch mul --poison RAX,R8
+  python3 lib/ucode_sim.py full_curve25519_inline2.c mul_a24_prologue+mul_patch mula24
+
+mula24 checks E*(AA + 121665*E) with E in the a registers, AA in the b
+registers, 121665 in RAX. Arrays joined with '+' run back to back, which is
+the fall-through the MUL_A24 layout reaches after its check/goto.
+
+--poison R1,R2 seeds those registers with random 64-bit garbage on every trial
+instead of the wrapper's value, and statically reports the first op that reads
+each one before writing it. Use it before dropping a wrapper instruction that
+only exists to define a register: a patch that reads a poisoned register fails
+nearly every trial.
 
 Raw opcodes with no inst.h macro (IMUL64L) are only understood if the C source
 wraps them in a macro named like a normal op, e.g.
@@ -146,6 +158,34 @@ def parse(path, arr):
     return len(triads), prog
 
 
+_READS_SRCB = ('MUL_DSZ64_DRR', 'MUL_DSZ64_DIR')
+
+def op_regs(op):
+    """(reads, writes) of one op, in the macro's operand order."""
+    m = re.match(r'(\w+)\((.*)\)$', op)
+    if m is None:
+        return (), ()
+    n, a = m.group(1), [x.strip() for x in m.group(2).split(',')]
+    isreg = lambda x: re.match(r'^(R[0-9A-Z]+|TMP\d+)$', x) is not None
+    if n == 'GENARITHFLAGS_RR':
+        return tuple(a), ()
+    d, srcs = a[0], [x for x in a[1:] if isreg(x)]
+    w = [d] + ([srcs[-1]] if n in _READS_SRCB else [])
+    return tuple(srcs), tuple(w)
+
+
+def first_reads(prog, regs):
+    """For each reg, the index/op of its first read before any write (or None)."""
+    out, written = {}, set()
+    for i, op in enumerate(prog):
+        rd, wr = op_regs(op)
+        for r in regs:
+            if r in rd and r not in written and r not in out:
+                out[r] = (i, op)
+        written.update(wr)
+    return {r: out.get(r) for r in regs}
+
+
 def ref_mul(a, b):
     acc = [0] * 5
     for i in range(5):
@@ -177,10 +217,20 @@ def main():
     # five-accumulator patch instead wants 2^51-1 there as an AND mask:
     #   python3 lib/ucode_sim.py <file> sq_patch_5acc sq --mask-r8
     mask_r8 = '--mask-r8' in sys.argv
-    ntri, prog = parse(path, arr)
+    poison = []
+    if '--poison' in sys.argv:
+        poison = sys.argv[sys.argv.index('--poison') + 1].upper().split(',')
+    ntri, prog = 0, []
+    for part in arr.split('+'):          # e.g. mul_a24_prologue+mul_patch
+        t, pr = parse(path, part)
+        ntri += t; prog += pr
     real = [o for o in prog if o != 'NOP']
     print('%s: %d triads, %d real ops (%.2f ops/triad)'
           % (arr, ntri, len(real), len(real) / ntri))
+
+    for r, hit in first_reads(prog, poison).items():
+        print('  %s: %s' % (r, 'never read before written' if hit is None else
+                            'READ BEFORE WRITE at op %d: %s' % hit))
 
     random.seed(20260909)
     bad = 0
@@ -195,6 +245,12 @@ def main():
             a = [random.getrandbits(random.choice([51, 52, 53])) for _ in range(5)]
         b = a if kind == 'sq' else \
             [random.getrandbits(random.choice([51, 52, 53])) for _ in range(5)]
+        if kind == 'mula24':
+            # a = E (FE_SUB output, up to 2^53.1 in the ladder; test to 2^54),
+            # b = AA (fe_sq output, < 2^52)
+            a = [random.getrandbits(random.choice([51, 53, 54])) for _ in range(5)] \
+                if trial > 2 else a
+            b = [random.getrandbits(random.choice([51, 52])) for _ in range(5)]
 
         mm = Machine()
         if kind == 'sq':
@@ -215,11 +271,16 @@ def main():
                          'R10': b[3], 'RBX': b[4], 'RAX': 0, 'R8': 0,
                          'RCX': MASK51})
             outregs = ('R15', 'R13', 'R9', 'R10', 'RAX')
+            if kind == 'mula24':
+                mm.r.update({'RAX': 121665, 'R8': 0x5A24})
 
+        for r in poison:
+            mm.r[r] = random.getrandbits(64)
         for op in prog:
             mm.run(op)
         got = [mm.g(x) for x in outregs]
-        want = ref_mul(a, b)
+        want = ref_mul(a, [b[j] + 121665 * a[j] for j in range(5)]) \
+            if kind == 'mula24' else ref_mul(a, b)
         if canon(got) != canon(want):
             bad += 1
             if bad <= 3:

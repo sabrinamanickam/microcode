@@ -27,15 +27,27 @@
 #      the box.
 #
 # BENCH_CORE is the core that is measured on; HOUSEKEEPING_CORE absorbs the
-# steered interrupts. Core 0 stays the default benchmark core deliberately: the
-# microcode patch is installed per-core by the binary itself after it pins, and
-# core 0 is the configuration every previously published result used.
+# steered interrupts. Core 0 stays the default benchmark core so old commands
+# reproduce old results; the paper evaluation (bench/paper_eval.sh) sets
+# BENCH_CORE=1. The microcode patch is installed per-core by the binary itself
+# after it pins, so the core choice is symmetric.
 
 BENCH_CORE="${BENCH_CORE:-0}"
-HOUSEKEEPING_CORE="${HOUSEKEEPING_CORE:-1}"
+# The housekeeping core is whichever core is NOT measured (2-core N3350). A
+# fixed default of 1 would steer every IRQ ONTO the benchmark core when
+# BENCH_CORE=1.
+HOUSEKEEPING_CORE="${HOUSEKEEPING_CORE:-$(( BENCH_CORE == 0 ? 1 : 0 ))}"
+if (( HOUSEKEEPING_CORE == BENCH_CORE )); then
+    echo "ERROR: HOUSEKEEPING_CORE ($HOUSEKEEPING_CORE) == BENCH_CORE — IRQs would land on the measured core." >&2
+    exit 1
+fi
+export BENCH_CORE
 
 # Command prefix for every timed binary. Set by setup_isolation.
-BENCH_RUN="sudo taskset -c $BENCH_CORE"
+# `sudo env BENCH_CORE=…` matters: every harness re-pins itself with
+# assign_to_core(bench_core()), and sudo strips the caller's environment, so
+# without it the binary would silently move itself back to core 0.
+BENCH_RUN="sudo env BENCH_CORE=$BENCH_CORE taskset -c $BENCH_CORE"
 
 # Reported in the results header.
 ISOLATION_STATUS="not configured"
@@ -98,7 +110,7 @@ setup_isolation() {
 
     # SCHED_FIFO for the measured process, if chrt is available.
     if command -v chrt >/dev/null 2>&1; then
-        BENCH_RUN="sudo chrt -f 99 taskset -c $BENCH_CORE"
+        BENCH_RUN="sudo env BENCH_CORE=$BENCH_CORE chrt -f 99 taskset -c $BENCH_CORE"
         ISOLATION_STATUS="core $BENCH_CORE; $IRQS_STEERED IRQs steered to core $HOUSEKEEPING_CORE ($IRQS_UNMOVABLE per-CPU/unmovable); SCHED_FIFO 99"
     else
         ISOLATION_STATUS="core $BENCH_CORE; $IRQS_STEERED IRQs steered to core $HOUSEKEEPING_CORE ($IRQS_UNMOVABLE per-CPU/unmovable); chrt absent, normal priority"

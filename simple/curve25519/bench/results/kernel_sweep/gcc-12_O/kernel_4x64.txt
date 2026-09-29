@@ -1,0 +1,19 @@
+# bench_kernel_4x64 raw arms: label median min p10 p90 (cycles/op, pooled)
+# root=1 ops_per_sample=128 samples=50 phases=20 pooled=1000 core=1
+uc4_mul_lat        188.12   187.05   187.23   188.20
+uc4_sq_lat         189.62   189.52   189.55   189.69
+a64_mul_lat         98.93    98.82    98.84    99.01
+a64_sq_lat          90.88    90.77    90.80    90.94
+s2n_mul_lat        112.48   109.42   112.41   112.57
+s2n_sq_lat         108.15   108.02   108.05   108.21
+uc4_mul_tput       189.81   188.98   189.13   189.88
+uc4_sq_tput        189.66   189.56   189.59   189.73
+a64_mul_tput       100.33   100.20   100.24   100.40
+a64_sq_tput         85.42    85.31    85.34    85.50
+s2n_mul_tput       105.22   105.11   105.12   105.29
+s2n_sq_tput        105.73   105.43   105.65   105.81
+nfloor4_mul          9.34     9.30     9.32     9.35
+nfloor4_sq           7.09     7.06     7.08     7.16
+floor4_mul_lat      35.98    35.69    35.80    36.02
+floor4_mul_tput     35.95    35.64    35.73    35.99
+uc4_mul_recheck    187.17   187.07   187.08   188.16

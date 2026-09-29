@@ -34,15 +34,13 @@ CONFIGS=(
 # each "label:" printf line in full_curve25519_inline2.c, which is now the
 # primary multi-contender binary — full_curve25519 is kept on disk but no
 # longer benched, so full_curve25519_static's row left the table). One
-# contender is special — it comes from a standalone binary with its own
-# main() and a bare "min:"/"median:" output, built + run separately per config:
-#   - "amd64-64/ucode"  -> full_curve25519_amd64_64_ucode_static
+# pair is special — both come from bench/bench_table_4x64_static, which runs
+# them interleaved in ONE process (run_ctrl4x64):
+#   - "amd64-64/ucode"    amd64-64 framework + C ladder + 4x64 microcode
 #       (the 4x64 microcode patch can't coexist with the 5x51 patches that
 #        full_curve25519_inline2 installs, so it lives in its own binary)
-#   - "amd64-64/asm-Clad" -> full_curve25519_amd64_64_asmclad_static
-#       (the CONTROL that separates the field-op backend from the ladder
-#        rewrite: same C ladderstep.c as amd64-64/ucode, but amd64-64's own
-#        asm fe25519_mul.S/square.S. Pure native — no patch.)
+#   - "amd64-64/asm-Clad" the CONTROL: same C ladderstep.c as amd64-64/ucode,
+#       but amd64-64's own asm fe25519_mul.S/square.S. Pure native.
 CONTENDERS=(
     "ours/hand-C"
     "ours/fiat"
@@ -90,8 +88,21 @@ RUN_RC=0
 run_bench() {
     local bin="$1" attempt rc
     for (( attempt = 1; attempt <= BENCH_RETRIES; attempt++ )); do
+        # Re-assert the microcode debug unlock (MSR 0x1E6 bit 9) on the bench
+        # core before every run, as the Keccak sweep does. It is per-core and
+        # can be lost when the core sits in a deep C-state between configs;
+        # without it the harness dies with SIGILL on udbgrd/udbgwr.
+        sudo wrmsr -p "${BENCH_CORE:-0}" 0x1e6 0x200 2>/dev/null || true
         rc=0
         RUN_OUT=$($BENCH_RUN "$bin" 2>&1) || rc=$?
+        # Every harness prints "PINNED core=N sched_getcpu=M" after pinning
+        # itself (include/bench_core.h). A run that landed anywhere but
+        # BENCH_CORE is not a measurement on the stated core: reject it.
+        if (( rc == 0 )) && grep -q '^PINNED ' <<<"$RUN_OUT" && \
+           ! grep -q "^PINNED core=${BENCH_CORE:-0} sched_getcpu=${BENCH_CORE:-0}\$" <<<"$RUN_OUT"; then
+            echo "    [${bin##*/} ran on the wrong core: $(grep -m1 '^PINNED ' <<<"$RUN_OUT")]"
+            rc=97
+        fi
         if (( rc == 0 )); then
             RUN_RC=0
             (( attempt > 1 )) && echo "    [recovered on attempt $attempt/$BENCH_RETRIES]"
@@ -168,6 +179,62 @@ run_standalone() {
     fi
 }
 
+# run_ctrl4x64 <cfg> <cc> <cflags>
+#
+# The 4x64 saturated control, SAME PROCESS. bench/bench_table_4x64 hosts
+# amd64-64/ucode (C ladder + 4x64 microcode) and amd64-64/asm-Clad (the same C
+# ladder + amd64-64's qhasm mul/square) and interleaves them rep by rep, so the
+# field-backend ratio is immune to cross-process frequency/thermal state. The
+# two arms used to come from two separate standalone binaries, run one after
+# the other -- a cross-process ratio, which the methodology forbids elsewhere.
+# Parses the harness's "DATA tag|backend|median|min|p10|p90|detail" lines.
+run_ctrl4x64() {
+    local cfg="$1" cc="$2" cflags="$3" prog=bench/bench_table_4x64
+    local errlog="bench_table_4x64_err.log" run out label backend md mn p10 p90
+    declare -A c4_md=() c4_mn=() c4_p10=() c4_p90=()
+
+    if ! make -s PROG="$prog" CC="$cc" CFLAGS="$cflags" >/dev/null 2>"$errlog"; then
+        echo "[4X64 CONTROL BUILD FAILED]"
+        sed 's/^/    /' "$errlog"; rm -f "$errlog"
+        return 0
+    fi
+    rm -f "$errlog"
+
+    for (( run = 1; run <= RUNS_PER_CONFIG; run++ )); do
+        if ! run_bench ./"${prog}_static"; then
+            echo "[RUN FAILED after $BENCH_RETRIES attempts — $prog exit $RUN_RC;" \
+                 "skipping the 4x64 control for this config]"
+            echo "$RUN_OUT" | tail -30 | sed 's/^/    /'
+            failed_cfgs+=("$cfg / 4x64 control (exit $RUN_RC)")
+            return 0
+        fi
+        out="$RUN_OUT"
+        if ! grep -q "All 3 arms: 4/4 RFC 7748" <<<"$out"; then
+            echo "[4X64 CONTROL: RFC 7748 gate not passed — skipping this config]"
+            failed_cfgs+=("$cfg / 4x64 control (RFC 7748)")
+            return 0
+        fi
+        [ "$run" -eq 1 ] && grep '^DATA ' <<<"$out" | sed 's/^/    /'
+        while IFS='|' read -r tag backend md mn p10 p90 _; do
+            case "${tag#DATA }|$backend" in
+                "ctrl4x64|microcode")    label="amd64-64/ucode" ;;
+                "ctrl4x64|amd64-64 asm") label="amd64-64/asm-Clad" ;;
+                *) continue ;;
+            esac
+            c4_md["$label"]+="$md "; c4_mn["$label"]+="$mn "
+            c4_p10["$label"]+="$p10 "; c4_p90["$label"]+="$p90 "
+        done < <(grep '^DATA ' <<<"$out")
+    done
+
+    for label in "amd64-64/ucode" "amd64-64/asm-Clad"; do
+        [ -z "${c4_md[$label]:-}" ] && continue
+        note_repro "$cfg" "$label" ${c4_md[$label]}
+        record_result "$cfg" "$label" \
+            "$(median_of ${c4_md[$label]})" "$(min_of ${c4_mn[$label]})" \
+            "$(median_of ${c4_p10[$label]})" "$(median_of ${c4_p90[$label]})"
+    done
+}
+
 # run_matrix — the main sweep. For each active config: clean-rebuild
 # full_curve25519_inline2, run it, scrape every contender's "label: … min …
 # median …" line, then build+run the one standalone-binary contender
@@ -205,7 +272,8 @@ run_matrix() {
               amd64-64_*.o amd64-64-ucode_*.o amd64-64-asmclad_*.o \
               full_curve25519_static full_curve25519_inline2_static \
               full_curve25519_amd64_64_ucode_static \
-              full_curve25519_amd64_64_asmclad_static
+              bench/full_curve25519_amd64_64_asmclad_static \
+              bench/bench_table_4x64_static
 
         if ! make -s PROG=full_curve25519_inline2 CC="$cc" CFLAGS="$cflags" >/dev/null 2>build_err.log ; then
             echo "[BUILD FAILED]"
@@ -272,25 +340,11 @@ run_matrix() {
                 "$(median_of ${p90_runs[$label]:-})"
         done
 
-        # ── amd64-64/ucode: amd64-64 framework (driver, invert, pack/unpack,
-        #    cswap) with ladderstep+mul+square swapped for 4×64 chained-ADC
-        #    microcode. Same 4×64 saturated representation as amd64-64/asm —
-        #    but NOT the same ladder: ladderstep.S is replaced too, so
-        #    amd64-64/asm vs amd64-64/ucode is NOT a same-ladder field-op
-        #    comparison. The amd64-64/asm-Clad control below is the
-        #    same-ladder arm (see CONTROLS.md). Separate binary because the
-        #    4×64 patch can't coexist with inline2's 5×51 patches.
-        run_standalone "$cfg" full_curve25519_amd64_64_ucode "amd64-64/ucode" \
-                       "$cc" "$cflags" "[AMD64-64/UCODE BUILD FAILED]"
-
-        # ── amd64-64/asm-Clad: the CONTROL for the ladder-rewrite confound.
-        #    Same C ladderstep.c object source as amd64-64/ucode, but
-        #    amd64-64's own asm fe25519_mul.S / fe25519_square.S. So:
-        #      asm-Clad vs ucode = field-op backend, ladder held constant
-        #      asm      vs asm-Clad = the ladder-rewrite tax, on its own
-        #    Pure native (installs no patch); also prints an in-process
-        #    amd64-64/asm arm for a same-process ladder-tax ratio.
-        run_standalone "$cfg" full_curve25519_amd64_64_asmclad "amd64-64/asm-Clad" \
-                       "$cc" "$cflags" "[AMD64-64/ASM-CLAD BUILD FAILED]"
+        # ── 4x64 saturated control: amd64-64/ucode and amd64-64/asm-Clad share
+        #    amd64-64's framework AND the same C ladderstep.c; only fe_mul /
+        #    fe_sq differ. Measured interleaved in ONE process (see
+        #    run_ctrl4x64). Separate binary from inline2 because the 75-triad
+        #    4x64 patch can't coexist with inline2's 5x51 patches.
+        run_ctrl4x64 "$cfg" "$cc" "$cflags"
     done
 }
